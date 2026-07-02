@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
+import { gunzipSync } from "zlib";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -103,17 +104,49 @@ interface KiteInstrument {
   exchange: string;
 }
 
+function parseCsvLine(line: string) {
+  const values: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (char === "," && !inQuotes) {
+      values.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+
+  values.push(current.trim());
+  return values;
+}
+
 function parseInstrumentsCsv(csv: string): KiteInstrument[] {
-  const lines = csv.trim().split("\n");
-  const headers = lines[0].split(",");
-  return lines.slice(1).map((line) => {
-    const values = line.split(",");
+  const normalized = csv.replace(/^\uFEFF/, "").trim();
+  const lines = normalized.split("\n");
+  if (lines.length < 2) return [];
+
+  const headers = parseCsvLine(lines[0]);
+  return lines.slice(1).flatMap((line) => {
+    if (!line.trim()) return [];
+
+    const values = parseCsvLine(line);
     const row: Record<string, string> = {};
-    headers.forEach((h, i) => {
-      row[h.trim()] = values[i]?.trim() ?? "";
+    headers.forEach((header, index) => {
+      row[header.trim()] = values[index]?.trim() ?? "";
     });
-    return {
-      instrument_token: Number(row.instrument_token),
+
+    const instrumentToken = Number(row.instrument_token);
+    if (!Number.isFinite(instrumentToken)) return [];
+
+    return [{
+      instrument_token: instrumentToken,
       tradingsymbol: row.tradingsymbol,
       name: row.name,
       expiry: row.expiry || undefined,
@@ -122,16 +155,103 @@ function parseInstrumentsCsv(csv: string): KiteInstrument[] {
       instrument_type: row.instrument_type,
       segment: row.segment,
       exchange: row.exchange,
-    };
+    }];
   });
 }
+
+const instrumentsCache = new Map<string, { data: KiteInstrument[]; time: number }>();
+const INSTRUMENTS_CACHE_TTL = 60 * 60 * 1000;
 
 async function fetchInstruments(exchange: string): Promise<KiteInstrument[]> {
   const res = await fetch(`${KITE_BASE}/instruments/${exchange}`, {
     headers: { "X-Kite-Version": "3" },
   });
-  const csv = await res.text();
+
+  if (!res.ok) {
+    throw new Error(`Failed to fetch ${exchange} instruments (${res.status})`);
+  }
+
+  const buffer = Buffer.from(await res.arrayBuffer());
+  let csv: string;
+
+  try {
+    csv = gunzipSync(buffer).toString("utf-8");
+  } catch {
+    csv = buffer.toString("utf-8");
+  }
+
   return parseInstrumentsCsv(csv);
+}
+
+async function getCachedInstruments(exchange: string) {
+  const cached = instrumentsCache.get(exchange);
+  if (cached && Date.now() - cached.time < INSTRUMENTS_CACHE_TTL) {
+    return cached.data;
+  }
+
+  const data = await fetchInstruments(exchange);
+  instrumentsCache.set(exchange, { data, time: Date.now() });
+  return data;
+}
+
+function matchesOptionUnderlying(item: KiteInstrument, symbol: string) {
+  if (item.name === symbol) return true;
+  if (!item.tradingsymbol.startsWith(symbol)) return false;
+
+  const suffix = item.tradingsymbol.slice(symbol.length);
+  return suffix.length > 0 && /\d/.test(suffix[0]);
+}
+
+function filterOptionInstruments(instruments: KiteInstrument[], symbol: string, exchange: string) {
+  const optionSegment = exchange === "BFO" ? "BFO-OPT" : "NFO-OPT";
+
+  return instruments.filter((item) => {
+    if (item.segment !== optionSegment) return false;
+    if (item.instrument_type !== "CE" && item.instrument_type !== "PE") return false;
+    return matchesOptionUnderlying(item, symbol);
+  });
+}
+
+function getNearestExpiry(expiries: string[]) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const sorted = [...expiries].sort(
+    (a, b) => new Date(a).getTime() - new Date(b).getTime()
+  );
+  const upcoming = sorted.filter((expiry) => new Date(expiry) >= today);
+  return upcoming[0] ?? sorted[0];
+}
+
+async function fetchQuotesInBatches(
+  accessToken: string,
+  keys: string[],
+  batchSize = 400
+) {
+  const quotes: Record<string, {
+    last_price: number;
+    oi?: number;
+    volume?: number;
+    change?: number;
+    change_percent?: number;
+  }> = {};
+
+  for (let index = 0; index < keys.length; index += batchSize) {
+    const batch = keys.slice(index, index + batchSize);
+    const batchQuotes = await kiteGet<Record<string, {
+      last_price: number;
+      oi?: number;
+      volume?: number;
+      change?: number;
+      change_percent?: number;
+    }>>(
+      `/quote?${batch.map((key) => `i=${encodeURIComponent(key)}`).join("&")}`,
+      accessToken
+    );
+    Object.assign(quotes, batchQuotes);
+  }
+
+  return quotes;
 }
 
 let mcxInstrumentsCache: KiteInstrument[] | null = null;
@@ -142,7 +262,7 @@ async function getMcxInstruments() {
   if (mcxInstrumentsCache && Date.now() - mcxCacheTime < MCX_CACHE_TTL) {
     return mcxInstrumentsCache;
   }
-  mcxInstrumentsCache = await fetchInstruments("MCX");
+  mcxInstrumentsCache = await getCachedInstruments("MCX");
   mcxCacheTime = Date.now();
   return mcxInstrumentsCache;
 }
@@ -203,7 +323,7 @@ async function fetchHistoricalCandles(
   to: string
 ) {
   const [exchange, tradingsymbol] = resolvedKey.split(":");
-  const instruments = await fetchInstruments(exchange);
+  const instruments = await getCachedInstruments(exchange);
   const match = instruments.find((item) => item.tradingsymbol === tradingsymbol);
 
   if (!match) {
@@ -488,26 +608,24 @@ app.get("/api/kite/option-chain", async (req, res) => {
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
 
   try {
-    const allInstruments = await fetchInstruments(exchange);
-    const underlyingOptions = allInstruments.filter(
-      (item) =>
-        item.name === symbol &&
-        (item.instrument_type === "CE" || item.instrument_type === "PE")
-    );
+    const allInstruments = await getCachedInstruments(exchange);
+
+    if (allInstruments.length === 0) {
+      return res.status(502).json({ error: `Failed to load ${exchange} instrument master from Zerodha` });
+    }
+
+    const underlyingOptions = filterOptionInstruments(allInstruments, symbol, exchange);
 
     if (underlyingOptions.length === 0) {
       return res.status(404).json({ error: `No options found for ${symbol}` });
     }
 
-    const expiries = [...new Set(underlyingOptions.map((i) => i.expiry).filter(Boolean))].sort();
-    const nearestExpiry = expiries[0];
+    const expiries = [...new Set(underlyingOptions.map((i) => i.expiry).filter(Boolean))] as string[];
+    const nearestExpiry = getNearestExpiry(expiries);
     const expiryOptions = underlyingOptions.filter((i) => i.expiry === nearestExpiry);
     const quoteKeys = expiryOptions.map((i) => `${i.exchange}:${i.tradingsymbol}`);
 
-    const quotes = await kiteGet<Record<string, { last_price: number; oi?: number; volume?: number; change?: number; change_percent?: number }>>(
-      `/quote?${quoteKeys.map((k) => `i=${encodeURIComponent(k)}`).join("&")}`,
-      accessToken
-    );
+    const quotes = await fetchQuotesInBatches(accessToken, quoteKeys);
 
     const byStrike = new Map<number, { strike: number; ce?: unknown; pe?: unknown }>();
     for (const instrument of expiryOptions) {
@@ -533,7 +651,17 @@ app.get("/api/kite/option-chain", async (req, res) => {
     }
 
     const chain = Array.from(byStrike.values()).sort((a, b) => a.strike - b.strike);
-    const spotKey = exchange === "BFO" ? "BSE:SENSEX" : "NSE:NIFTY 50";
+    const spotKeys: Record<string, string> = {
+      NIFTY: "NSE:NIFTY 50",
+      BANKNIFTY: "NSE:NIFTY BANK",
+      FINNIFTY: "NSE:NIFTY FIN SERVICE",
+      SENSEX: "BSE:SENSEX",
+      RELIANCE: "NSE:RELIANCE",
+      TCS: "NSE:TCS",
+      INFY: "NSE:INFY",
+      HDFCBANK: "NSE:HDFCBANK",
+    };
+    const spotKey = spotKeys[symbol] ?? (exchange === "BFO" ? "BSE:SENSEX" : "NSE:NIFTY 50");
     let spotPrice = 0;
     try {
       const spotQuotes = await kiteGet<Record<string, { last_price: number }>>(
