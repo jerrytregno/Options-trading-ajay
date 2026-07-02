@@ -97,6 +97,21 @@ async function kitePost<T>(path: string, accessToken: string, body: Record<strin
   return parseKiteResponse<T>(json);
 }
 
+async function kitePostJson<T>(path: string, accessToken: string, body: unknown): Promise<T> {
+  const config = getKiteConfig();
+  const res = await fetch(`${KITE_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      "X-Kite-Version": "3",
+      Authorization: `token ${config.apiKey}:${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const json: unknown = await res.json();
+  return parseKiteResponse<T>(json);
+}
+
 interface KiteInstrument {
   instrument_token: number;
   tradingsymbol: string;
@@ -798,13 +813,31 @@ app.get("/api/kite/orders", async (req, res) => {
   }
 });
 
+app.post("/api/kite/order-margin", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  try {
+    const orders = Array.isArray(req.body) ? req.body : [req.body];
+    const data = await kitePostJson<unknown[]>("/margins/orders", accessToken, orders);
+    return res.json({ data: Array.isArray(data) ? data[0] : data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to calculate order margin";
+    return res.status(400).json({ error: message });
+  }
+});
+
 app.post("/api/kite/orders", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
   try {
-    const body: Record<string, string> = {};
+    const body: Record<string, string> = { variety: "regular" };
     for (const [key, value] of Object.entries(req.body)) {
+      if (value === undefined || value === null || value === "") continue;
       body[key] = String(value);
+    }
+    if (body.exchange === "NFO" && body.product === "CNC") {
+      body.product = "NRML";
     }
     const data = await kitePost<{ order_id: string }>("/orders/regular", accessToken, body);
     return res.json({ data });

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useKite } from "@/contexts/kite-context";
 import { type OptionChainRow, type OptionChainResponse, type OptionGreeks } from "@/types/kite";
@@ -190,6 +191,23 @@ export default function OptionsPage() {
                           <td className={cn("text-center font-semibold strike-col", isAtm && "strike-atm")}>
                             {formatNumber(row.strike, 0)}
                             {isAtm && <span className="atm-tag">ATM</span>}
+                            <div className="trade-actions mt-3">
+                              {([
+                                ["ce-buy", "CE B"],
+                                ["ce-sell", "CE S"],
+                                ["pe-buy", "PE B"],
+                                ["pe-sell", "PE S"],
+                              ] as const).map(([leg, label]) => (
+                                <Link
+                                  key={leg}
+                                  to={`/dashboard/trade?strike=${row.strike}&leg=${leg}`}
+                                  className="btn btn-ghost btn-sm"
+                                  style={{ fontSize: "0.625rem", padding: "0.125rem 0.375rem", height: "auto" }}
+                                >
+                                  {label}
+                                </Link>
+                              ))}
+                            </div>
                           </td>
 
                           <td className="text-right font-medium text-down">

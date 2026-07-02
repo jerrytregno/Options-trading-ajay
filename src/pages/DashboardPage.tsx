@@ -169,7 +169,7 @@ export default function DashboardPage() {
           <div className="grid-2">
             {[
               { href: "/dashboard/options", label: "Nifty Options", desc: "Live CE/PE chain with Greeks" },
-              { href: "/dashboard/trade", label: "Place Order", desc: "Buy or sell options" },
+              { href: "/dashboard/trade", label: "Order Ticket", desc: "Call/Put buy & sell with margin" },
               { href: "/dashboard/portfolio", label: "Portfolio", desc: "View positions & P&L" },
               { href: "/dashboard/settings", label: "Settings", desc: "Manage Kite connection" },
             ].map((a) => (
