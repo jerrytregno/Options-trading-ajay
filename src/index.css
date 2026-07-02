@@ -208,17 +208,40 @@ td { padding: 0.75rem 1rem; border-bottom: 1px solid rgba(36, 48, 71, 0.5); }
   border-color: rgba(59, 130, 246, 0.5);
   background: rgba(59, 130, 246, 0.1);
 }
-.tv-chart {
-  width: 100%; min-height: 520px; border-radius: 8px; overflow: hidden;
+.tv-chart,
+.kite-chart {
+  width: 100%; min-height: 420px; border-radius: 8px; overflow: hidden;
   border: 1px solid var(--border); background: #0f1419;
 }
-.tv-mini-grid {
+.kite-chart-wrap { display: flex; flex-direction: column; gap: 0.75rem; }
+.kite-chart-meta {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 1rem; padding: 0 0.25rem;
+}
+.kite-chart-empty {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 220px;
+}
+.tv-mini-grid,
+.kite-mini-grid {
   display: grid; gap: 1rem;
   grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
 }
-.tv-mini-card {
+.tv-mini-card,
+.kite-mini-card {
   border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg); overflow: hidden;
+}
+.kite-mini-header {
+  padding: 0.625rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.kite-mini-card-btn {
+  padding: 0; border: none; background: transparent; color: inherit;
+  text-align: left; cursor: pointer; border-radius: 8px;
+}
+.kite-mini-card-btn:hover .kite-mini-card {
+  border-color: rgba(59, 130, 246, 0.35);
 }
 .tv-mini-label {
   padding: 0.625rem 0.75rem; font-size: 0.875rem; font-weight: 600;

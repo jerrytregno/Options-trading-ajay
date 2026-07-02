@@ -17,7 +17,6 @@ interface WatchlistQuote {
   label: string;
   segment: WatchlistSegment;
   kiteKey: string;
-  tradingViewSymbol: string;
   quote?: QuoteData;
 }
 
@@ -174,7 +173,7 @@ export default function DashboardPage() {
           </div>
           <div className="grid-2">
             {[
-              { href: "/dashboard/charts", label: "Market Charts", desc: "TradingView history for watchlist" },
+              { href: "/dashboard/charts", label: "Market Charts", desc: "Zerodha history for watchlist" },
               { href: "/dashboard/options", label: "Options Chain", desc: "Analyze CE/PE strikes" },
               { href: "/dashboard/trade", label: "Place Order", desc: "Buy or sell options" },
               { href: "/dashboard/portfolio", label: "Portfolio", desc: "View positions & P&L" },

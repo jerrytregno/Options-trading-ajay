@@ -170,6 +170,57 @@ async function resolveWatchlistKeys() {
   });
 }
 
+async function resolveWatchlistInstrument(idOrKey: string) {
+  const item = WATCHLIST_ITEMS.find((entry) => entry.id === idOrKey);
+  if (item) {
+    if (item.resolveMcx) {
+      const mcxInstruments = await getMcxInstruments().catch(() => [] as KiteInstrument[]);
+      return resolveMcxKey(item.kiteKey, mcxInstruments) ?? `MCX:${item.kiteKey}`;
+    }
+    return item.kiteKey;
+  }
+
+  return findInstrumentKey(idOrKey);
+}
+
+function formatKiteDateTime(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function getHistoricalDateRange(days: number) {
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - days);
+  return { from: formatKiteDateTime(from), to: formatKiteDateTime(to) };
+}
+
+async function fetchHistoricalCandles(
+  accessToken: string,
+  resolvedKey: string,
+  interval: string,
+  from: string,
+  to: string
+) {
+  const [exchange, tradingsymbol] = resolvedKey.split(":");
+  const instruments = await fetchInstruments(exchange);
+  const match = instruments.find((item) => item.tradingsymbol === tradingsymbol);
+
+  if (!match) {
+    throw new Error(`Instrument not found: ${resolvedKey}`);
+  }
+
+  const data = await kiteGet<{ candles: unknown[] }>(
+    `/instruments/historical/${match.instrument_token}/${interval}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    accessToken
+  );
+
+  return {
+    instrument: resolvedKey,
+    candles: data.candles ?? data,
+  };
+}
+
 async function findInstrumentKey(instrument: string) {
   const [exchange, symbol] = instrument.split(":");
   if (!exchange || !symbol) return instrument;
@@ -322,7 +373,6 @@ app.get("/api/kite/watchlist-quotes", async (req, res) => {
         label: item.label,
         segment: item.segment,
         kiteKey: item.resolvedKey,
-        tradingViewSymbol: item.tradingViewSymbol,
         quote: quote
           ? {
               last_price: quote.last_price,
@@ -342,40 +392,90 @@ app.get("/api/kite/watchlist-quotes", async (req, res) => {
 
 app.get("/api/kite/historical", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
+  const id = req.query.id as string | undefined;
   const instrument = req.query.instrument as string | undefined;
   const interval = (req.query.interval as string | undefined) ?? "day";
+  const days = Math.min(Math.max(Number(req.query.days ?? 365), 1), 730);
   const from = req.query.from as string | undefined;
   const to = req.query.to as string | undefined;
 
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
-  if (!instrument || !from || !to) {
-    return res.status(400).json({ error: "instrument, from, and to query params are required" });
+  if (!id && !instrument) {
+    return res.status(400).json({ error: "id or instrument query param is required" });
   }
 
   try {
-    const resolvedKey = await findInstrumentKey(instrument);
-    const [exchange, tradingsymbol] = resolvedKey.split(":");
-    const instruments = await fetchInstruments(exchange);
-    const match = instruments.find((item) => item.tradingsymbol === tradingsymbol);
-
-    if (!match) {
-      return res.status(404).json({ error: `Instrument not found: ${resolvedKey}` });
-    }
-
-    const candles = await kiteGet<{ candles: unknown[] }>(
-      `/instruments/historical/${match.instrument_token}/${interval}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-      accessToken
+    const resolvedKey = id
+      ? await resolveWatchlistInstrument(id)
+      : await findInstrumentKey(instrument!);
+    const range = from && to ? { from, to } : getHistoricalDateRange(days);
+    const historical = await fetchHistoricalCandles(
+      accessToken,
+      resolvedKey,
+      interval,
+      range.from,
+      range.to
     );
 
     return res.json({
       data: {
-        instrument: resolvedKey,
+        id: id ?? null,
+        instrument: historical.instrument,
         interval,
-        candles: candles.candles ?? candles,
+        candles: historical.candles,
       },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch historical data";
+    return res.status(401).json({ error: message });
+  }
+});
+
+app.get("/api/kite/watchlist-history", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  const interval = (req.query.interval as string | undefined) ?? "day";
+  const days = Math.min(Math.max(Number(req.query.days ?? 365), 1), 730);
+
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  try {
+    const range = getHistoricalDateRange(days);
+    const resolved = await resolveWatchlistKeys();
+
+    const data = await Promise.all(
+      resolved.map(async (item) => {
+        try {
+          const historical = await fetchHistoricalCandles(
+            accessToken,
+            item.resolvedKey,
+            interval,
+            range.from,
+            range.to
+          );
+
+          return {
+            id: item.id,
+            label: item.label,
+            segment: item.segment,
+            kiteKey: historical.instrument,
+            candles: historical.candles,
+          };
+        } catch (error) {
+          return {
+            id: item.id,
+            label: item.label,
+            segment: item.segment,
+            kiteKey: item.resolvedKey,
+            candles: [],
+            error: error instanceof Error ? error.message : "Failed to fetch historical data",
+          };
+        }
+      })
+    );
+
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to fetch watchlist history";
     return res.status(401).json({ error: message });
   }
 });
