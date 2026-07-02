@@ -7,6 +7,11 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import { WATCHLIST_ITEMS } from "../src/lib/watchlist.js";
+import {
+  calculateGreeks,
+  filterStrikesAroundAtm,
+  findAtmStrike,
+} from "../src/lib/greeks.js";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config();
@@ -604,6 +609,7 @@ app.get("/api/kite/option-chain", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   const symbol = (req.query.symbol as string) ?? "NIFTY";
   const exchange = (req.query.exchange as string) ?? "NFO";
+  const expiryParam = req.query.expiry as string | undefined;
 
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
 
@@ -621,36 +627,10 @@ app.get("/api/kite/option-chain", async (req, res) => {
     }
 
     const expiries = [...new Set(underlyingOptions.map((i) => i.expiry).filter(Boolean))] as string[];
-    const nearestExpiry = getNearestExpiry(expiries);
-    const expiryOptions = underlyingOptions.filter((i) => i.expiry === nearestExpiry);
-    const quoteKeys = expiryOptions.map((i) => `${i.exchange}:${i.tradingsymbol}`);
+    const selectedExpiry = expiryParam && expiries.includes(expiryParam)
+      ? expiryParam
+      : getNearestExpiry(expiries);
 
-    const quotes = await fetchQuotesInBatches(accessToken, quoteKeys);
-
-    const byStrike = new Map<number, { strike: number; ce?: unknown; pe?: unknown }>();
-    for (const instrument of expiryOptions) {
-      const key = `${instrument.exchange}:${instrument.tradingsymbol}`;
-      const quoteData = quotes[key];
-      const row = byStrike.get(instrument.strike!) ?? { strike: instrument.strike! };
-      const enriched = {
-        ...instrument,
-        quote: quoteData
-          ? {
-              instrument_token: instrument.instrument_token,
-              last_price: quoteData.last_price,
-              change: quoteData.change ?? 0,
-              change_percent: quoteData.change_percent ?? 0,
-              volume: quoteData.volume ?? 0,
-              oi: quoteData.oi,
-            }
-          : undefined,
-      };
-      if (instrument.instrument_type === "CE") row.ce = enriched;
-      else row.pe = enriched;
-      byStrike.set(instrument.strike!, row);
-    }
-
-    const chain = Array.from(byStrike.values()).sort((a, b) => a.strike - b.strike);
     const spotKeys: Record<string, string> = {
       NIFTY: "NSE:NIFTY 50",
       BANKNIFTY: "NSE:NIFTY BANK",
@@ -662,6 +642,7 @@ app.get("/api/kite/option-chain", async (req, res) => {
       HDFCBANK: "NSE:HDFCBANK",
     };
     const spotKey = spotKeys[symbol] ?? (exchange === "BFO" ? "BSE:SENSEX" : "NSE:NIFTY 50");
+
     let spotPrice = 0;
     try {
       const spotQuotes = await kiteGet<Record<string, { last_price: number }>>(
@@ -673,8 +654,69 @@ app.get("/api/kite/option-chain", async (req, res) => {
       spotPrice = 0;
     }
 
+    const expiryOptions = underlyingOptions.filter((i) => i.expiry === selectedExpiry);
+    const allStrikes = [...new Set(expiryOptions.map((i) => i.strike!).filter(Boolean))];
+    const atmStrike = findAtmStrike(allStrikes, spotPrice);
+    const visibleStrikes = filterStrikesAroundAtm(allStrikes, atmStrike, 15);
+    const scopedOptions = expiryOptions.filter((i) => visibleStrikes.has(i.strike!));
+    const quoteKeys = [
+      ...scopedOptions.map((i) => `${i.exchange}:${i.tradingsymbol}`),
+      spotKey,
+    ];
+
+    const quotes = await fetchQuotesInBatches(accessToken, quoteKeys);
+    spotPrice = quotes[spotKey]?.last_price ?? spotPrice;
+
+    const byStrike = new Map<number, { strike: number; isAtm: boolean; ce?: unknown; pe?: unknown }>();
+    for (const instrument of scopedOptions) {
+      const key = `${instrument.exchange}:${instrument.tradingsymbol}`;
+      const quoteData = quotes[key];
+      const optionType = instrument.instrument_type as "CE" | "PE";
+      const greeks =
+        quoteData?.last_price && spotPrice > 0
+          ? calculateGreeks(spotPrice, instrument.strike!, selectedExpiry, quoteData.last_price, optionType)
+          : null;
+
+      const row = byStrike.get(instrument.strike!) ?? {
+        strike: instrument.strike!,
+        isAtm: instrument.strike === atmStrike,
+      };
+
+      const enriched = {
+        ...instrument,
+        quote: quoteData
+          ? {
+              instrument_token: instrument.instrument_token,
+              last_price: quoteData.last_price,
+              change: quoteData.change ?? 0,
+              change_percent: quoteData.change_percent ?? 0,
+              volume: quoteData.volume ?? 0,
+              oi: quoteData.oi,
+              greeks: greeks ?? undefined,
+            }
+          : undefined,
+      };
+
+      if (instrument.instrument_type === "CE") row.ce = enriched;
+      else row.pe = enriched;
+      byStrike.set(instrument.strike!, row);
+    }
+
+    const chain = Array.from(byStrike.values())
+      .map((row) => ({ ...row, isAtm: row.strike === atmStrike }))
+      .sort((a, b) => a.strike - b.strike);
+
     return res.json({
-      data: { symbol, exchange, expiry: nearestExpiry, expiries, spotPrice, chain },
+      data: {
+        symbol,
+        exchange,
+        expiry: selectedExpiry,
+        expiries,
+        spotPrice,
+        atmStrike,
+        chain,
+        updatedAt: new Date().toISOString(),
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch option chain";

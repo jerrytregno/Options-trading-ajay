@@ -8,6 +8,14 @@ export interface KiteProfile {
   order_types: string[];
 }
 
+export interface OptionGreeks {
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+  iv: number;
+}
+
 export interface KiteQuote {
   instrument_token: number;
   last_price: number;
@@ -17,6 +25,7 @@ export interface KiteQuote {
   oi?: number;
   oi_day_high?: number;
   oi_day_low?: number;
+  greeks?: OptionGreeks;
   depth?: {
     buy: { price: number; quantity: number }[];
     sell: { price: number; quantity: number }[];
@@ -67,8 +76,20 @@ export interface KiteHolding {
 
 export interface OptionChainRow {
   strike: number;
+  isAtm?: boolean;
   ce?: KiteInstrument & { quote?: KiteQuote };
   pe?: KiteInstrument & { quote?: KiteQuote };
+}
+
+export interface OptionChainResponse {
+  symbol: string;
+  exchange: string;
+  expiry: string;
+  expiries: string[];
+  spotPrice: number;
+  atmStrike: number;
+  chain: OptionChainRow[];
+  updatedAt: string;
 }
 
 export interface ApiResponse<T> {
