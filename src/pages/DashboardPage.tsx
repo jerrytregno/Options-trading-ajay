@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { ArrowUpRight, TrendingDown, TrendingUp } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useKite } from "@/contexts/kite-context";
-import { WATCHLIST_DEFAULT } from "@/types/kite";
+import { WATCHLIST_ITEMS, WATCHLIST_SEGMENT_LABELS, type WatchlistSegment } from "@/lib/watchlist";
 import { cn, formatCurrency, formatNumber, getChangeClass } from "@/lib/utils";
 
 interface QuoteData {
@@ -11,6 +11,17 @@ interface QuoteData {
   change: number;
   change_percent: number;
 }
+
+interface WatchlistQuote {
+  id: string;
+  label: string;
+  segment: WatchlistSegment;
+  kiteKey: string;
+  tradingViewSymbol: string;
+  quote?: QuoteData;
+}
+
+const SEGMENTS: WatchlistSegment[] = ["index", "equity", "commodity"];
 
 interface BalanceData {
   available: number;
@@ -21,7 +32,7 @@ interface BalanceData {
 
 export default function DashboardPage() {
   const { connected, configured, loginUrl } = useKite();
-  const [quotes, setQuotes] = useState<Record<string, QuoteData>>({});
+  const [watchlist, setWatchlist] = useState<WatchlistQuote[]>(WATCHLIST_ITEMS);
   const [positions, setPositions] = useState<{ pnl: number; quantity: number }[]>([]);
   const [balance, setBalance] = useState<BalanceData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -31,12 +42,15 @@ export default function DashboardPage() {
 
     async function load() {
       try {
-        const [quotesRes, positionsRes, marginsRes] = await Promise.all([
-          fetch(`/api/kite/quotes?instruments=${WATCHLIST_DEFAULT.join(",")}`, { credentials: "include" }),
+        const [watchlistRes, positionsRes, marginsRes] = await Promise.all([
+          fetch("/api/kite/watchlist-quotes", { credentials: "include" }),
           fetch("/api/kite/positions", { credentials: "include" }),
           fetch("/api/kite/margins", { credentials: "include" }),
         ]);
-        if (quotesRes.ok) { const { data } = await quotesRes.json(); setQuotes(data ?? {}); }
+        if (watchlistRes.ok) {
+          const { data } = await watchlistRes.json();
+          setWatchlist(Array.isArray(data) ? data : WATCHLIST_ITEMS);
+        }
         if (positionsRes.ok) {
           const { data } = await positionsRes.json();
           setPositions((data?.net ?? []).filter((p: { quantity: number }) => p.quantity !== 0));
@@ -94,36 +108,57 @@ export default function DashboardPage() {
       <div className="grid-2">
         <div className="card">
           <div className="flex-between mb-4">
-            <h3 className="card-title">Watchlist</h3>
-            <span className={`badge ${connected ? "badge-success" : "badge-warning"}`}>{connected ? "Live" : "Demo"}</span>
+            <div>
+              <h3 className="card-title">Watchlist</h3>
+              <p className="card-desc">Indices, equities, and MCX commodities</p>
+            </div>
+            <div className="flex gap-2">
+              <Link to="/dashboard/charts" className="btn btn-ghost btn-sm">View Charts</Link>
+              <span className={`badge ${connected ? "badge-success" : "badge-warning"}`}>{connected ? "Live" : "Demo"}</span>
+            </div>
           </div>
           {loading ? (
             <div className="spinner-center"><div className="spinner spinner-sm" /></div>
           ) : !connected ? (
             <div className="empty-state">
               <p className="empty-state-title">No live quotes yet</p>
-              <p style={{ fontSize: "0.875rem" }}>Connect your Zerodha Kite account to stream NIFTY, BANK NIFTY, and watchlist prices.</p>
+              <p style={{ fontSize: "0.875rem" }}>Connect your Zerodha Kite account to stream indices, stocks, and commodity prices.</p>
             </div>
           ) : (
-            <div className="flex" style={{ flexDirection: "column", gap: "0.5rem" }}>
-              {WATCHLIST_DEFAULT.map((key) => {
-                const quote = quotes[key];
-                const symbol = key.split(":")[1];
-                const change = quote?.change_percent ?? 0;
+            <div className="flex" style={{ flexDirection: "column", gap: "1rem" }}>
+              {SEGMENTS.map((segment) => {
+                const items = watchlist.filter((item) => item.segment === segment);
+                if (items.length === 0) return null;
+
                 return (
-                  <div key={key} className="watchlist-item">
-                    <div>
-                      <p className="font-medium">{symbol}</p>
-                      <p className="text-muted" style={{ fontSize: "0.75rem" }}>{key.split(":")[0]}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="font-semibold">{quote ? formatNumber(quote.last_price) : "—"}</p>
-                      {quote && (
-                        <p className={cn("flex gap-2", getChangeClass(change))} style={{ fontSize: "0.75rem", justifyContent: "flex-end" }}>
-                          {change >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
-                          {change >= 0 ? "+" : ""}{change.toFixed(2)}%
-                        </p>
-                      )}
+                  <div key={segment}>
+                    <p className="charts-segment-label">{WATCHLIST_SEGMENT_LABELS[segment]}</p>
+                    <div className="flex" style={{ flexDirection: "column", gap: "0.5rem" }}>
+                      {items.map((item) => {
+                        const quote = item.quote;
+                        const change = quote?.change_percent ?? 0;
+                        return (
+                          <Link
+                            key={item.id}
+                            to={`/dashboard/charts?symbol=${item.id}`}
+                            className="watchlist-item watchlist-item-link"
+                          >
+                            <div>
+                              <p className="font-medium">{item.label}</p>
+                              <p className="text-muted" style={{ fontSize: "0.75rem" }}>{item.kiteKey}</p>
+                            </div>
+                            <div className="text-right">
+                              <p className="font-semibold">{quote ? formatNumber(quote.last_price) : "—"}</p>
+                              {quote && (
+                                <p className={cn("flex gap-2", getChangeClass(change))} style={{ fontSize: "0.75rem", justifyContent: "flex-end" }}>
+                                  {change >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+                                  {change >= 0 ? "+" : ""}{change.toFixed(2)}%
+                                </p>
+                              )}
+                            </div>
+                          </Link>
+                        );
+                      })}
                     </div>
                   </div>
                 );
@@ -139,6 +174,7 @@ export default function DashboardPage() {
           </div>
           <div className="grid-2">
             {[
+              { href: "/dashboard/charts", label: "Market Charts", desc: "TradingView history for watchlist" },
               { href: "/dashboard/options", label: "Options Chain", desc: "Analyze CE/PE strikes" },
               { href: "/dashboard/trade", label: "Place Order", desc: "Buy or sell options" },
               { href: "/dashboard/portfolio", label: "Portfolio", desc: "View positions & P&L" },

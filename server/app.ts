@@ -5,6 +5,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
+import { WATCHLIST_ITEMS } from "../src/lib/watchlist.js";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config();
@@ -133,6 +134,61 @@ async function fetchInstruments(exchange: string): Promise<KiteInstrument[]> {
   return parseInstrumentsCsv(csv);
 }
 
+let mcxInstrumentsCache: KiteInstrument[] | null = null;
+let mcxCacheTime = 0;
+const MCX_CACHE_TTL = 60 * 60 * 1000;
+
+async function getMcxInstruments() {
+  if (mcxInstrumentsCache && Date.now() - mcxCacheTime < MCX_CACHE_TTL) {
+    return mcxInstrumentsCache;
+  }
+  mcxInstrumentsCache = await fetchInstruments("MCX");
+  mcxCacheTime = Date.now();
+  return mcxInstrumentsCache;
+}
+
+function resolveMcxKey(baseName: string, instruments: KiteInstrument[]) {
+  const futures = instruments
+    .filter((item) => item.name === baseName && item.instrument_type === "FUT" && item.expiry)
+    .sort((a, b) => new Date(a.expiry!).getTime() - new Date(b.expiry!).getTime());
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const nearest = futures.find((item) => new Date(item.expiry!) >= today) ?? futures[0];
+  return nearest ? `${nearest.exchange}:${nearest.tradingsymbol}` : null;
+}
+
+async function resolveWatchlistKeys() {
+  const mcxInstruments = await getMcxInstruments().catch(() => [] as KiteInstrument[]);
+
+  return WATCHLIST_ITEMS.map((item) => {
+    if (item.resolveMcx) {
+      const resolvedKey = resolveMcxKey(item.kiteKey, mcxInstruments) ?? `MCX:${item.kiteKey}`;
+      return { ...item, resolvedKey };
+    }
+    return { ...item, resolvedKey: item.kiteKey };
+  });
+}
+
+async function findInstrumentKey(instrument: string) {
+  const [exchange, symbol] = instrument.split(":");
+  if (!exchange || !symbol) return instrument;
+
+  const watchlistMatch = WATCHLIST_ITEMS.find((item) => item.id === symbol || item.kiteKey === symbol);
+  if (watchlistMatch?.resolveMcx) {
+    const mcxInstruments = await getMcxInstruments().catch(() => [] as KiteInstrument[]);
+    return resolveMcxKey(watchlistMatch.kiteKey, mcxInstruments) ?? instrument;
+  }
+
+  if (instrument.includes(":")) return instrument;
+
+  const mcxInstruments = await getMcxInstruments().catch(() => [] as KiteInstrument[]);
+  const resolvedMcx = resolveMcxKey(symbol, mcxInstruments);
+  if (resolvedMcx) return resolvedMcx;
+
+  return instrument;
+}
+
 app.get("/api/kite/status", async (req, res) => {
   const config = getKiteConfig();
 
@@ -239,6 +295,87 @@ app.get("/api/kite/quotes", async (req, res) => {
     return res.json({ data: quotes });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch quotes";
+    return res.status(401).json({ error: message });
+  }
+});
+
+app.get("/api/kite/watchlist-quotes", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  try {
+    const resolved = await resolveWatchlistKeys();
+    const keys = resolved.map((item) => item.resolvedKey);
+    const quotes = await kiteGet<Record<string, {
+      last_price: number;
+      change?: number;
+      change_percent?: number;
+    }>>(
+      `/quote?${keys.map((key) => `i=${encodeURIComponent(key)}`).join("&")}`,
+      accessToken
+    );
+
+    const data = resolved.map((item) => {
+      const quote = quotes[item.resolvedKey];
+      return {
+        id: item.id,
+        label: item.label,
+        segment: item.segment,
+        kiteKey: item.resolvedKey,
+        tradingViewSymbol: item.tradingViewSymbol,
+        quote: quote
+          ? {
+              last_price: quote.last_price,
+              change: quote.change ?? 0,
+              change_percent: quote.change_percent ?? 0,
+            }
+          : undefined,
+      };
+    });
+
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to fetch watchlist quotes";
+    return res.status(401).json({ error: message });
+  }
+});
+
+app.get("/api/kite/historical", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  const instrument = req.query.instrument as string | undefined;
+  const interval = (req.query.interval as string | undefined) ?? "day";
+  const from = req.query.from as string | undefined;
+  const to = req.query.to as string | undefined;
+
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+  if (!instrument || !from || !to) {
+    return res.status(400).json({ error: "instrument, from, and to query params are required" });
+  }
+
+  try {
+    const resolvedKey = await findInstrumentKey(instrument);
+    const [exchange, tradingsymbol] = resolvedKey.split(":");
+    const instruments = await fetchInstruments(exchange);
+    const match = instruments.find((item) => item.tradingsymbol === tradingsymbol);
+
+    if (!match) {
+      return res.status(404).json({ error: `Instrument not found: ${resolvedKey}` });
+    }
+
+    const candles = await kiteGet<{ candles: unknown[] }>(
+      `/instruments/historical/${match.instrument_token}/${interval}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      accessToken
+    );
+
+    return res.json({
+      data: {
+        instrument: resolvedKey,
+        interval,
+        candles: candles.candles ?? candles,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to fetch historical data";
     return res.status(401).json({ error: message });
   }
 });

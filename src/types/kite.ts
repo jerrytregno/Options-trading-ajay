@@ -87,10 +87,4 @@ export const POPULAR_UNDERLYINGS = [
   { symbol: "HDFCBANK", exchange: "NFO", label: "HDFC Bank" },
 ] as const;
 
-export const WATCHLIST_DEFAULT = [
-  "NSE:NIFTY 50",
-  "NSE:NIFTY BANK",
-  "NSE:RELIANCE",
-  "NSE:TCS",
-  "NSE:INFY",
-];
+export { WATCHLIST_DEFAULT, WATCHLIST_ITEMS } from "../lib/watchlist";
