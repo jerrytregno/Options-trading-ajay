@@ -1,0 +1,96 @@
+export interface KiteProfile {
+  user_id: string;
+  user_name: string;
+  email: string;
+  broker: string;
+  exchanges: string[];
+  products: string[];
+  order_types: string[];
+}
+
+export interface KiteQuote {
+  instrument_token: number;
+  last_price: number;
+  change: number;
+  change_percent: number;
+  volume: number;
+  oi?: number;
+  oi_day_high?: number;
+  oi_day_low?: number;
+  depth?: {
+    buy: { price: number; quantity: number }[];
+    sell: { price: number; quantity: number }[];
+  };
+}
+
+export interface KiteInstrument {
+  instrument_token: number;
+  exchange_token: number;
+  tradingsymbol: string;
+  name: string;
+  last_price: number;
+  expiry?: string;
+  strike?: number;
+  tick_size: number;
+  lot_size: number;
+  instrument_type: string;
+  segment: string;
+  exchange: string;
+}
+
+export interface KitePosition {
+  tradingsymbol: string;
+  exchange: string;
+  instrument_token: number;
+  product: string;
+  quantity: number;
+  overnight_quantity: number;
+  average_price: number;
+  last_price: number;
+  pnl: number;
+  m2m: number;
+  unrealised: number;
+  realised: number;
+}
+
+export interface KiteHolding {
+  tradingsymbol: string;
+  exchange: string;
+  isin: string;
+  quantity: number;
+  average_price: number;
+  last_price: number;
+  pnl: number;
+  day_change: number;
+  day_change_percentage: number;
+}
+
+export interface OptionChainRow {
+  strike: number;
+  ce?: KiteInstrument & { quote?: KiteQuote };
+  pe?: KiteInstrument & { quote?: KiteQuote };
+}
+
+export interface ApiResponse<T> {
+  data?: T;
+  error?: string;
+}
+
+export const POPULAR_UNDERLYINGS = [
+  { symbol: "NIFTY", exchange: "NFO", label: "Nifty 50" },
+  { symbol: "BANKNIFTY", exchange: "NFO", label: "Bank Nifty" },
+  { symbol: "FINNIFTY", exchange: "NFO", label: "Fin Nifty" },
+  { symbol: "SENSEX", exchange: "BFO", label: "Sensex" },
+  { symbol: "RELIANCE", exchange: "NFO", label: "Reliance" },
+  { symbol: "TCS", exchange: "NFO", label: "TCS" },
+  { symbol: "INFY", exchange: "NFO", label: "Infosys" },
+  { symbol: "HDFCBANK", exchange: "NFO", label: "HDFC Bank" },
+] as const;
+
+export const WATCHLIST_DEFAULT = [
+  "NSE:NIFTY 50",
+  "NSE:NIFTY BANK",
+  "NSE:RELIANCE",
+  "NSE:TCS",
+  "NSE:INFY",
+];
