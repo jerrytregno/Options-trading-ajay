@@ -2,7 +2,6 @@ import { Link, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   LineChart,
-  CandlestickChart,
   Settings,
   TrendingUp,
   Wallet,
@@ -17,9 +16,8 @@ import { useKite } from "@/contexts/kite-context";
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
-  { href: "/dashboard/charts", label: "Charts", icon: CandlestickChart },
   { href: "/dashboard/trade", label: "Trade", icon: TrendingUp },
-  { href: "/dashboard/options", label: "Options Chain", icon: LineChart },
+  { href: "/dashboard/options", label: "Nifty Options", icon: LineChart },
   { href: "/dashboard/portfolio", label: "Portfolio", icon: Wallet },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];

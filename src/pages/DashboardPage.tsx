@@ -112,7 +112,6 @@ export default function DashboardPage() {
               <p className="card-desc">Indices, equities, and MCX commodities</p>
             </div>
             <div className="flex gap-2">
-              <Link to="/dashboard/charts" className="btn btn-ghost btn-sm">View Charts</Link>
               <span className={`badge ${connected ? "badge-success" : "badge-warning"}`}>{connected ? "Live" : "Demo"}</span>
             </div>
           </div>
@@ -137,11 +136,7 @@ export default function DashboardPage() {
                         const quote = item.quote;
                         const change = quote?.change_percent ?? 0;
                         return (
-                          <Link
-                            key={item.id}
-                            to={`/dashboard/charts?symbol=${item.id}`}
-                            className="watchlist-item watchlist-item-link"
-                          >
+                          <div key={item.id} className="watchlist-item">
                             <div>
                               <p className="font-medium">{item.label}</p>
                               <p className="text-muted" style={{ fontSize: "0.75rem" }}>{item.kiteKey}</p>
@@ -155,7 +150,7 @@ export default function DashboardPage() {
                                 </p>
                               )}
                             </div>
-                          </Link>
+                          </div>
                         );
                       })}
                     </div>
@@ -173,8 +168,7 @@ export default function DashboardPage() {
           </div>
           <div className="grid-2">
             {[
-              { href: "/dashboard/charts", label: "Market Charts", desc: "Zerodha history for watchlist" },
-              { href: "/dashboard/options", label: "Options Chain", desc: "Analyze CE/PE strikes" },
+              { href: "/dashboard/options", label: "Nifty Options", desc: "Live CE/PE chain with Greeks" },
               { href: "/dashboard/trade", label: "Place Order", desc: "Buy or sell options" },
               { href: "/dashboard/portfolio", label: "Portfolio", desc: "View positions & P&L" },
               { href: "/dashboard/settings", label: "Settings", desc: "Manage Kite connection" },

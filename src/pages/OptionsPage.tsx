@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useKite } from "@/contexts/kite-context";
-import { POPULAR_UNDERLYINGS, type OptionChainRow, type OptionChainResponse, type OptionGreeks } from "@/types/kite";
+import { type OptionChainRow, type OptionChainResponse, type OptionGreeks } from "@/types/kite";
 import { cn, formatNumber } from "@/lib/utils";
 
-const REFRESH_MS = 2000;
+const REFRESH_MS = 1000;
 
 function formatGreek(value: number | undefined, digits = 2) {
   if (value === undefined || Number.isNaN(value)) return "—";
@@ -22,8 +22,6 @@ function GreeksCell({ greeks }: { greeks?: OptionGreeks }) {
 
 export default function OptionsPage() {
   const { connected, loginUrl } = useKite();
-  const [symbol, setSymbol] = useState("NIFTY");
-  const [exchange, setExchange] = useState("NFO");
   const [chain, setChain] = useState<OptionChainRow[]>([]);
   const [expiry, setExpiry] = useState("");
   const [spotPrice, setSpotPrice] = useState(0);
@@ -35,14 +33,14 @@ export default function OptionsPage() {
   const atmRowRef = useRef<HTMLTableRowElement | null>(null);
   const shouldScrollRef = useRef(true);
 
-  const loadChain = useCallback(async (sym: string, exch: string, currentExpiry?: string, initial = false) => {
+  const loadChain = useCallback(async (currentExpiry?: string, initial = false) => {
     if (!connected) return;
 
     if (initial) setLoading(true);
     else setRefreshing(true);
 
     try {
-      const params = new URLSearchParams({ symbol: sym, exchange: exch });
+      const params = new URLSearchParams();
       if (currentExpiry) params.set("expiry", currentExpiry);
 
       const res = await fetch(`/api/kite/option-chain?${params.toString()}`, { credentials: "include" });
@@ -68,18 +66,18 @@ export default function OptionsPage() {
   useEffect(() => {
     if (!connected) return;
     shouldScrollRef.current = true;
-    loadChain(symbol, exchange, undefined, true);
-  }, [symbol, exchange, connected, loadChain]);
+    loadChain(undefined, true);
+  }, [connected, loadChain]);
 
   useEffect(() => {
     if (!connected || !expiry) return;
 
     const interval = window.setInterval(() => {
-      loadChain(symbol, exchange, expiry, false);
+      loadChain(expiry, false);
     }, REFRESH_MS);
 
     return () => window.clearInterval(interval);
-  }, [connected, symbol, exchange, expiry, loadChain]);
+  }, [connected, expiry, loadChain]);
 
   useEffect(() => {
     if (!shouldScrollRef.current || !atmRowRef.current) return;
@@ -91,8 +89,8 @@ export default function OptionsPage() {
     <DashboardShell>
       <div className="flex-between flex-wrap gap-4 mb-6">
         <div className="page-header" style={{ marginBottom: 0 }}>
-          <h1>Options Chain</h1>
-          <p>Live CE/PE data from Zerodha Kite · refreshes every {REFRESH_MS / 1000}s</p>
+          <h1>Nifty 50 Options Chain</h1>
+          <p>Live CE/PE LTP from Zerodha Kite · refreshes every {REFRESH_MS / 1000}s</p>
         </div>
         <div className="flex gap-2 flex-wrap">
           {connected && spotPrice > 0 && (
@@ -116,7 +114,7 @@ export default function OptionsPage() {
 
       {!connected ? (
         <div className="card">
-          <p className="text-muted">Connect your Zerodha account to view live options chains.</p>
+          <p className="text-muted">Connect your Zerodha account to view the Nifty 50 options chain.</p>
           {loginUrl && (
             <a href={loginUrl} className="mt-4" style={{ display: "inline-block" }}>
               <button className="btn btn-primary">Connect Kite</button>
@@ -125,26 +123,10 @@ export default function OptionsPage() {
         </div>
       ) : (
         <>
-          <div className="flex flex-wrap gap-2 mb-4">
-            {POPULAR_UNDERLYINGS.map((item) => (
-              <button
-                key={item.symbol}
-                className={`btn btn-sm ${symbol === item.symbol ? "btn-primary" : "btn-outline"}`}
-                onClick={() => {
-                  shouldScrollRef.current = true;
-                  setSymbol(item.symbol);
-                  setExchange(item.exchange);
-                }}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-
           {expiry && (
             <p className="text-muted mb-4" style={{ fontSize: "0.875rem" }}>
-              Nearest expiry: <strong style={{ color: "var(--text)" }}>{expiry}</strong>
-              {" · "}Showing strikes around ATM
+              Expiry: <strong style={{ color: "var(--text)" }}>{expiry}</strong>
+              {" · "}10 strikes around ATM for faster updates
             </p>
           )}
           {error && <div className="alert alert-error">{error}</div>}
@@ -173,14 +155,14 @@ export default function OptionsPage() {
                       <th className="text-right">Theta</th>
                       <th className="text-right">Vega</th>
                       <th></th>
-                      <th className="text-right">Vega</th>
-                      <th className="text-right">Theta</th>
-                      <th className="text-right">Gamma</th>
-                      <th className="text-right">Delta</th>
                       <th className="text-right">LTP</th>
                       <th className="text-right">IV</th>
                       <th className="text-right">Vol</th>
                       <th className="text-right">OI</th>
+                      <th className="text-right">Delta</th>
+                      <th className="text-right">Gamma</th>
+                      <th className="text-right">Theta</th>
+                      <th className="text-right">Vega</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -196,7 +178,9 @@ export default function OptionsPage() {
                           <td className="text-right text-muted">{row.ce?.quote?.volume?.toLocaleString("en-IN") ?? "—"}</td>
                           <td className="text-right text-muted">{formatGreek(row.ce?.quote?.greeks?.iv)}</td>
                           <td className="text-right font-medium text-up">
-                            {row.ce?.quote ? formatNumber(row.ce.quote.last_price) : "—"}
+                            {row.ce?.quote && row.ce.quote.last_price > 0
+                              ? formatNumber(row.ce.quote.last_price)
+                              : "—"}
                           </td>
                           <td className="text-right"><GreeksCell greeks={row.ce?.quote?.greeks} /></td>
                           <td className="text-right text-muted">{formatGreek(row.ce?.quote?.greeks?.gamma, 4)}</td>
@@ -208,16 +192,18 @@ export default function OptionsPage() {
                             {isAtm && <span className="atm-tag">ATM</span>}
                           </td>
 
-                          <td className="text-right text-muted">{formatGreek(row.pe?.quote?.greeks?.vega)}</td>
-                          <td className="text-right text-muted">{formatGreek(row.pe?.quote?.greeks?.theta)}</td>
-                          <td className="text-right text-muted">{formatGreek(row.pe?.quote?.greeks?.gamma, 4)}</td>
-                          <td className="text-right"><GreeksCell greeks={row.pe?.quote?.greeks} /></td>
                           <td className="text-right font-medium text-down">
-                            {row.pe?.quote ? formatNumber(row.pe.quote.last_price) : "—"}
+                            {row.pe?.quote && row.pe.quote.last_price > 0
+                              ? formatNumber(row.pe.quote.last_price)
+                              : "—"}
                           </td>
                           <td className="text-right text-muted">{formatGreek(row.pe?.quote?.greeks?.iv)}</td>
                           <td className="text-right text-muted">{row.pe?.quote?.volume?.toLocaleString("en-IN") ?? "—"}</td>
                           <td className="text-right text-muted">{row.pe?.quote?.oi?.toLocaleString("en-IN") ?? "—"}</td>
+                          <td className="text-right"><GreeksCell greeks={row.pe?.quote?.greeks} /></td>
+                          <td className="text-right text-muted">{formatGreek(row.pe?.quote?.greeks?.gamma, 4)}</td>
+                          <td className="text-right text-muted">{formatGreek(row.pe?.quote?.greeks?.theta)}</td>
+                          <td className="text-right text-muted">{formatGreek(row.pe?.quote?.greeks?.vega)}</td>
                         </tr>
                       );
                     })}

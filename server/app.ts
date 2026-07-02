@@ -199,22 +199,63 @@ async function getCachedInstruments(exchange: string) {
   return data;
 }
 
-function matchesOptionUnderlying(item: KiteInstrument, symbol: string) {
-  if (item.name === symbol) return true;
-  if (!item.tradingsymbol.startsWith(symbol)) return false;
-
-  const suffix = item.tradingsymbol.slice(symbol.length);
-  return suffix.length > 0 && /\d/.test(suffix[0]);
+interface KiteQuotePayload {
+  last_price: number;
+  oi?: number;
+  volume?: number;
+  change?: number;
+  change_percent?: number;
+  depth?: {
+    buy?: { price: number; quantity: number }[];
+    sell?: { price: number; quantity: number }[];
+  };
 }
 
-function filterOptionInstruments(instruments: KiteInstrument[], symbol: string, exchange: string) {
-  const optionSegment = exchange === "BFO" ? "BFO-OPT" : "NFO-OPT";
+function getEffectiveLtp(quote?: KiteQuotePayload) {
+  if (!quote) return 0;
+  if (quote.last_price > 0) return quote.last_price;
 
-  return instruments.filter((item) => {
-    if (item.segment !== optionSegment) return false;
-    if (item.instrument_type !== "CE" && item.instrument_type !== "PE") return false;
-    return matchesOptionUnderlying(item, symbol);
-  });
+  const bid = quote.depth?.buy?.[0]?.price ?? 0;
+  const ask = quote.depth?.sell?.[0]?.price ?? 0;
+  if (bid > 0 && ask > 0) return (bid + ask) / 2;
+  return bid || ask || 0;
+}
+
+function buildQuoteLookup(quotes: Record<string, KiteQuotePayload>) {
+  const lookup = new Map<string, KiteQuotePayload>();
+
+  for (const [key, value] of Object.entries(quotes)) {
+    lookup.set(key, value);
+    const tradingsymbol = key.includes(":") ? key.split(":").slice(1).join(":") : key;
+    lookup.set(tradingsymbol, value);
+  }
+
+  return lookup;
+}
+
+function getInstrumentQuote(lookup: Map<string, KiteQuotePayload>, instrument: KiteInstrument) {
+  return (
+    lookup.get(`${instrument.exchange}:${instrument.tradingsymbol}`) ??
+    lookup.get(instrument.tradingsymbol)
+  );
+}
+
+function getOptionSide(instrument: KiteInstrument): "CE" | "PE" | null {
+  if (instrument.tradingsymbol.endsWith("CE")) return "CE";
+  if (instrument.tradingsymbol.endsWith("PE")) return "PE";
+  if (instrument.instrument_type === "CE" || instrument.instrument_type === "PE") {
+    return instrument.instrument_type;
+  }
+  return null;
+}
+
+function filterNiftyOptions(instruments: KiteInstrument[]) {
+  return instruments.filter(
+    (item) =>
+      item.segment === "NFO-OPT" &&
+      /^NIFTY\d/.test(item.tradingsymbol) &&
+      (item.tradingsymbol.endsWith("CE") || item.tradingsymbol.endsWith("PE"))
+  );
 }
 
 function getNearestExpiry(expiries: string[]) {
@@ -233,23 +274,11 @@ async function fetchQuotesInBatches(
   keys: string[],
   batchSize = 400
 ) {
-  const quotes: Record<string, {
-    last_price: number;
-    oi?: number;
-    volume?: number;
-    change?: number;
-    change_percent?: number;
-  }> = {};
+  const quotes: Record<string, KiteQuotePayload> = {};
 
   for (let index = 0; index < keys.length; index += batchSize) {
     const batch = keys.slice(index, index + batchSize);
-    const batchQuotes = await kiteGet<Record<string, {
-      last_price: number;
-      oi?: number;
-      volume?: number;
-      change?: number;
-      change_percent?: number;
-    }>>(
+    const batchQuotes = await kiteGet<Record<string, KiteQuotePayload>>(
       `/quote?${batch.map((key) => `i=${encodeURIComponent(key)}`).join("&")}`,
       accessToken
     );
@@ -607,9 +636,10 @@ app.get("/api/kite/watchlist-history", async (req, res) => {
 
 app.get("/api/kite/option-chain", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
-  const symbol = (req.query.symbol as string) ?? "NIFTY";
-  const exchange = (req.query.exchange as string) ?? "NFO";
+  const symbol = "NIFTY";
+  const exchange = "NFO";
   const expiryParam = req.query.expiry as string | undefined;
+  const spotKey = "NSE:NIFTY 50";
 
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
 
@@ -617,13 +647,13 @@ app.get("/api/kite/option-chain", async (req, res) => {
     const allInstruments = await getCachedInstruments(exchange);
 
     if (allInstruments.length === 0) {
-      return res.status(502).json({ error: `Failed to load ${exchange} instrument master from Zerodha` });
+      return res.status(502).json({ error: "Failed to load NFO instrument master from Zerodha" });
     }
 
-    const underlyingOptions = filterOptionInstruments(allInstruments, symbol, exchange);
+    const underlyingOptions = filterNiftyOptions(allInstruments);
 
     if (underlyingOptions.length === 0) {
-      return res.status(404).json({ error: `No options found for ${symbol}` });
+      return res.status(404).json({ error: "No Nifty 50 options found" });
     }
 
     const expiries = [...new Set(underlyingOptions.map((i) => i.expiry).filter(Boolean))] as string[];
@@ -631,50 +661,32 @@ app.get("/api/kite/option-chain", async (req, res) => {
       ? expiryParam
       : getNearestExpiry(expiries);
 
-    const spotKeys: Record<string, string> = {
-      NIFTY: "NSE:NIFTY 50",
-      BANKNIFTY: "NSE:NIFTY BANK",
-      FINNIFTY: "NSE:NIFTY FIN SERVICE",
-      SENSEX: "BSE:SENSEX",
-      RELIANCE: "NSE:RELIANCE",
-      TCS: "NSE:TCS",
-      INFY: "NSE:INFY",
-      HDFCBANK: "NSE:HDFCBANK",
-    };
-    const spotKey = spotKeys[symbol] ?? (exchange === "BFO" ? "BSE:SENSEX" : "NSE:NIFTY 50");
-
-    let spotPrice = 0;
-    try {
-      const spotQuotes = await kiteGet<Record<string, { last_price: number }>>(
-        `/quote?i=${encodeURIComponent(spotKey)}`,
-        accessToken
-      );
-      spotPrice = spotQuotes[spotKey]?.last_price ?? 0;
-    } catch {
-      spotPrice = 0;
-    }
-
     const expiryOptions = underlyingOptions.filter((i) => i.expiry === selectedExpiry);
     const allStrikes = [...new Set(expiryOptions.map((i) => i.strike!).filter(Boolean))];
-    const atmStrike = findAtmStrike(allStrikes, spotPrice);
-    const visibleStrikes = filterStrikesAroundAtm(allStrikes, atmStrike, 15);
-    const scopedOptions = expiryOptions.filter((i) => visibleStrikes.has(i.strike!));
-    const quoteKeys = [
-      ...scopedOptions.map((i) => `${i.exchange}:${i.tradingsymbol}`),
-      spotKey,
-    ];
 
-    const quotes = await fetchQuotesInBatches(accessToken, quoteKeys);
-    spotPrice = quotes[spotKey]?.last_price ?? spotPrice;
+    const spotQuotes = await fetchQuotesInBatches(accessToken, [spotKey]);
+    const spotPrice = getEffectiveLtp(spotQuotes[spotKey]);
+
+    const atmStrike = findAtmStrike(allStrikes, spotPrice);
+    const visibleStrikes = filterStrikesAroundAtm(allStrikes, atmStrike, 10);
+    const scopedOptions = expiryOptions.filter((i) => visibleStrikes.has(i.strike!));
+
+    const optionQuoteKeys = scopedOptions.map((i) => `${i.exchange}:${i.tradingsymbol}`);
+    const optionQuotes = optionQuoteKeys.length > 0
+      ? await fetchQuotesInBatches(accessToken, optionQuoteKeys)
+      : {};
+    const quoteLookup = buildQuoteLookup({ ...spotQuotes, ...optionQuotes });
 
     const byStrike = new Map<number, { strike: number; isAtm: boolean; ce?: unknown; pe?: unknown }>();
     for (const instrument of scopedOptions) {
-      const key = `${instrument.exchange}:${instrument.tradingsymbol}`;
-      const quoteData = quotes[key];
-      const optionType = instrument.instrument_type as "CE" | "PE";
+      const quoteData = getInstrumentQuote(quoteLookup, instrument);
+      const side = getOptionSide(instrument);
+      if (!side) continue;
+
+      const lastPrice = getEffectiveLtp(quoteData);
       const greeks =
-        quoteData?.last_price && spotPrice > 0
-          ? calculateGreeks(spotPrice, instrument.strike!, selectedExpiry, quoteData.last_price, optionType)
+        lastPrice > 0 && spotPrice > 0
+          ? calculateGreeks(spotPrice, instrument.strike!, selectedExpiry, lastPrice, side)
           : null;
 
       const row = byStrike.get(instrument.strike!) ?? {
@@ -687,7 +699,7 @@ app.get("/api/kite/option-chain", async (req, res) => {
         quote: quoteData
           ? {
               instrument_token: instrument.instrument_token,
-              last_price: quoteData.last_price,
+              last_price: lastPrice,
               change: quoteData.change ?? 0,
               change_percent: quoteData.change_percent ?? 0,
               volume: quoteData.volume ?? 0,
@@ -697,7 +709,7 @@ app.get("/api/kite/option-chain", async (req, res) => {
           : undefined,
       };
 
-      if (instrument.instrument_type === "CE") row.ce = enriched;
+      if (side === "CE") row.ce = enriched;
       else row.pe = enriched;
       byStrike.set(instrument.strike!, row);
     }
