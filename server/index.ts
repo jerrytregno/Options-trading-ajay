@@ -309,6 +309,32 @@ app.get("/api/kite/option-chain", async (req, res) => {
   }
 });
 
+app.get("/api/kite/margins", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+  try {
+    const data = await kiteGet<{
+      equity?: {
+        net?: number;
+        available?: { live_balance?: number; cash?: number };
+        utilised?: { debits?: number };
+      };
+    }>("/user/margins", accessToken);
+    const equity = data.equity ?? {};
+    return res.json({
+      data: {
+        available: equity.available?.live_balance ?? equity.net ?? 0,
+        cash: equity.available?.cash ?? 0,
+        used: equity.utilised?.debits ?? 0,
+        net: equity.net ?? 0,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to fetch balance";
+    return res.status(401).json({ error: message });
+  }
+});
+
 app.get("/api/kite/positions", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });

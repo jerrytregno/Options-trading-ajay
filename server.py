@@ -218,7 +218,9 @@ class Handler(SimpleHTTPRequestHandler):
         if path.startswith("/api/"):
             return self.handle_api_get(path, qs)
 
-        if path != "/" and not (PUBLIC / path.lstrip("/")).exists() and "." not in path.split("/")[-1]:
+        # SPA fallback: serve index.html for client-side routes on refresh
+        file_path = PUBLIC / path.lstrip("/")
+        if path != "/" and not file_path.is_file():
             self.path = "/index.html"
         return super().do_GET()
 
@@ -308,6 +310,20 @@ class Handler(SimpleHTTPRequestHandler):
                     pass
                 return self.send_json({"data": {"symbol": symbol, "exchange": exchange, "expiry": nearest, "expiries": expiries, "spotPrice": spot, "chain": chain}})
 
+            if path == "/api/kite/margins":
+                raw = kite_get("/user/margins", token)
+                equity = raw.get("equity") or {}
+                available = (equity.get("available") or {}).get("live_balance")
+                if available is None:
+                    available = equity.get("net", 0)
+                return self.send_json({
+                    "data": {
+                        "available": available or 0,
+                        "cash": (equity.get("available") or {}).get("cash", 0) or 0,
+                        "used": (equity.get("utilised") or {}).get("debits", 0) or 0,
+                        "net": equity.get("net", 0) or 0,
+                    }
+                })
             if path == "/api/kite/positions":
                 return self.send_json({"data": kite_get("/portfolio/positions", token)})
             if path == "/api/kite/holdings":

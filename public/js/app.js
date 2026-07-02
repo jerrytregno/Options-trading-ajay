@@ -92,16 +92,23 @@ async function dashboardView() {
       <div class="empty-state-title">No live quotes yet</div>
       <p>Connect your Zerodha Kite account to stream NIFTY, BANK NIFTY, and watchlist prices.</p>
     </div>`;
-  let stats = { pnl: "—", positions: "—", status: "Offline" };
+  let stats = { balance: "—", pnl: "—", used: "—", status: "Offline", balanceSub: "Connect Kite" };
   if (kite.connected) {
     try {
-      const [{ data: quotes }, { data: pos }] = await Promise.all([
+      const [{ data: quotes }, { data: pos }, { data: margins }] = await Promise.all([
         api(`/api/kite/quotes?instruments=${cfg.watchlist.join(",")}`),
         api("/api/kite/positions"),
+        api("/api/kite/margins"),
       ]);
       const net = (pos?.net || []).filter(p => p.quantity !== 0);
       const totalPnl = net.reduce((s,p)=>s+(p.pnl||0),0);
-      stats = { pnl: fmtCurrency(totalPnl), positions: String(net.length), status: "Live" };
+      stats = {
+        balance: fmtCurrency(margins?.available ?? 0),
+        pnl: fmtCurrency(totalPnl),
+        used: fmtCurrency(margins?.used ?? 0),
+        status: "Live",
+        balanceSub: `Net ${fmtCurrency(margins?.net ?? 0)}`,
+      };
       watchHtml = cfg.watchlist.map(key => {
         const q = quotes[key]; const sym = key.split(":")[1]; const ch = q?.change_percent||0;
         return `<div class="watch-item flex-between mb-4"><div><div>${sym}</div><div class="text-muted" style="font-size:.75rem">${key.split(":")[0]}</div></div><div class="text-right"><div>${q?fmt(q.last_price):"—"}</div><div class="${changeClass(ch)}">${q?(ch>=0?"+":"")+ch.toFixed(2)+"%":""}</div></div></div>`;
@@ -112,7 +119,10 @@ async function dashboardView() {
   return shell(`${connectBanner}
     <div class="page-header mb-8"><h1>Dashboard</h1><p>Your trading overview</p></div>
     <div class="grid-4 mb-8">
-      ${[["Day P&L",stats.pnl],["Open Positions",stats.positions],["Watchlist",cfg.watchlist.length],["Market Status",stats.status]].map(([l,v])=>`<div class="card"><div class="stat-label">${l}</div><div class="stat-value">${v}</div></div>`).join("")}
+      <div class="card"><div class="stat-label">Available Balance</div><div class="stat-value">${stats.balance}</div><div class="text-muted" style="font-size:.75rem;margin-top:.25rem">${stats.balanceSub}</div></div>
+      <div class="card"><div class="stat-label">Day P&L</div><div class="stat-value">${stats.pnl}</div></div>
+      <div class="card"><div class="stat-label">Margin Used</div><div class="stat-value">${stats.used}</div></div>
+      <div class="card"><div class="stat-label">Market Status</div><div class="stat-value">${stats.status}</div></div>
     </div>
     <div class="grid-2">
       <div class="card"><h3>Watchlist</h3><div class="mt-4">${watchHtml}</div></div>

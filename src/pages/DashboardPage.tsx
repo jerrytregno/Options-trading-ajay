@@ -12,10 +12,18 @@ interface QuoteData {
   change_percent: number;
 }
 
+interface BalanceData {
+  available: number;
+  cash: number;
+  used: number;
+  net: number;
+}
+
 export default function DashboardPage() {
   const { connected, configured, loginUrl } = useKite();
   const [quotes, setQuotes] = useState<Record<string, QuoteData>>({});
   const [positions, setPositions] = useState<{ pnl: number; quantity: number }[]>([]);
+  const [balance, setBalance] = useState<BalanceData | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -23,14 +31,19 @@ export default function DashboardPage() {
 
     async function load() {
       try {
-        const [quotesRes, positionsRes] = await Promise.all([
+        const [quotesRes, positionsRes, marginsRes] = await Promise.all([
           fetch(`/api/kite/quotes?instruments=${WATCHLIST_DEFAULT.join(",")}`, { credentials: "include" }),
           fetch("/api/kite/positions", { credentials: "include" }),
+          fetch("/api/kite/margins", { credentials: "include" }),
         ]);
         if (quotesRes.ok) { const { data } = await quotesRes.json(); setQuotes(data ?? {}); }
         if (positionsRes.ok) {
           const { data } = await positionsRes.json();
           setPositions((data?.net ?? []).filter((p: { quantity: number }) => p.quantity !== 0));
+        }
+        if (marginsRes.ok) {
+          const { data } = await marginsRes.json();
+          setBalance(data ?? null);
         }
       } finally { setLoading(false); }
     }
@@ -65,9 +78,9 @@ export default function DashboardPage() {
 
       <div className="grid-4 mb-8">
         {[
+          { label: "Available Balance", value: connected && balance ? formatCurrency(balance.available) : "—", sub: connected && balance ? `Net ${formatCurrency(balance.net)}` : "Connect Kite", up: true },
           { label: "Day P&L", value: connected ? formatCurrency(totalPnl) : "—", sub: connected ? `${positions.length} open positions` : "Connect Kite", up: totalPnl >= 0 },
-          { label: "Open Positions", value: connected ? String(positions.length) : "—", sub: "Active trades", up: true },
-          { label: "Watchlist", value: String(WATCHLIST_DEFAULT.length), sub: "Tracked instruments", up: true },
+          { label: "Margin Used", value: connected && balance ? formatCurrency(balance.used) : "—", sub: connected && balance ? `Cash ${formatCurrency(balance.cash)}` : "Active trades", up: true },
           { label: "Market Status", value: connected ? "Live" : "Offline", sub: connected ? "Kite connected" : "Awaiting connection", up: connected },
         ].map((s) => (
           <div key={s.label} className="card stat-card">
