@@ -132,7 +132,7 @@ app.get("/api/kite/status", async (req, res) => {
       connected: false,
       profile: null,
       loginUrl: null,
-      message: "Add KITE_API_KEY and KITE_API_SECRET to .env.local",
+      message: "Zerodha integration unavailable",
     });
   }
 

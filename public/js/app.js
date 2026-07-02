@@ -19,23 +19,25 @@ function shell(content, active) {
   const kite = getKite();
   const user = getUser();
   return `
-    <button class="menu-btn" id="menuBtn">☰</button>
-    <div class="overlay hidden" id="overlay"></div>
-    <aside class="sidebar" id="sidebar">
-      <div class="sidebar-header"><div class="logo"><div class="logo-icon">⚡</div><div><div>OptionFlow</div><div class="text-muted" style="font-size:.75rem">Options Trading</div></div></div></div>
-      <nav class="nav">
-        ${[["/dashboard","Overview"],["/trade","Trade"],["/options","Options Chain"],["/portfolio","Portfolio"],["/settings","Settings"]].map(([p,l])=>`<a href="#${p}" class="${active===p?'active':''}">${l}</a>`).join("")}
-      </nav>
-      <div class="sidebar-footer">
-        <div class="user-box">
-          <div class="truncate">${user?.email||"User"}</div>
-          <span class="badge ${kite.connected?'badge-success':'badge-warning'}" style="margin-top:.25rem">${kite.connected?'Kite Connected':'Kite Offline'}</span>
-          ${kite.profile?`<div class="text-muted truncate" style="font-size:.75rem;margin-top:.25rem">${kite.profile.user_id}</div>`:""}
+    <div class="dashboard-layout">
+      <button class="menu-btn" id="menuBtn" aria-label="Open menu">☰</button>
+      <div class="overlay hidden" id="overlay"></div>
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header"><div class="logo"><div class="logo-icon">⚡</div><div><div>OptionFlow</div><div class="text-muted" style="font-size:.75rem">Options Trading</div></div></div></div>
+        <nav class="nav">
+          ${[["/dashboard","Overview"],["/trade","Trade"],["/options","Options Chain"],["/portfolio","Portfolio"],["/settings","Settings"]].map(([p,l])=>`<a href="#${p}" class="${active===p?'active':''}">${l}</a>`).join("")}
+        </nav>
+        <div class="sidebar-footer">
+          <div class="user-box">
+            <div class="truncate">${user?.email||"User"}</div>
+            <span class="badge ${kite.connected?'badge-success':'badge-warning'}" style="margin-top:.35rem">${kite.connected?'Kite Connected':'Kite Offline'}</span>
+            ${kite.profile?`<div class="text-muted truncate" style="font-size:.75rem;margin-top:.25rem">${kite.profile.user_id}</div>`:""}
+          </div>
+          <button class="btn btn-ghost btn-sm btn-full" id="logoutBtn">Sign out</button>
         </div>
-        <button class="btn btn-ghost btn-sm btn-full" id="logoutBtn">Sign out</button>
-      </div>
-    </aside>
-    <main class="main layout">${content}</main>`;
+      </aside>
+      <main class="main">${content}</main>
+    </div>`;
 }
 
 function landing() {
@@ -84,7 +86,12 @@ function loginView() {
 
 async function dashboardView() {
   const kite = getKite();
-  let watchHtml = `<p class="text-muted">Connect Zerodha to see live quotes.</p>`;
+  let watchHtml = `
+    <div class="empty-state">
+      <div class="empty-state-icon">📈</div>
+      <div class="empty-state-title">No live quotes yet</div>
+      <p>Connect your Zerodha Kite account to stream NIFTY, BANK NIFTY, and watchlist prices.</p>
+    </div>`;
   let stats = { pnl: "—", positions: "—", status: "Offline" };
   if (kite.connected) {
     try {
@@ -101,12 +108,11 @@ async function dashboardView() {
       }).join("");
     } catch(e) { watchHtml = `<div class="alert alert-error">${e.message}</div>`; }
   }
-  const connectBanner = kite.configured && !kite.connected ? `<div class="card mb-6" style="border-color:rgba(59,130,246,.2)"><div class="flex-between"><div><strong>Connect Zerodha</strong><p class="text-muted mt-3">Link Kite for live data.</p></div>${kite.loginUrl?`<a href="${kite.loginUrl}"><button class="btn btn-primary">Connect Kite</button></a>`:""}</div></div>` : "";
-  const configBanner = !kite.configured ? `<div class="card alert-warning mb-6">Add <code>KITE_API_KEY</code> and <code>KITE_API_SECRET</code> to <code>.env.local</code> then restart <code>python3 server.py</code></div>` : "";
-  return shell(`${configBanner}${connectBanner}
+  const connectBanner = kite.configured && !kite.connected ? `<div class="card connect-banner mb-6"><div class="flex-between"><div><strong>Connect Zerodha</strong><p class="text-muted mt-3" style="font-size:.875rem">Link your Kite account to unlock live market data and order placement.</p></div>${kite.loginUrl?`<a href="${kite.loginUrl}"><button class="btn btn-primary">Connect Kite</button></a>`:""}</div></div>` : "";
+  return shell(`${connectBanner}
     <div class="page-header mb-8"><h1>Dashboard</h1><p>Your trading overview</p></div>
     <div class="grid-4 mb-8">
-      ${[["Day P&L",stats.pnl],["Open Positions",stats.positions],["Watchlist",cfg.watchlist.length],["Market",stats.status]].map(([l,v])=>`<div class="card"><div class="text-muted">${l}</div><div class="stat-value">${v}</div></div>`).join("")}
+      ${[["Day P&L",stats.pnl],["Open Positions",stats.positions],["Watchlist",cfg.watchlist.length],["Market Status",stats.status]].map(([l,v])=>`<div class="card"><div class="stat-label">${l}</div><div class="stat-value">${v}</div></div>`).join("")}
     </div>
     <div class="grid-2">
       <div class="card"><h3>Watchlist</h3><div class="mt-4">${watchHtml}</div></div>
@@ -169,14 +175,13 @@ function settingsView() {
   const { params } = qs();
   const alert = params.get("kite")==="connected" ? `<div class="alert alert-success">Connected to Zerodha!</div>` :
     params.get("message") ? `<div class="alert alert-error">${decodeURIComponent(params.get("message"))}</div>` : "";
-  return shell(`${alert}<div class="page-header mb-8"><h1>Settings</h1></div><div class="grid-2">
+  return shell(`${alert}<div class="page-header mb-8"><h1>Settings</h1><p>Manage your account and Zerodha connection</p></div><div class="grid-2">
     <div class="card"><h3>Account</h3><p class="text-muted mt-3">${user?.email||"—"}</p><p class="text-muted mt-3" style="font-size:.75rem">${user?.uid||""}</p></div>
-    <div class="card"><div class="flex-between mb-4"><h3>Zerodha Kite</h3><span class="badge ${kite.connected?'badge-success':kite.configured?'badge-warning':'badge-danger'}">${kite.connected?'Connected':kite.configured?'Disconnected':'Not Configured'}</span></div>
-      ${!kite.configured?`<pre>KITE_API_KEY=...\nKITE_API_SECRET=...\nAPP_URL=http://localhost:8080</pre><p class="text-muted" style="font-size:.875rem">Redirect: <code>http://localhost:8080/api/kite/callback</code></p>`:
-        kite.connected?`<p>${kite.profile?.user_name} (${kite.profile?.user_id})</p><button class="btn btn-danger btn-sm mt-4" id="disconnectBtn">Disconnect</button>`:
-        (kite.loginUrl?`<a href="${kite.loginUrl}"><button class="btn btn-primary">Connect Zerodha</button></a>`:"")}
+    <div class="card"><div class="flex-between mb-4"><h3>Zerodha Kite</h3><span class="badge ${kite.connected?'badge-success':kite.configured?'badge-warning':'badge-danger'}">${kite.connected?'Connected':kite.configured?'Disconnected':'Unavailable'}</span></div>
+      ${!kite.configured?`<p class="text-muted" style="font-size:.875rem">Zerodha integration is not available right now. Please try again later.</p>`:
+        kite.connected?`<p><strong>${kite.profile?.user_name||"Connected"}</strong></p><p class="text-muted mt-3">${kite.profile?.user_id||""}</p><button class="btn btn-danger btn-sm mt-4" id="disconnectBtn">Disconnect</button>`:
+        (kite.loginUrl?`<p class="text-muted" style="font-size:.875rem;margin-bottom:1rem">Sign in with your Zerodha account to enable live data and trading.</p><a href="${kite.loginUrl}"><button class="btn btn-primary">Connect Zerodha</button></a>`:"")}
     </div>
-    <div class="card" style="grid-column:1/-1"><h3>Setup</h3><ol class="checklist mt-4"><li>Enable Firebase Auth (Email/Google)</li><li>Create Kite app at developers.kite.trade</li><li>Add keys to .env.local</li><li>Run: python3 server.py</li></ol></div>
   </div>`, "/settings");
 }
 

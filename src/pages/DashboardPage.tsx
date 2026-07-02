@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowUpRight, TrendingDown, TrendingUp, AlertCircle } from "lucide-react";
+import { ArrowUpRight, TrendingDown, TrendingUp } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useKite } from "@/contexts/kite-context";
 import { WATCHLIST_DEFAULT } from "@/types/kite";
@@ -49,27 +49,12 @@ export default function DashboardPage() {
         <p>Your trading overview at a glance</p>
       </div>
 
-      {!configured && (
-        <div className="card alert-warning mb-6">
-          <div className="flex gap-3">
-            <AlertCircle size={20} style={{ color: "#fbbf24", flexShrink: 0 }} />
-            <div>
-              <p className="font-semibold">Kite API not configured</p>
-              <p className="text-muted mt-3" style={{ fontSize: "0.875rem" }}>
-                Add <code>KITE_API_KEY</code> and <code>KITE_API_SECRET</code> to <code>.env.local</code>, then restart.
-              </p>
-              <Link to="/dashboard/settings"><button className="btn btn-outline btn-sm mt-3">Go to Settings</button></Link>
-            </div>
-          </div>
-        </div>
-      )}
-
       {configured && !connected && (
-        <div className="card mb-6" style={{ borderColor: "rgba(59,130,246,0.2)", background: "rgba(59,130,246,0.05)" }}>
+        <div className="card connect-banner mb-6">
           <div className="flex-between flex-wrap gap-4">
             <div>
               <p className="font-semibold">Connect Zerodha</p>
-              <p className="text-muted mt-3" style={{ fontSize: "0.875rem" }}>Link your Kite account for live data and orders.</p>
+              <p className="text-muted mt-3" style={{ fontSize: "0.875rem" }}>Link your Kite account to unlock live market data and order placement.</p>
             </div>
             {loginUrl && (
               <a href={loginUrl}><button className="btn btn-primary">Connect Kite <ArrowUpRight size={16} /></button></a>
@@ -102,7 +87,10 @@ export default function DashboardPage() {
           {loading ? (
             <div className="spinner-center"><div className="spinner spinner-sm" /></div>
           ) : !connected ? (
-            <p className="text-muted" style={{ fontSize: "0.875rem" }}>Connect Zerodha to see live quotes.</p>
+            <div className="empty-state">
+              <p className="empty-state-title">No live quotes yet</p>
+              <p style={{ fontSize: "0.875rem" }}>Connect your Zerodha Kite account to stream NIFTY, BANK NIFTY, and watchlist prices.</p>
+            </div>
           ) : (
             <div className="flex" style={{ flexDirection: "column", gap: "0.5rem" }}>
               {WATCHLIST_DEFAULT.map((key) => {

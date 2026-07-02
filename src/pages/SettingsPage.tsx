@@ -15,7 +15,7 @@ export default function SettingsPage() {
     <DashboardShell>
       <div className="page-header">
         <h1>Settings</h1>
-        <p>Manage account and Zerodha integration</p>
+        <p>Manage your account and Zerodha connection</p>
       </div>
 
       {kiteStatus === "connected" && (
@@ -44,26 +44,18 @@ export default function SettingsPage() {
         <div className="card">
           <div className="flex-between mb-4">
             <div>
-              <h3 className="card-title">Zerodha Kite Connect</h3>
-              <p className="card-desc">Broker integration for market data & orders</p>
+              <h3 className="card-title">Zerodha Kite</h3>
+              <p className="card-desc">Connect your trading account</p>
             </div>
-            <span className={`badge ${!configured ? "badge-danger" : connected ? "badge-success" : "badge-warning"}`}>
-              {!configured ? "Not Configured" : connected ? "Connected" : "Disconnected"}
+            <span className={`badge ${connected ? "badge-success" : configured ? "badge-warning" : "badge-danger"}`}>
+              {connected ? "Connected" : configured ? "Disconnected" : "Unavailable"}
             </span>
           </div>
 
           {!configured ? (
-            <div className="text-muted" style={{ fontSize: "0.875rem" }}>
-              <p>Add your Kite API credentials to <code>.env.local</code>:</p>
-              <pre>{`KITE_API_KEY=your_api_key\nKITE_API_SECRET=your_api_secret\nAPP_URL=http://localhost:5173`}</pre>
-              <p className="mt-3">
-                Get keys from{" "}
-                <a href="https://developers.kite.trade/" target="_blank" rel="noopener noreferrer" style={{ color: "var(--primary)" }}>
-                  Kite Connect Developer Portal
-                </a>
-                . Set redirect URL to <code>http://localhost:5173/api/kite/callback</code>
-              </p>
-            </div>
+            <p className="text-muted" style={{ fontSize: "0.875rem" }}>
+              Zerodha integration is not available right now. Please try again later.
+            </p>
           ) : connected && profile ? (
             <div>
               <dl style={{ display: "flex", flexDirection: "column", gap: "0.75rem", fontSize: "0.875rem", marginBottom: "1rem" }}>
@@ -84,24 +76,13 @@ export default function SettingsPage() {
           ) : (
             <div>
               <p className="text-muted" style={{ fontSize: "0.875rem", marginBottom: "1rem" }}>
-                Connect your Zerodha account to enable live quotes, options chains, and order placement.
+                Sign in with your Zerodha account to enable live quotes, options chains, and order placement.
               </p>
               {loginUrl && (
                 <a href={loginUrl}><button className="btn btn-primary">Connect Zerodha <ExternalLink size={16} /></button></a>
               )}
             </div>
           )}
-        </div>
-
-        <div className="card" style={{ gridColumn: "1 / -1" }}>
-          <h3 className="card-title">Setup Checklist</h3>
-          <ol className="checklist mt-4">
-            <li>Enable Email/Password or Google sign-in in Firebase Console → Authentication.</li>
-            <li>Create a Kite Connect app at developers.kite.trade.</li>
-            <li>Set redirect URL to <code>http://localhost:5173/api/kite/callback</code></li>
-            <li>Add Kite credentials to <code>.env.local</code> and restart the server.</li>
-            <li>Sign in, go to Settings, and click Connect Zerodha.</li>
-          </ol>
         </div>
       </div>
     </DashboardShell>
