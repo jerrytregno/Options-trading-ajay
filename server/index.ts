@@ -15,6 +15,20 @@ const PORT = Number(process.env.PORT) || 3001;
 const KITE_BASE = "https://api.kite.trade";
 const TOKEN_COOKIE = "kite_access_token";
 
+interface KiteApiResponse<T = unknown> {
+  status: string;
+  message?: string;
+  data?: T;
+}
+
+function parseKiteResponse<T>(json: unknown): T {
+  const payload = json as KiteApiResponse<T>;
+  if (payload.status === "error") {
+    throw new Error(payload.message ?? "Kite API error");
+  }
+  return payload.data as T;
+}
+
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -47,9 +61,8 @@ async function kiteGet<T>(path: string, accessToken: string): Promise<T> {
       Authorization: `token ${config.apiKey}:${accessToken}`,
     },
   });
-  const json = await res.json();
-  if (json.status === "error") throw new Error(json.message ?? "Kite API error");
-  return json.data as T;
+  const json: unknown = await res.json();
+  return parseKiteResponse<T>(json);
 }
 
 async function kitePost<T>(path: string, accessToken: string, body: Record<string, string>): Promise<T> {
@@ -63,9 +76,8 @@ async function kitePost<T>(path: string, accessToken: string, body: Record<strin
     },
     body: new URLSearchParams(body),
   });
-  const json = await res.json();
-  if (json.status === "error") throw new Error(json.message ?? "Kite API error");
-  return json.data as T;
+  const json: unknown = await res.json();
+  return parseKiteResponse<T>(json);
 }
 
 interface KiteInstrument {
@@ -178,12 +190,10 @@ app.get("/api/kite/callback", async (req, res) => {
         }),
       });
 
-      const sessionJson = await sessionRes.json();
-      if (sessionJson.status === "error") {
-        throw new Error(sessionJson.message);
-      }
+      const sessionJson: unknown = await sessionRes.json();
+      const session = parseKiteResponse<{ access_token: string }>(sessionJson);
 
-      res.cookie(TOKEN_COOKIE, sessionJson.data.access_token, {
+      res.cookie(TOKEN_COOKIE, session.access_token, {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "lax",
@@ -200,7 +210,7 @@ app.get("/api/kite/callback", async (req, res) => {
   return res.redirect(`${base}/dashboard/settings?kite=failed`);
 });
 
-app.post("/api/kite/disconnect", (req, res) => {
+app.post("/api/kite/disconnect", (_req, res) => {
   res.clearCookie(TOKEN_COOKIE);
   res.json({ success: true });
 });
