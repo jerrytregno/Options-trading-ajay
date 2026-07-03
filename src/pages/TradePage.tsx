@@ -1,6 +1,8 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { AutoTradeRunner } from "@/components/trade/AutoTradeRunner";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
+import { loadAutoTradePlan, type AutoTradePlan } from "@/lib/auto-trade";
 import { useKite } from "@/contexts/kite-context";
 import {
   calculateTradeMetrics,
@@ -45,6 +47,8 @@ export default function TradePage() {
   const [marginLoading, setMarginLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ success?: string; error?: string }>({});
+  const [autoPlan, setAutoPlan] = useState<AutoTradePlan | null>(null);
+  const autoMode = searchParams.get("auto") === "1";
 
   const selectedRow = useMemo(
     () => chainData?.chain.find((row) => row.strike === selectedStrike),
@@ -98,6 +102,10 @@ export default function TradePage() {
       setLoadingChain(false);
     }
   }, [connected, searchParams]);
+
+  useEffect(() => {
+    if (autoMode) setAutoPlan(loadAutoTradePlan());
+  }, [autoMode]);
 
   useEffect(() => {
     loadChain();
@@ -241,6 +249,24 @@ export default function TradePage() {
           )}
         </div>
       ) : (
+        <>
+          {autoMode && autoPlan && autoPlan.action !== "WAIT" && instrument?.tradingsymbol && (
+            <AutoTradeRunner
+              plan={autoPlan}
+              leg={leg}
+              strike={selectedStrike}
+              tradingsymbol={instrument.tradingsymbol}
+              lotSize={lotSize}
+              lots={lots}
+              spotPrice={chainData?.spotPrice ?? 0}
+              autoStart
+            />
+          )}
+          {autoMode && autoPlan?.action === "WAIT" && (
+            <div className="alert alert-warning mb-4">
+              AI suggested WAIT — auto-trade is not available for this setup. Use manual order below.
+            </div>
+          )}
         <div className="trade-layout">
           <div className="card">
             <div className="card-header">
@@ -475,6 +501,7 @@ export default function TradePage() {
             </form>
           </div>
         </div>
+        </>
       )}
     </DashboardShell>
   );

@@ -9,6 +9,55 @@ interface StreamingChartProps {
   height?: number;
 }
 
+const COLORS = {
+  bg: "#0b0f17",
+  grid: "rgba(42, 46, 57, 0.85)",
+  text: "#787b86",
+  bull: "#26a69a",
+  bear: "#ef5350",
+  bullVol: "rgba(38, 166, 154, 0.55)",
+  bearVol: "rgba(239, 83, 80, 0.55)",
+  rsi: "#b388ff",
+  fib: "rgba(120, 123, 134, 0.55)",
+  fibMid: "rgba(255, 193, 7, 0.75)",
+  lastPrice: "#ef5350",
+};
+
+const SLOT_WIDTH = 8;
+const BODY_WIDTH = 5;
+const WICK_WIDTH = 1;
+const MAX_VISIBLE = 180;
+
+function drawPanelBg(
+  ctx: CanvasRenderingContext2D,
+  left: number,
+  top: number,
+  w: number,
+  h: number
+) {
+  ctx.fillStyle = COLORS.bg;
+  ctx.fillRect(left, top, w, h);
+}
+
+function drawGrid(
+  ctx: CanvasRenderingContext2D,
+  left: number,
+  top: number,
+  w: number,
+  h: number,
+  rows: number
+) {
+  ctx.strokeStyle = COLORS.grid;
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= rows; i += 1) {
+    const y = top + (h * i) / rows;
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(left + w, y);
+    ctx.stroke();
+  }
+}
+
 export function StreamingChart({
   candles,
   fibLevels,
@@ -36,161 +85,186 @@ export function StreamingChart({
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, width, height);
 
-      const pad = { top: 12, right: 56, bottom: 8, left: 52 };
-      const gap = 10;
-      const priceH = Math.floor(height * 0.52);
-      const volH = Math.floor(height * 0.18);
+      const pad = { top: 8, right: 62, bottom: 22, left: 48 };
+      const gap = 6;
+      const priceH = Math.floor(height * 0.58);
+      const volH = Math.floor(height * 0.14);
       const rsiH = height - priceH - volH - gap * 2 - pad.top - pad.bottom;
 
       const priceTop = pad.top;
       const volTop = priceTop + priceH + gap;
       const rsiTop = volTop + volH + gap;
-
       const plotW = width - pad.left - pad.right;
-      const xForIndex = (index: number) =>
-        pad.left + (index / Math.max(candles.length - 1, 1)) * plotW;
+      const plotRight = pad.left + plotW;
 
-      const highs = candles.map((c) => c.high);
-      const lows = candles.map((c) => c.low);
+      const visibleCount = Math.min(
+        candles.length,
+        Math.floor(plotW / SLOT_WIDTH),
+        MAX_VISIBLE
+      );
+      const startIndex = candles.length - visibleCount;
+      const visible = candles.slice(startIndex);
+
+      const xForIndex = (globalIndex: number) =>
+        plotRight - (candles.length - 1 - globalIndex) * SLOT_WIDTH - SLOT_WIDTH / 2;
+
+      const highs = visible.map((c) => c.high);
+      const lows = visible.map((c) => c.low);
       const minPrice = Math.min(...lows);
       const maxPrice = Math.max(...highs);
-      const priceRange = Math.max(maxPrice - minPrice, 0.5);
-      const yMin = minPrice - priceRange * 0.06;
-      const yMax = maxPrice + priceRange * 0.06;
+      const priceRange = Math.max(maxPrice - minPrice, 0.25);
+      const yMin = minPrice - priceRange * 0.12;
+      const yMax = maxPrice + priceRange * 0.12;
       const yForPrice = (price: number, top: number, h: number) =>
         top + ((yMax - price) / (yMax - yMin)) * h;
 
-      ctx.strokeStyle = "rgba(36, 48, 71, 0.65)";
-      ctx.lineWidth = 1;
-      for (let i = 0; i <= 4; i += 1) {
-        const price = yMin + ((yMax - yMin) * i) / 4;
+      drawPanelBg(ctx, pad.left, priceTop, plotW, priceH);
+      drawGrid(ctx, pad.left, priceTop, plotW, priceH, 5);
+
+      ctx.fillStyle = COLORS.text;
+      ctx.font = "10px ui-sans-serif, system-ui";
+      ctx.textAlign = "right";
+      for (let i = 0; i <= 5; i += 1) {
+        const price = yMin + ((yMax - yMin) * i) / 5;
         const y = yForPrice(price, priceTop, priceH);
-        ctx.beginPath();
-        ctx.moveTo(pad.left, y);
-        ctx.lineTo(width - pad.right, y);
-        ctx.stroke();
-        ctx.fillStyle = "#94a3b8";
-        ctx.font = "10px ui-sans-serif, system-ui";
-        ctx.textAlign = "right";
-        ctx.fillText(price.toFixed(1), pad.left - 4, y + 3);
+        ctx.fillText(price.toFixed(2), pad.left - 6, y + 3);
       }
 
       for (const fib of fibLevels) {
         if (fib.price < yMin || fib.price > yMax) continue;
         const y = yForPrice(fib.price, priceTop, priceH);
-        ctx.strokeStyle =
-          fib.ratio === 0.5
-            ? "rgba(251, 191, 36, 0.85)"
-            : "rgba(147, 197, 253, 0.45)";
-        ctx.setLineDash(fib.ratio === 0.5 ? [] : [5, 4]);
+        const isMid = fib.ratio === 0.5;
+        ctx.strokeStyle = isMid ? COLORS.fibMid : COLORS.fib;
+        ctx.lineWidth = isMid ? 1 : 1;
+        ctx.setLineDash(isMid ? [6, 3] : [3, 4]);
         ctx.beginPath();
         ctx.moveTo(pad.left, y);
-        ctx.lineTo(width - pad.right, y);
+        ctx.lineTo(plotRight, y);
         ctx.stroke();
         ctx.setLineDash([]);
-        ctx.fillStyle = fib.ratio === 0.5 ? "#fbbf24" : "#93c5fd";
-        ctx.textAlign = "left";
-        ctx.fillText(`Fib ${fib.label}`, width - pad.right + 4, y + 3);
+        if (isMid || fib.ratio === 0 || fib.ratio === 1) {
+          ctx.fillStyle = isMid ? "#ffc107" : COLORS.text;
+          ctx.textAlign = "left";
+          ctx.font = "9px ui-sans-serif, system-ui";
+          ctx.fillText(fib.label, plotRight + 4, y + 3);
+        }
       }
 
-      const candleWidth = Math.max(1.5, plotW / candles.length - 0.5);
-      candles.forEach((candle, index) => {
+      visible.forEach((candle, localIdx) => {
+        const index = startIndex + localIdx;
         const x = xForIndex(index);
         const openY = yForPrice(candle.open, priceTop, priceH);
         const closeY = yForPrice(candle.close, priceTop, priceH);
         const highY = yForPrice(candle.high, priceTop, priceH);
         const lowY = yForPrice(candle.low, priceTop, priceH);
         const bullish = candle.close >= candle.open;
-        const color = bullish ? "#34d399" : "#fb7185";
+        const color = bullish ? COLORS.bull : COLORS.bear;
 
         ctx.strokeStyle = color;
-        ctx.fillStyle = color;
+        ctx.lineWidth = WICK_WIDTH;
         ctx.beginPath();
         ctx.moveTo(x, highY);
         ctx.lineTo(x, lowY);
         ctx.stroke();
 
         const bodyTop = Math.min(openY, closeY);
-        const bodyHeight = Math.max(Math.abs(closeY - openY), 1);
-        ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+        let bodyHeight = Math.abs(closeY - openY);
+        if (bodyHeight < 1) bodyHeight = 1;
+
+        ctx.fillStyle = color;
+        ctx.fillRect(x - BODY_WIDTH / 2, bodyTop, BODY_WIDTH, bodyHeight);
       });
 
-      const maxVol = Math.max(...candles.map((c) => c.volume), 1);
-      candles.forEach((candle, index) => {
-        const x = xForIndex(index);
-        const barH = (candle.volume / maxVol) * (volH - 8);
-        const bullish = candle.close >= candle.open;
-        ctx.fillStyle = bullish ? "rgba(52, 211, 153, 0.65)" : "rgba(251, 113, 133, 0.65)";
-        ctx.fillRect(x - candleWidth / 2, volTop + volH - barH, candleWidth, barH);
-      });
-
-      ctx.fillStyle = "#94a3b8";
-      ctx.font = "10px ui-sans-serif, system-ui";
-      ctx.textAlign = "left";
-      ctx.fillText("Volume", pad.left, volTop + 12);
-
-      ctx.strokeStyle = "rgba(36, 48, 71, 0.65)";
+      const last = candles[candles.length - 1];
+      const lastY = yForPrice(last.close, priceTop, priceH);
+      ctx.strokeStyle = COLORS.lastPrice;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
       ctx.beginPath();
-      ctx.moveTo(pad.left, volTop);
-      ctx.lineTo(width - pad.right, volTop);
-      ctx.moveTo(pad.left, volTop + volH);
-      ctx.lineTo(width - pad.right, volTop + volH);
+      ctx.moveTo(pad.left, lastY);
+      ctx.lineTo(plotRight, lastY);
       ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = COLORS.lastPrice;
+      ctx.textAlign = "left";
+      ctx.font = "10px ui-sans-serif, system-ui";
+      ctx.fillText(last.close.toFixed(2), plotRight + 4, lastY + 3);
 
+      drawPanelBg(ctx, pad.left, volTop, plotW, volH);
+      drawGrid(ctx, pad.left, volTop, plotW, volH, 2);
+      const maxVol = Math.max(...visible.map((c) => c.volume), 1);
+      visible.forEach((candle, localIdx) => {
+        const index = startIndex + localIdx;
+        const x = xForIndex(index);
+        const barH = Math.max(1, (candle.volume / maxVol) * (volH - 14));
+        const bullish = candle.close >= candle.open;
+        ctx.fillStyle = bullish ? COLORS.bullVol : COLORS.bearVol;
+        ctx.fillRect(x - BODY_WIDTH / 2, volTop + volH - barH - 2, BODY_WIDTH, barH);
+      });
+      ctx.fillStyle = COLORS.text;
+      ctx.font = "9px ui-sans-serif, system-ui";
+      ctx.textAlign = "left";
+      ctx.fillText("Volume", pad.left + 4, volTop + 11);
+
+      drawPanelBg(ctx, pad.left, rsiTop, plotW, rsiH);
+      drawGrid(ctx, pad.left, rsiTop, plotW, rsiH, 4);
       const rsiY = (value: number) => rsiTop + ((100 - value) / 100) * rsiH;
-      [30, 50, 70].forEach((level) => {
+      [30, 70].forEach((level) => {
         const y = rsiY(level);
-        ctx.strokeStyle = level === 50 ? "rgba(148, 163, 184, 0.35)" : "rgba(251, 113, 133, 0.35)";
-        ctx.setLineDash(level === 50 ? [4, 4] : [2, 4]);
+        ctx.strokeStyle = "rgba(239, 83, 80, 0.25)";
+        ctx.setLineDash([2, 4]);
         ctx.beginPath();
         ctx.moveTo(pad.left, y);
-        ctx.lineTo(width - pad.right, y);
+        ctx.lineTo(plotRight, y);
         ctx.stroke();
         ctx.setLineDash([]);
-        ctx.fillStyle = "#64748b";
-        ctx.textAlign = "right";
-        ctx.fillText(String(level), pad.left - 4, y + 3);
       });
 
-      if (rsiSeries.length >= 2) {
-        ctx.strokeStyle = "#a78bfa";
-        ctx.lineWidth = 1.5;
+      const visibleRsi = rsiSeries.filter((point) => {
+        const idx = candles.findIndex((c) => c.time === point.time);
+        return idx >= startIndex;
+      });
+
+      if (visibleRsi.length >= 2) {
+        ctx.strokeStyle = COLORS.rsi;
+        ctx.lineWidth = 1.25;
         ctx.beginPath();
-        rsiSeries.forEach((point, idx) => {
+        visibleRsi.forEach((point, idx) => {
           const candleIndex = candles.findIndex((c) => c.time === point.time);
           if (candleIndex < 0) return;
           const x = xForIndex(candleIndex);
-          const y = rsiY(point.value);
+          const y = rsiY(Math.min(100, Math.max(0, point.value)));
           if (idx === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         });
         ctx.stroke();
       }
 
-      ctx.fillStyle = "#94a3b8";
+      ctx.fillStyle = COLORS.text;
+      ctx.font = "9px ui-sans-serif, system-ui";
       ctx.textAlign = "left";
-      ctx.fillText("RSI (14)", pad.left, rsiTop + 12);
+      ctx.fillText("RSI 14", pad.left + 4, rsiTop + 11);
+      ctx.textAlign = "right";
+      ctx.fillText("70", pad.left - 6, rsiY(70) + 3);
+      ctx.fillText("30", pad.left - 6, rsiY(30) + 3);
 
-      ctx.strokeStyle = "rgba(36, 48, 71, 0.65)";
-      ctx.beginPath();
-      ctx.moveTo(pad.left, rsiTop);
-      ctx.lineTo(width - pad.right, rsiTop);
-      ctx.moveTo(pad.left, rsiTop + rsiH);
-      ctx.lineTo(width - pad.right, rsiTop + rsiH);
-      ctx.stroke();
-
-      const last = candles[candles.length - 1];
-      ctx.fillStyle = "#e2e8f0";
+      const tickStep = Math.max(1, Math.floor(visible.length / 8));
+      ctx.fillStyle = COLORS.text;
+      ctx.font = "9px ui-sans-serif, system-ui";
       ctx.textAlign = "center";
-      ctx.fillText(
-        new Date(last.timestamp).toLocaleTimeString("en-IN", {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        }),
-        width - pad.right,
-        height - 2
-      );
+      for (let localIdx = 0; localIdx < visible.length; localIdx += tickStep) {
+        const candle = visible[localIdx];
+        const x = xForIndex(startIndex + localIdx);
+        ctx.fillText(
+          new Date(candle.timestamp).toLocaleTimeString("en-IN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          }),
+          x,
+          height - 6
+        );
+      }
     };
 
     draw();
@@ -203,9 +277,9 @@ export function StreamingChart({
     <div ref={containerRef} className="stream-chart-wrap">
       <canvas ref={canvasRef} aria-label="Nifty 50 one second streaming chart" />
       <div className="stream-chart-legend">
-        <span><i className="legend-dot legend-fib" /> Fib retracement</span>
+        <span><i className="legend-dot legend-fib" /> Fib</span>
         <span><i className="legend-dot legend-vol" /> Volume</span>
-        <span><i className="legend-dot legend-rsi" /> RSI 14</span>
+        <span><i className="legend-dot legend-rsi" /> RSI</span>
       </div>
     </div>
   );

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Maximize2, Minimize2 } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { StreamingChart } from "@/components/streaming/StreamingChart";
 import { useKite } from "@/contexts/kite-context";
+import { buildAutoTradePlan, saveAutoTradePlan } from "@/lib/auto-trade";
 import type { ParsedCandle } from "@/lib/candles";
 import { appendSecondCandle } from "@/lib/second-candles";
 import {
@@ -20,10 +21,23 @@ const REFRESH_MS = 1000;
 const CHART_HEIGHT = 480;
 const CHART_HEIGHT_FULLSCREEN = 560;
 
-function legToUrl(action: string, strike: number | null) {
+function legToUrl(action: string, strike: number | null, auto = false) {
   if (!strike || action === "WAIT") return null;
   const leg = action.toLowerCase().replace(/_/g, "-");
-  return `/dashboard/trade?strike=${strike}&leg=${leg}`;
+  return `/dashboard/trade?strike=${strike}&leg=${leg}${auto ? "&auto=1" : ""}`;
+}
+
+function optionLtpForAction(
+  chain: OptionChainResponse | null,
+  action: string,
+  strike: number | null
+): number {
+  if (!chain || !strike) return 0;
+  const row = chain.chain.find((r) => r.strike === strike);
+  if (!row) return 0;
+  if (action.startsWith("CE")) return row.ce?.quote?.last_price ?? 0;
+  if (action.startsWith("PE")) return row.pe?.quote?.last_price ?? 0;
+  return 0;
 }
 
 function MetricCard({
@@ -48,6 +62,7 @@ function MetricCard({
 
 export default function StreamingPage() {
   const { connected, loginUrl } = useKite();
+  const navigate = useNavigate();
   const [stream, setStream] = useState<NiftyStreamResponse | null>(null);
   const [secondCandles, setSecondCandles] = useState<ParsedCandle[]>([]);
   const [chain, setChain] = useState<OptionChainResponse | null>(null);
@@ -202,6 +217,25 @@ export default function StreamingPage() {
   const tradeUrl = gemini?.suggestion
     ? legToUrl(gemini.suggestion.action, gemini.suggestion.strike)
     : null;
+  const autoTradeUrl = gemini?.suggestion
+    ? legToUrl(gemini.suggestion.action, gemini.suggestion.strike, true)
+    : null;
+
+  const handleStartAutoTrade = () => {
+    if (!gemini?.suggestion || !autoTradeUrl) return;
+    const { action, strike } = gemini.suggestion;
+    if (action === "WAIT" || !strike) return;
+    const optionLtp = optionLtpForAction(chain, action, strike);
+    if (
+      !window.confirm(
+        `Start AI auto-trade for ${action.replace(/_/g, " ")} @ strike ${strike}?\n\nAI will wait for the right entry, place a REAL Zerodha order, and exit at target/stop for profit.`
+      )
+    ) {
+      return;
+    }
+    saveAutoTradePlan(buildAutoTradePlan(gemini.suggestion, optionLtp));
+    navigate(autoTradeUrl);
+  };
 
   const renderGeminiPanel = () => (
     <>
@@ -254,9 +288,14 @@ export default function StreamingPage() {
             </p>
           )}
 
+          {autoTradeUrl && gemini.suggestion.action !== "WAIT" && (
+            <button type="button" className="btn btn-primary btn-full" onClick={handleStartAutoTrade}>
+              Start AI Auto Trade
+            </button>
+          )}
           {tradeUrl && (
-            <Link to={tradeUrl} className="btn btn-primary btn-full">
-              Open Trade Ticket
+            <Link to={tradeUrl} className="btn btn-secondary btn-full mt-2">
+              Open Manual Trade Ticket
             </Link>
           )}
 

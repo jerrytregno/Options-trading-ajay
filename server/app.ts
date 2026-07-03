@@ -372,6 +372,7 @@ function getGeminiConfig() {
   const apiKey = process.env.GEMINI_API_KEY;
   const model = process.env.GEMINI_MODEL ?? "gemini-3.5-flash";
   const cacheMs = Math.max(Number(process.env.GEMINI_CACHE_MS ?? 1000), 1000);
+  const entryCacheMs = Math.max(Number(process.env.GEMINI_ENTRY_CACHE_MS ?? 15000), 5000);
 
   const thinkingBudgetRaw = process.env.GEMINI_THINKING_BUDGET ?? "-1";
   const thinkingBudget =
@@ -389,6 +390,7 @@ function getGeminiConfig() {
     apiKey: apiKey ?? null,
     model,
     cacheMs,
+    entryCacheMs,
     thinkingBudget: Number.isFinite(thinkingBudget) ? thinkingBudget : -1,
     maxOutputTokens,
   };
@@ -441,6 +443,25 @@ let geminiSuggestionCache: {
   thinking?: string;
 } | null = null;
 let geminiSuggestionCacheExpiry = 0;
+
+const GEMINI_ENTRY_SCHEMA = {
+  type: "object",
+  properties: {
+    signal: { type: "string", enum: ["ENTER", "WAIT", "ABORT"] },
+    reason: { type: "string" },
+    limitPrice: { type: "number", nullable: true },
+  },
+  required: ["signal", "reason"],
+};
+
+let geminiEntryCache: {
+  signal: string;
+  reason: string;
+  limitPrice: number | null;
+  model: string;
+  updatedAt: string;
+} | null = null;
+let geminiEntryCacheExpiry = 0;
 
 function extractJsonObject(text: string) {
   const start = text.indexOf("{");
@@ -533,6 +554,40 @@ function normalizeGeminiSuggestion(parsed: Record<string, unknown>): GeminiSugge
     riskPlan: String(parsed.riskPlan ?? ""),
     invalidation: String(parsed.invalidation ?? ""),
   };
+}
+
+async function callGeminiEntry(prompt: string) {
+  const config = getGeminiConfig();
+  if (!config.apiKey) throw new Error("Gemini API key not configured");
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 512,
+          responseMimeType: "application/json",
+          responseSchema: GEMINI_ENTRY_SCHEMA,
+          thinkingConfig: {
+            includeThoughts: false,
+            thinkingBudget: 1024,
+          },
+        },
+      }),
+    }
+  );
+
+  const json: unknown = await res.json();
+  if (!res.ok) {
+    const message =
+      (json as { error?: { message?: string } }).error?.message ?? "Gemini request failed";
+    throw new Error(message);
+  }
+  return extractGeminiResponse(json);
 }
 
 async function callGemini(prompt: string) {
@@ -876,6 +931,82 @@ ${JSON.stringify(snapshot)}`;
     }
 
     const message = error instanceof Error ? error.message : "Gemini suggestion failed";
+    return res.status(502).json({ error: message });
+  }
+});
+
+app.post("/api/gemini/entry-timing", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const gemini = getGeminiConfig();
+  if (!gemini.configured) {
+    return res.status(503).json({ error: "Gemini API key not configured on server" });
+  }
+
+  const now = Date.now();
+  if (geminiEntryCache && now < geminiEntryCacheExpiry) {
+    return res.json({
+      data: { ...geminiEntryCache, cached: true, refreshInMs: geminiEntryCacheExpiry - now },
+    });
+  }
+
+  try {
+    const input = req.body as Record<string, unknown>;
+    const marketContext = getIndianMarketContext();
+
+    if (!marketContext.isMarketOpen) {
+      const payload = {
+        signal: "WAIT",
+        reason: `Market ${marketContext.sessionStatus} — NSE F&O hours ${marketContext.sessionHoursIST}`,
+        limitPrice: null,
+        model: gemini.model,
+        updatedAt: new Date().toISOString(),
+        cached: false,
+      };
+      return res.json({ data: payload });
+    }
+
+    const prompt = `You are executing a planned Nifty 50 options trade on NSE F&O.
+Decide if NOW is the right second to ENTER or keep WAITing.
+
+Clock (IST): ${marketContext.currentDateTimeIST}
+Session: ${marketContext.sessionStatus}, ${marketContext.minutesToClose} min to close
+
+Return JSON only:
+- ENTER when entry conditions from the plan are met NOW (momentum, premium, spot vs strike).
+- WAIT when setup is valid but timing is not ideal yet.
+- ABORT when invalidation/risk plan is breached — do not enter.
+
+Planned trade snapshot:
+${JSON.stringify({ marketContext, ...input })}`;
+
+    const { text } = await callGeminiEntry(prompt);
+    const parsed = parseGeminiJson(text);
+    const signal = ["ENTER", "WAIT", "ABORT"].includes(String(parsed.signal))
+      ? String(parsed.signal)
+      : "WAIT";
+
+    const payload = {
+      signal,
+      reason: String(parsed.reason ?? "Waiting for better timing"),
+      limitPrice: typeof parsed.limitPrice === "number" ? parsed.limitPrice : null,
+      model: gemini.model,
+      updatedAt: new Date().toISOString(),
+      cached: false,
+    };
+
+    geminiEntryCache = payload;
+    geminiEntryCacheExpiry = now + gemini.entryCacheMs;
+
+    return res.json({ data: payload });
+  } catch (error) {
+    if (geminiEntryCache) {
+      return res.json({
+        data: { ...geminiEntryCache, cached: true, refreshInMs: Math.max(geminiEntryCacheExpiry - now, 0) },
+      });
+    }
+    const message = error instanceof Error ? error.message : "Entry timing failed";
     return res.status(502).json({ error: message });
   }
 });
