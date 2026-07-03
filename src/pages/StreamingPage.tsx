@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { Maximize2, Minimize2 } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { CandlestickChart } from "@/components/streaming/CandlestickChart";
 import { useKite } from "@/contexts/kite-context";
@@ -21,7 +22,7 @@ const REFRESH_MS = 1000;
 
 function legToUrl(action: string, strike: number | null) {
   if (!strike || action === "WAIT") return null;
-  const leg = action.toLowerCase().replace("_", "-");
+  const leg = action.toLowerCase().replace(/_/g, "-");
   return `/dashboard/trade?strike=${strike}&leg=${leg}`;
 }
 
@@ -51,6 +52,8 @@ export default function StreamingPage() {
   const [chain, setChain] = useState<OptionChainResponse | null>(null);
   const [gemini, setGemini] = useState<GeminiSuggestionResponse | null>(null);
   const [geminiError, setGeminiError] = useState("");
+  const [geminiWarning, setGeminiWarning] = useState("");
+  const [aiFullscreen, setAiFullscreen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const geminiInflight = useRef(false);
@@ -133,14 +136,22 @@ export default function StreamingPage() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Gemini unavailable");
-      setGemini(json.data as GeminiSuggestionResponse);
+      const data = json.data as GeminiSuggestionResponse;
+      setGemini(data);
       setGeminiError("");
+      setGeminiWarning(data.stale ? (data.warning ?? "Showing last AI suggestion") : (data.warning ?? ""));
     } catch (err) {
-      setGeminiError(err instanceof Error ? err.message : "Gemini unavailable");
+      const message = err instanceof Error ? err.message : "Gemini unavailable";
+      if (gemini) {
+        setGeminiWarning(message);
+        setGeminiError("");
+      } else {
+        setGeminiError(message);
+      }
     } finally {
       geminiInflight.current = false;
     }
-  }, [connected, stream, candles, chain, technicals, liveMetrics]);
+  }, [connected, stream, candles, chain, technicals, liveMetrics, gemini]);
 
   useEffect(() => {
     if (!connected) return;
@@ -166,6 +177,114 @@ export default function StreamingPage() {
   const tradeUrl = gemini?.suggestion
     ? legToUrl(gemini.suggestion.action, gemini.suggestion.strike)
     : null;
+
+  useEffect(() => {
+    if (!aiFullscreen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAiFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [aiFullscreen]);
+
+  const renderGeminiPanel = (fullscreen = false) => (
+    <>
+      <div className={cn("card-header flex-between flex-wrap gap-3", fullscreen && "mb-4")}>
+        <div>
+          <h3 className="card-title">Gemini AI · 3.5 Flash</h3>
+          <p className="card-desc">Real-time Nifty options trade suggestions</p>
+        </div>
+        <button
+          type="button"
+          className="btn btn-outline btn-sm"
+          onClick={() => setAiFullscreen(!fullscreen)}
+          aria-label={fullscreen ? "Exit fullscreen" : "Open AI fullscreen"}
+        >
+          {fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          {fullscreen ? "Exit fullscreen" : "Fullscreen"}
+        </button>
+      </div>
+
+      {geminiError && <div className="alert alert-error mb-4">{geminiError}</div>}
+      {geminiWarning && !geminiError && (
+        <div className="alert alert-warning mb-4">{geminiWarning}</div>
+      )}
+
+      {gemini?.suggestion ? (
+        <div className="stream-ai-content">
+          <div className="flex gap-2 flex-wrap mb-4">
+            <span className={cn("badge", gemini.suggestion.bias === "bullish" ? "badge-success" : gemini.suggestion.bias === "bearish" ? "badge-danger" : "badge-default")}>
+              {gemini.suggestion.bias}
+            </span>
+            <span className="badge badge-warning">{gemini.suggestion.confidence} confidence</span>
+            <span className="badge badge-default">{gemini.suggestion.action.replace(/_/g, " ")}</span>
+            {gemini.cached && <span className="badge badge-default">Cached</span>}
+          </div>
+
+          <p className="stream-ai-summary">{gemini.suggestion.summary}</p>
+
+          {gemini.thinking && (
+            <div className="stream-ai-section stream-ai-thinking">
+              <p className="label">AI Reasoning</p>
+              <p className="text-muted stream-ai-thinking-text">{gemini.thinking}</p>
+            </div>
+          )}
+
+          <div className="stream-ai-section">
+            <p className="label">Entry Plan</p>
+            <p className="text-muted" style={{ fontSize: fullscreen ? "1rem" : "0.875rem" }}>
+              {gemini.suggestion.entryPlan}
+            </p>
+          </div>
+          <div className="stream-ai-section">
+            <p className="label">Risk Plan</p>
+            <p className="text-muted" style={{ fontSize: fullscreen ? "1rem" : "0.875rem" }}>
+              {gemini.suggestion.riskPlan}
+            </p>
+          </div>
+          <div className="stream-ai-section">
+            <p className="label">Invalidation</p>
+            <p className="text-muted" style={{ fontSize: fullscreen ? "1rem" : "0.875rem" }}>
+              {gemini.suggestion.invalidation}
+            </p>
+          </div>
+
+          {gemini.suggestion.strike && (
+            <p className="text-muted mb-4" style={{ fontSize: "0.8125rem" }}>
+              Strike {formatNumber(gemini.suggestion.strike, 0)} · {gemini.suggestion.product} · {gemini.suggestion.orderType}
+            </p>
+          )}
+
+          {tradeUrl && (
+            <Link to={tradeUrl} className="btn btn-primary btn-full">
+              Open Trade Ticket
+            </Link>
+          )}
+
+          <p className="text-muted mt-4" style={{ fontSize: "0.6875rem" }}>
+            Model: {gemini.model}
+            {gemini.updatedAt ? ` · Updated ${new Date(gemini.updatedAt).toLocaleTimeString("en-IN")}` : ""}
+            {" · "}Not financial advice
+          </p>
+        </div>
+      ) : (
+        <div className="spinner-center" style={{ minHeight: "12rem" }}>
+          <div className="spinner spinner-sm" />
+          <p className="text-muted mt-3" style={{ fontSize: "0.875rem" }}>Analyzing market…</p>
+        </div>
+      )}
+    </>
+  );
+
+  if (aiFullscreen) {
+    return (
+      <DashboardShell hideSidebar>
+        <div className="stream-ai-fullscreen card">
+          {renderGeminiPanel(true)}
+        </div>
+      </DashboardShell>
+    );
+  }
 
   return (
     <DashboardShell>
@@ -288,60 +407,7 @@ export default function StreamingPage() {
           </div>
 
           <aside className="stream-ai-panel card">
-            <div className="card-header">
-              <h3 className="card-title">Gemini AI · 3.5 Flash</h3>
-              <p className="card-desc">Real-time Nifty options trade suggestions</p>
-            </div>
-
-            {geminiError && <div className="alert alert-error mb-4">{geminiError}</div>}
-
-            {gemini?.suggestion ? (
-              <div className="stream-ai-content">
-                <div className="flex gap-2 flex-wrap mb-4">
-                  <span className={cn("badge", gemini.suggestion.bias === "bullish" ? "badge-success" : gemini.suggestion.bias === "bearish" ? "badge-danger" : "badge-default")}>
-                    {gemini.suggestion.bias}
-                  </span>
-                  <span className="badge badge-warning">{gemini.suggestion.confidence} confidence</span>
-                  <span className="badge badge-default">{gemini.suggestion.action.replace("_", " ")}</span>
-                </div>
-
-                <p className="stream-ai-summary">{gemini.suggestion.summary}</p>
-
-                <div className="stream-ai-section">
-                  <p className="label">Entry Plan</p>
-                  <p className="text-muted" style={{ fontSize: "0.875rem" }}>{gemini.suggestion.entryPlan}</p>
-                </div>
-                <div className="stream-ai-section">
-                  <p className="label">Risk Plan</p>
-                  <p className="text-muted" style={{ fontSize: "0.875rem" }}>{gemini.suggestion.riskPlan}</p>
-                </div>
-                <div className="stream-ai-section">
-                  <p className="label">Invalidation</p>
-                  <p className="text-muted" style={{ fontSize: "0.875rem" }}>{gemini.suggestion.invalidation}</p>
-                </div>
-
-                {gemini.suggestion.strike && (
-                  <p className="text-muted mb-4" style={{ fontSize: "0.8125rem" }}>
-                    Strike {formatNumber(gemini.suggestion.strike, 0)} · {gemini.suggestion.product} · {gemini.suggestion.orderType}
-                  </p>
-                )}
-
-                {tradeUrl && (
-                  <Link to={tradeUrl} className="btn btn-primary btn-full">
-                    Open Trade Ticket
-                  </Link>
-                )}
-
-                <p className="text-muted mt-4" style={{ fontSize: "0.6875rem" }}>
-                  Model: {gemini.model} · Not financial advice
-                </p>
-              </div>
-            ) : (
-              <div className="spinner-center" style={{ minHeight: "12rem" }}>
-                <div className="spinner spinner-sm" />
-                <p className="text-muted mt-3" style={{ fontSize: "0.875rem" }}>Analyzing market…</p>
-              </div>
-            )}
+            {renderGeminiPanel(false)}
           </aside>
         </div>
       )}

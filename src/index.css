@@ -376,6 +376,37 @@ td { padding: 0.75rem 1rem; border-bottom: 1px solid rgba(36, 48, 71, 0.5); }
 .stream-ai-content { display: flex; flex-direction: column; gap: 0.75rem; }
 .stream-ai-summary { font-size: 0.9375rem; line-height: 1.5; }
 .stream-ai-section { padding-top: 0.25rem; }
+.stream-ai-fullscreen {
+  min-height: calc(100vh - 3rem);
+  display: flex;
+  flex-direction: column;
+}
+.stream-ai-fullscreen .stream-ai-content {
+  flex: 1;
+}
+.stream-ai-thinking-text {
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  max-height: 14rem;
+  overflow: auto;
+  padding: 0.75rem;
+  border-radius: 8px;
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  background: rgba(59, 130, 246, 0.06);
+}
+.stream-ai-fullscreen .stream-ai-summary {
+  font-size: 1.125rem;
+}
+.stream-ai-fullscreen .stream-ai-thinking-text {
+  max-height: 28rem;
+  font-size: 0.9375rem;
+}
+.dashboard-layout-fullscreen { padding-left: 0 !important; }
+.dashboard-layout-fullscreen .dashboard-main {
+  max-width: none;
+  padding-top: 1rem;
+}
 
 /* Dashboard layout */
 .dashboard-layout { min-height: 100vh; isolation: isolate; }

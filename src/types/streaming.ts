@@ -29,6 +29,11 @@ export interface GeminiTradeSuggestion {
 
 export interface GeminiSuggestionResponse {
   suggestion: GeminiTradeSuggestion;
+  thinking?: string;
   model: string;
   updatedAt: string;
+  cached?: boolean;
+  stale?: boolean;
+  warning?: string;
+  refreshInMs?: number;
 }

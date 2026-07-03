@@ -2,7 +2,13 @@ import { Navigate } from "react-router-dom";
 import { useAuth } from "@/contexts/auth-context";
 import { Sidebar } from "@/components/layout/sidebar";
 
-export function DashboardShell({ children }: { children: React.ReactNode }) {
+export function DashboardShell({
+  children,
+  hideSidebar = false,
+}: {
+  children: React.ReactNode;
+  hideSidebar?: boolean;
+}) {
   const { user, loading } = useAuth();
 
   if (loading) {
@@ -16,8 +22,8 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
   if (!user) return <Navigate to="/login" replace />;
 
   return (
-    <div className="dashboard-layout">
-      <Sidebar />
+    <div className={`dashboard-layout${hideSidebar ? " dashboard-layout-fullscreen" : ""}`}>
+      {!hideSidebar && <Sidebar />}
       <main className="dashboard-main">{children}</main>
     </div>
   );

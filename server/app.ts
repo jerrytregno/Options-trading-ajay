@@ -13,10 +13,11 @@ import {
   findAtmStrike,
 } from "../src/lib/greeks.js";
 
-dotenv.config({ path: ".env.local" });
-dotenv.config();
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.join(__dirname, "..");
+
+dotenv.config({ path: path.join(projectRoot, ".env.local") });
+dotenv.config({ path: path.join(projectRoot, ".env") });
 const app = express();
 const KITE_BASE = "https://api.kite.trade";
 const TOKEN_COOKIE = "kite_access_token";
@@ -374,33 +375,173 @@ function getIntradayRange() {
   return { from: formatKiteDateTime(from), to: formatKiteDateTime(now) };
 }
 
+const GEMINI_MODEL_OUTPUT_LIMIT = 65536;
+
 function getGeminiConfig() {
   const apiKey = process.env.GEMINI_API_KEY;
   const model = process.env.GEMINI_MODEL ?? "gemini-3.5-flash";
-  return { configured: Boolean(apiKey), apiKey: apiKey ?? null, model };
+  const cacheMs = Math.max(Number(process.env.GEMINI_CACHE_MS ?? 1000), 1000);
+
+  const thinkingBudgetRaw = process.env.GEMINI_THINKING_BUDGET ?? "-1";
+  const thinkingBudget =
+    thinkingBudgetRaw === "-1" || thinkingBudgetRaw === "dynamic"
+      ? -1
+      : Number(thinkingBudgetRaw);
+
+  const maxOutputTokens = Math.min(
+    Math.max(Number(process.env.GEMINI_MAX_OUTPUT_TOKENS ?? GEMINI_MODEL_OUTPUT_LIMIT), 256),
+    GEMINI_MODEL_OUTPUT_LIMIT
+  );
+
+  return {
+    configured: Boolean(apiKey),
+    apiKey: apiKey ?? null,
+    model,
+    cacheMs,
+    thinkingBudget: Number.isFinite(thinkingBudget) ? thinkingBudget : -1,
+    maxOutputTokens,
+  };
 }
 
-function extractGeminiText(payload: unknown) {
+const GEMINI_TRADE_SCHEMA = {
+  type: "object",
+  properties: {
+    bias: { type: "string", enum: ["bullish", "bearish", "neutral"] },
+    action: { type: "string", enum: ["CE_BUY", "CE_SELL", "PE_BUY", "PE_SELL", "WAIT"] },
+    strike: { type: "number", nullable: true },
+    product: { type: "string", enum: ["MIS", "NRML"] },
+    orderType: { type: "string", enum: ["MARKET", "LIMIT"] },
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+    summary: { type: "string" },
+    entryPlan: { type: "string" },
+    riskPlan: { type: "string" },
+    invalidation: { type: "string" },
+  },
+  required: [
+    "bias",
+    "action",
+    "confidence",
+    "summary",
+    "entryPlan",
+    "riskPlan",
+    "invalidation",
+    "product",
+    "orderType",
+  ],
+};
+
+interface GeminiSuggestionPayload {
+  bias: string;
+  action: string;
+  strike: number | null;
+  product: string;
+  orderType: string;
+  confidence: string;
+  summary: string;
+  entryPlan: string;
+  riskPlan: string;
+  invalidation: string;
+}
+
+let geminiSuggestionCache: {
+  suggestion: GeminiSuggestionPayload;
+  model: string;
+  updatedAt: string;
+  thinking?: string;
+} | null = null;
+let geminiSuggestionCacheExpiry = 0;
+
+function extractJsonObject(text: string) {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) return text.slice(start, end + 1);
+  return null;
+}
+
+function extractGeminiResponse(payload: unknown) {
   const data = payload as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+      finishReason?: string;
+    }>;
     error?: { message?: string };
   };
   if (data.error?.message) throw new Error(data.error.message);
-  const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("") ?? "";
-  if (!text.trim()) throw new Error("Empty response from Gemini");
-  return text.trim();
+
+  const parts = data.candidates?.[0]?.content?.parts ?? [];
+  const thoughts: string[] = [];
+  const outputs: string[] = [];
+
+  for (const part of parts) {
+    if (!part.text?.trim()) continue;
+    if (part.thought) thoughts.push(part.text.trim());
+    else outputs.push(part.text.trim());
+  }
+
+  let text = outputs.join("\n").trim();
+  if (!text && parts.length > 0) {
+    text = parts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? "")
+      .join("")
+      .trim();
+  }
+
+  if (!text) {
+    const reason = data.candidates?.[0]?.finishReason;
+    throw new Error(reason ? `Empty Gemini response (${reason})` : "Empty response from Gemini");
+  }
+
+  return {
+    text,
+    thinking: thoughts.join("\n\n").trim(),
+  };
 }
 
 function parseGeminiJson(text: string) {
-  const trimmed = text.trim();
-  try {
-    if (trimmed.startsWith("{")) return JSON.parse(trimmed) as Record<string, unknown>;
-    const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    if (fenced?.[1]) return JSON.parse(fenced[1]) as Record<string, unknown>;
-  } catch {
-    /* fall through */
+  const candidates = [
+    text.trim(),
+    text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim(),
+    extractJsonObject(text),
+  ].filter(Boolean) as string[];
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* try next candidate */
+    }
   }
+
   throw new Error("Gemini returned invalid JSON");
+}
+
+function normalizeGeminiSuggestion(parsed: Record<string, unknown>): GeminiSuggestionPayload {
+  const actionValues = new Set(["CE_BUY", "CE_SELL", "PE_BUY", "PE_SELL", "WAIT"]);
+  const biasValues = new Set(["bullish", "bearish", "neutral"]);
+  const confidenceValues = new Set(["high", "medium", "low"]);
+
+  const action = actionValues.has(String(parsed.action)) ? String(parsed.action) : "WAIT";
+  const bias = biasValues.has(String(parsed.bias)) ? String(parsed.bias) : "neutral";
+  const confidence = confidenceValues.has(String(parsed.confidence))
+    ? String(parsed.confidence)
+    : "medium";
+
+  return {
+    bias,
+    action,
+    strike: typeof parsed.strike === "number" ? parsed.strike : null,
+    product: parsed.product === "NRML" ? "NRML" : "MIS",
+    orderType: parsed.orderType === "MARKET" ? "MARKET" : "LIMIT",
+    confidence,
+    summary: String(parsed.summary ?? "No suggestion available."),
+    entryPlan: String(parsed.entryPlan ?? ""),
+    riskPlan: String(parsed.riskPlan ?? ""),
+    invalidation: String(parsed.invalidation ?? ""),
+  };
 }
 
 async function callGemini(prompt: string) {
@@ -415,9 +556,14 @@ async function callGemini(prompt: string) {
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
-          temperature: 0.35,
-          maxOutputTokens: 768,
+          temperature: 0.3,
+          maxOutputTokens: config.maxOutputTokens,
           responseMimeType: "application/json",
+          responseSchema: GEMINI_TRADE_SCHEMA,
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingBudget: config.thinkingBudget,
+          },
         },
       }),
     }
@@ -429,7 +575,7 @@ async function callGemini(prompt: string) {
       (json as { error?: { message?: string } }).error?.message ?? "Gemini request failed";
     throw new Error(message);
   }
-  return extractGeminiText(json);
+  return extractGeminiResponse(json);
 }
 
 async function fetchHistoricalCandles(
@@ -678,54 +824,61 @@ app.post("/api/gemini/trade-suggestion", async (req, res) => {
     return res.status(503).json({ error: "Gemini API key not configured on server" });
   }
 
+  const now = Date.now();
+  if (geminiSuggestionCache && now < geminiSuggestionCacheExpiry) {
+    return res.json({
+      data: {
+        ...geminiSuggestionCache,
+        cached: true,
+        refreshInMs: geminiSuggestionCacheExpiry - now,
+      },
+    });
+  }
+
   try {
     const input = req.body as Record<string, unknown>;
-    const prompt = `You are an expert Indian Nifty 50 options intraday trader. Analyze the live snapshot and return ONLY valid JSON with this exact shape:
-{
-  "bias": "bullish" | "bearish" | "neutral",
-  "action": "CE_BUY" | "CE_SELL" | "PE_BUY" | "PE_SELL" | "WAIT",
-  "strike": number | null,
-  "product": "MIS" | "NRML",
-  "orderType": "MARKET" | "LIMIT",
-  "confidence": "high" | "medium" | "low",
-  "summary": "one sentence",
-  "entryPlan": "short actionable entry plan",
-  "riskPlan": "stop loss / position sizing guidance",
-  "invalidation": "what cancels the setup"
-}
-
-Rules:
-- Prefer ATM or one-strike OTM Nifty weekly options.
-- Use WAIT when signals conflict or RSI is mid-range without trend.
-- Keep language concise and actionable for a 1-minute scalping/intraday context.
-- strike must be a valid Nifty strike near ATM when action is not WAIT.
+    const prompt = `You are an expert Indian Nifty 50 options intraday trader.
+Analyze the live snapshot and recommend one actionable Nifty weekly options trade.
+Prefer ATM or one-strike OTM. Use WAIT when signals conflict or RSI is mid-range without trend.
+Keep each field concise for 1-minute intraday context.
 
 Live snapshot:
 ${JSON.stringify(input)}`;
 
-    const text = await callGemini(prompt);
+    const { text, thinking } = await callGemini(prompt);
     const parsed = parseGeminiJson(text);
-    const suggestion = {
-      bias: parsed.bias ?? "neutral",
-      action: parsed.action ?? "WAIT",
-      strike: typeof parsed.strike === "number" ? parsed.strike : null,
-      product: parsed.product === "NRML" ? "NRML" : "MIS",
-      orderType: parsed.orderType === "MARKET" ? "MARKET" : "LIMIT",
-      confidence: parsed.confidence ?? "medium",
-      summary: String(parsed.summary ?? "No suggestion available."),
-      entryPlan: String(parsed.entryPlan ?? ""),
-      riskPlan: String(parsed.riskPlan ?? ""),
-      invalidation: String(parsed.invalidation ?? ""),
+    const suggestion = normalizeGeminiSuggestion(parsed);
+    const payload = {
+      suggestion,
+      thinking: thinking || undefined,
+      model: gemini.model,
+      updatedAt: new Date().toISOString(),
+      cached: false,
+      refreshInMs: gemini.cacheMs,
     };
 
-    return res.json({
-      data: {
-        suggestion,
-        model: gemini.model,
-        updatedAt: new Date().toISOString(),
-      },
-    });
+    geminiSuggestionCache = {
+      suggestion,
+      model: gemini.model,
+      updatedAt: payload.updatedAt,
+      thinking: payload.thinking,
+    };
+    geminiSuggestionCacheExpiry = now + gemini.cacheMs;
+
+    return res.json({ data: payload });
   } catch (error) {
+    if (geminiSuggestionCache) {
+      return res.json({
+        data: {
+          ...geminiSuggestionCache,
+          cached: true,
+          stale: true,
+          refreshInMs: Math.max(geminiSuggestionCacheExpiry - now, 0),
+          warning: error instanceof Error ? error.message : "Using last AI suggestion",
+        },
+      });
+    }
+
     const message = error instanceof Error ? error.message : "Gemini suggestion failed";
     return res.status(502).json({ error: message });
   }
