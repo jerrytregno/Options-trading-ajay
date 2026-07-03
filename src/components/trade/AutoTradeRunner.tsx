@@ -9,6 +9,7 @@ import {
   placeKiteOrder,
   shouldExitPosition,
 } from "@/lib/auto-trade";
+import { buildProtectedMarketOrder } from "@/lib/kite-orders";
 import { legLabel, parseTradeLeg, productForExchange, type TradeLeg } from "@/lib/trade-calculations";
 import type { EntryTimingApiResponse } from "@/types/auto-trade";
 import { cn, formatCurrency, formatNumber } from "@/lib/utils";
@@ -48,6 +49,7 @@ export function AutoTradeRunner({
   const [lastSignal, setLastSignal] = useState("");
   const [logs, setLogs] = useState<AutoTradeLogEntry[]>([]);
   const [error, setError] = useState("");
+  const [stopping, setStopping] = useState(false);
   const runningRef = useRef(false);
   const phaseRef = useRef<AutoTradePhase>("idle");
   const ltpRef = useRef(0);
@@ -136,7 +138,7 @@ export function AutoTradeRunner({
         const liveLtp = ltpRef.current;
         const limit = data.limitPrice && data.limitPrice > 0 ? data.limitPrice : liveLtp;
         const orderType = data.limitPrice && data.limitPrice > 0 ? "LIMIT" : "MARKET";
-        const payload: Record<string, string | number> = {
+        const baseFields = {
           tradingsymbol,
           exchange: "NFO",
           transaction_type: transactionType,
@@ -146,7 +148,10 @@ export function AutoTradeRunner({
           validity: "DAY",
           variety: "regular",
         };
-        if (orderType === "LIMIT") payload.price = limit;
+        const payload =
+          orderType === "LIMIT"
+            ? { ...baseFields, price: limit }
+            : buildProtectedMarketOrder(baseFields);
 
         const result = await placeKiteOrder(payload);
         setEntryOrderId(result.order_id);
@@ -163,37 +168,49 @@ export function AutoTradeRunner({
     }
   }, [plan, strike, leg, tradingsymbol, transactionType, product, quantity, pushLog]);
 
+  const squareOff = useCallback(
+    async (reason: string) => {
+      if (phaseRef.current !== "in_position") return;
+      setPhase("exiting");
+      pushLog(`${reason} — squaring off`, "warning");
+      try {
+        await refreshLtp();
+        const liveLtp = ltpRef.current;
+        const exitSide = exitTransactionType(leg);
+        const result = await placeKiteOrder(
+          buildProtectedMarketOrder({
+            tradingsymbol,
+            exchange: "NFO",
+            transaction_type: exitSide,
+            product,
+            quantity,
+          })
+        );
+        setExitOrderId(result.order_id);
+        const pnl = calcPremiumPnl(leg, entryPremium, liveLtp > 0 ? liveLtp : ltp, quantity);
+        setPhase("completed");
+        pushLog(
+          `Exit order ${result.order_id} · P&L ${formatCurrency(pnl)}`,
+          pnl >= 0 ? "success" : "error"
+        );
+        runningRef.current = false;
+      } catch (err) {
+        setPhase("error");
+        const msg = err instanceof Error ? err.message : "Exit failed";
+        setError(msg);
+        pushLog(msg, "error");
+        runningRef.current = false;
+      }
+    },
+    [leg, entryPremium, ltp, tradingsymbol, product, quantity, pushLog, refreshLtp]
+  );
+
   const checkExit = useCallback(async () => {
     if (phaseRef.current !== "in_position" || ltp <= 0 || entryPremium <= 0) return;
     const exitCheck = shouldExitPosition(leg, entryPremium, ltp, plan.targetPremium, plan.stopPremium);
     if (!exitCheck.exit) return;
-
-    setPhase("exiting");
-    pushLog(`${exitCheck.reason} — squaring off`, "warning");
-    try {
-      const result = await placeKiteOrder({
-        tradingsymbol,
-        exchange: "NFO",
-        transaction_type: exitTransactionType(leg),
-        order_type: "MARKET",
-        product,
-        quantity,
-        validity: "DAY",
-        variety: "regular",
-      });
-      setExitOrderId(result.order_id);
-      const pnl = calcPremiumPnl(leg, entryPremium, ltp, quantity);
-      setPhase("completed");
-      pushLog(`Exit order ${result.order_id} · P&L ${formatCurrency(pnl)}`, pnl >= 0 ? "success" : "error");
-      runningRef.current = false;
-    } catch (err) {
-      setPhase("error");
-      const msg = err instanceof Error ? err.message : "Exit failed";
-      setError(msg);
-      pushLog(msg, "error");
-      runningRef.current = false;
-    }
-  }, [leg, entryPremium, ltp, plan.targetPremium, plan.stopPremium, tradingsymbol, product, quantity, pushLog]);
+    await squareOff(exitCheck.reason);
+  }, [leg, entryPremium, ltp, plan.targetPremium, plan.stopPremium, squareOff]);
 
   const start = useCallback((skipConfirm = false) => {
     if (plan.action === "WAIT") {
@@ -219,7 +236,25 @@ export function AutoTradeRunner({
     })();
   }, [plan.action, leg, strike, pushLog, refreshLtp, checkEntry]);
 
-  const stop = () => {
+  const stop = async () => {
+    if (stopping || phase === "exiting") return;
+
+    if (phaseRef.current === "in_position") {
+      if (
+        !window.confirm(
+          `Stop auto-trade and square off ${legLabel(leg)} @ strike ${strike}?\n\nThis will place a REAL exit order on Zerodha.`
+        )
+      ) {
+        return;
+      }
+      setStopping(true);
+      runningRef.current = false;
+      await squareOff("Stopped by user");
+      setStopping(false);
+      onCancel?.();
+      return;
+    }
+
     runningRef.current = false;
     setPhase("cancelled");
     pushLog("Auto-trade cancelled by user", "warning");
@@ -327,8 +362,13 @@ export function AutoTradeRunner({
           </button>
         )}
         {(phase === "waiting" || phase === "in_position") && (
-          <button type="button" className="btn btn-danger" onClick={stop}>
-            Stop Auto Trade
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={() => void stop()}
+            disabled={stopping}
+          >
+            {stopping ? "Exiting…" : phase === "in_position" ? "Stop & Exit" : "Stop Auto Trade"}
           </button>
         )}
         <span className="badge badge-warning" style={{ alignSelf: "center" }}>

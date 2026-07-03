@@ -12,7 +12,13 @@ import {
   filterStrikesAroundAtm,
   findAtmStrike,
 } from "../src/lib/greeks.js";
-import { getIndianMarketContext } from "../src/lib/market-time.js";
+import { getIndianMarketContext, getNseSessionKiteRange } from "../src/lib/market-time.js";
+import { parseKiteCandles } from "../src/lib/candles.js";
+import { buildSessionContext } from "../src/lib/session-context.js";
+import {
+  normalizeKiteOrderBody,
+  resolveMarketProtection,
+} from "../src/lib/kite-orders.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, "..");
@@ -866,6 +872,74 @@ app.get("/api/kite/nifty-stream", async (req, res) => {
   }
 });
 
+const NIFTY_SESSION_CACHE_MS = 60000;
+let niftySessionCache: {
+  data: {
+    session: ReturnType<typeof buildSessionContext>;
+    note: string;
+    updatedAt: string;
+    cached?: boolean;
+    stale?: boolean;
+  };
+  updatedAt: string;
+} | null = null;
+let niftySessionCacheExpiry = 0;
+
+app.get("/api/kite/nifty-session", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const now = Date.now();
+  if (niftySessionCache && now < niftySessionCacheExpiry) {
+    return res.json({
+      data: { ...niftySessionCache.data, cached: true, updatedAt: niftySessionCache.updatedAt },
+    });
+  }
+
+  try {
+    const marketContext = getIndianMarketContext();
+    if (!marketContext.isMarketOpen && marketContext.sessionStatus !== "post_market") {
+      return res.json({
+        data: {
+          session: null,
+          note: `Session ${marketContext.sessionStatus}`,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    }
+
+    const range = getNseSessionKiteRange();
+    const historical = await fetchHistoricalCandles(
+      accessToken,
+      "NSE:NIFTY 50",
+      "minute",
+      range.from,
+      range.to
+    );
+    const candles = parseKiteCandles(historical.candles as unknown[]);
+    const session = buildSessionContext(candles, range.dateIST);
+    const payload = {
+      session,
+      note: session ? `${session.barCount} x 1m bars since 09:15 IST` : "No session candles",
+      updatedAt: new Date().toISOString(),
+      cached: false,
+    };
+
+    niftySessionCache = { data: payload, updatedAt: payload.updatedAt };
+    niftySessionCacheExpiry = now + NIFTY_SESSION_CACHE_MS;
+
+    return res.json({ data: payload });
+  } catch (error) {
+    if (niftySessionCache) {
+      return res.json({
+        data: { ...niftySessionCache.data, cached: true, stale: true },
+      });
+    }
+    const message = error instanceof Error ? error.message : "Failed to load session context";
+    return res.status(502).json({ error: message });
+  }
+});
+
 app.post("/api/gemini/trade-suggestion", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
@@ -904,6 +978,8 @@ Rules:
 - After ~3:15 PM IST favour MIS square-off / no new entries unless strong edge.
 - Prefer ATM or one-strike OTM Nifty weekly options (MIS for intraday).
 - Keep each field concise for 1-second intraday context.
+- Use sessionContext for full-day structure (open, high, low, VWAP, opening range, recent 1m bars).
+- Use recent1s for the last ~60 seconds only; do not ignore sessionContext when choosing CE vs PE.
 
 Live snapshot (includes marketContext):
 ${JSON.stringify(snapshot)}`;
@@ -1297,14 +1373,8 @@ app.post("/api/kite/orders", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
   try {
-    const body: Record<string, string> = { variety: "regular" };
-    for (const [key, value] of Object.entries(req.body)) {
-      if (value === undefined || value === null || value === "") continue;
-      body[key] = String(value);
-    }
-    if (body.exchange === "NFO" && body.product === "CNC") {
-      body.product = "NRML";
-    }
+    const marketProtection = resolveMarketProtection(process.env.KITE_MARKET_PROTECTION);
+    const body = normalizeKiteOrderBody(req.body as Record<string, string | number>, marketProtection);
     const data = await kitePost<{ order_id: string }>("/orders/regular", accessToken, body);
     return res.json({ data });
   } catch (error) {

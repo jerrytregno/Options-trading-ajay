@@ -1,6 +1,7 @@
 import type { GeminiTradeSuggestion } from "@/types/streaming";
 import type { ProductType, TradeLeg } from "@/lib/trade-calculations";
 import { parseTradeLeg } from "@/lib/trade-calculations";
+import { buildProtectedMarketOrder } from "@/lib/kite-orders";
 
 export const AUTO_TRADE_PLAN_KEY = "optionflow_auto_trade_plan";
 
@@ -101,11 +102,17 @@ export function exitTransactionType(leg: TradeLeg): "BUY" | "SELL" {
 }
 
 export async function placeKiteOrder(payload: Record<string, string | number>) {
+  const orderType = String(payload.order_type ?? "MARKET").toUpperCase();
+  const body =
+    orderType === "MARKET" || orderType === "SL-M"
+      ? buildProtectedMarketOrder(payload)
+      : payload;
+
   const res = await fetch("/api/kite/orders", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error ?? "Order failed");

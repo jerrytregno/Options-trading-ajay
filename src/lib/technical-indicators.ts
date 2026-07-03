@@ -1,4 +1,4 @@
-import type { ParsedCandle } from "@/lib/candles";
+import type { ParsedCandle } from "./candles";
 
 export interface MovingAveragePoint {
   time: string;

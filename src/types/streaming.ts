@@ -41,3 +41,13 @@ export interface GeminiSuggestionResponse {
   warning?: string;
   refreshInMs?: number;
 }
+
+export type { SessionContextCompact } from "@/lib/session-context";
+
+export interface NiftySessionResponse {
+  session: import("@/lib/session-context").SessionContextCompact | null;
+  note?: string;
+  updatedAt: string;
+  cached?: boolean;
+  stale?: boolean;
+}

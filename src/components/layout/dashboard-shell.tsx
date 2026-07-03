@@ -19,7 +19,7 @@ export function DashboardShell({
     );
   }
 
-  if (!user) return <Navigate to="/login" replace />;
+  if (!user) return <Navigate to="/" replace />;
 
   return (
     <div className={`dashboard-layout${hideSidebar ? " dashboard-layout-fullscreen" : ""}`}>

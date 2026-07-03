@@ -82,3 +82,24 @@ export function getIndianMarketContext(date = new Date()) {
     minutesToClose,
   };
 }
+
+function pad2(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+/** Kite historical API datetime string in IST (NSE). */
+export function formatKiteIstDateTime(date = new Date()) {
+  const ist = getIstParts(date);
+  return `${ist.year}-${pad2(ist.month)}-${pad2(ist.day)} ${pad2(ist.hour)}:${pad2(ist.minute)}:${pad2(ist.second)}`;
+}
+
+/** Today's NSE cash session window for intraday historical candles. */
+export function getNseSessionKiteRange(date = new Date()) {
+  const ist = getIstParts(date);
+  const dateIST = `${ist.year}-${pad2(ist.month)}-${pad2(ist.day)}`;
+  return {
+    dateIST,
+    from: `${dateIST} 09:15:00`,
+    to: formatKiteIstDateTime(date),
+  };
+}

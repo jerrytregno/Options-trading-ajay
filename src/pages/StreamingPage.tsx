@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Maximize2, Minimize2 } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { StreamingChart } from "@/components/streaming/StreamingChart";
+import { FormulaTradeRunner } from "@/components/trade/FormulaTradeRunner";
 import { useKite } from "@/contexts/kite-context";
 import { buildAutoTradePlan, saveAutoTradePlan } from "@/lib/auto-trade";
 import type { ParsedCandle } from "@/lib/candles";
@@ -12,12 +13,16 @@ import {
   buildTechnicalSnapshot,
   calculateFibonacciRetracement,
 } from "@/lib/technical-indicators";
+import { compactRecent1s } from "@/lib/session-context";
 import type { OptionChainResponse } from "@/types/kite";
-import type { GeminiSuggestionResponse, NiftyStreamResponse } from "@/types/streaming";
+import type { GeminiSuggestionResponse, NiftySessionResponse, NiftyStreamResponse } from "@/types/streaming";
 import { cn, formatNumber, getChangeClass } from "@/lib/utils";
 import { formatIndianDateTime } from "@/lib/market-time";
 
 const REFRESH_MS = 1000;
+const SESSION_REFRESH_MS = 60000;
+const STREAMING_AI_KEY = "optionflow_streaming_ai";
+const STREAMING_LIVE_KEY = "optionflow_streaming_live";
 const CHART_HEIGHT = 480;
 const CHART_HEIGHT_FULLSCREEN = 560;
 
@@ -69,20 +74,34 @@ export default function StreamingPage() {
   const [gemini, setGemini] = useState<GeminiSuggestionResponse | null>(null);
   const [geminiError, setGeminiError] = useState("");
   const [geminiWarning, setGeminiWarning] = useState("");
+  const [sessionData, setSessionData] = useState<NiftySessionResponse | null>(null);
   const [pageFullscreen, setPageFullscreen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [formulaTrading, setFormulaTrading] = useState(false);
+  const [aiStreaming, setAiStreaming] = useState(() => {
+    try {
+      return sessionStorage.getItem(STREAMING_AI_KEY) !== "off";
+    } catch {
+      return true;
+    }
+  });
+  const [marketStreaming, setMarketStreaming] = useState(() => {
+    try {
+      return sessionStorage.getItem(STREAMING_LIVE_KEY) !== "off";
+    } catch {
+      return true;
+    }
+  });
   const geminiInflight = useRef(false);
   const lastQuoteVolumeRef = useRef(0);
+  const sessionContextRef = useRef<NiftySessionResponse["session"]>(null);
+  const recent1sRef = useRef<string[]>([]);
+  const secondCandlesRef = useRef<ParsedCandle[]>([]);
 
   const technicals = useMemo(() => buildTechnicalSnapshot(secondCandles), [secondCandles]);
   const rsiSeries = useMemo(() => buildRsiSeries(secondCandles, 14), [secondCandles]);
-  const fibLevels = useMemo(() => {
-    if (secondCandles.length === 0) return [];
-    const high = Math.max(...secondCandles.map((c) => c.high));
-    const low = Math.min(...secondCandles.map((c) => c.low));
-    return calculateFibonacciRetracement(high, low);
-  }, [secondCandles]);
+  const recentRsi = useMemo(() => rsiSeries.slice(-5).map((p) => p.value), [rsiSeries]);
 
   const liveMetrics = useMemo(() => {
     const last = secondCandles[secondCandles.length - 1];
@@ -97,8 +116,22 @@ export default function StreamingPage() {
     };
   }, [secondCandles]);
 
+  const sessionFibLevels = useMemo(() => {
+    if (liveMetrics.sessionHigh <= liveMetrics.sessionLow) return [];
+    return calculateFibonacciRetracement(liveMetrics.sessionHigh, liveMetrics.sessionLow);
+  }, [liveMetrics.sessionHigh, liveMetrics.sessionLow]);
+
+  useEffect(() => {
+    secondCandlesRef.current = secondCandles;
+    recent1sRef.current = compactRecent1s(secondCandles);
+  }, [secondCandles]);
+
+  useEffect(() => {
+    sessionContextRef.current = sessionData?.session ?? null;
+  }, [sessionData]);
+
   const loadStream = useCallback(async () => {
-    if (!connected) return;
+    if (!connected || !marketStreaming) return;
     try {
       const res = await fetch("/api/kite/nifty-stream", { credentials: "include" });
       const json = await res.json();
@@ -108,16 +141,16 @@ export default function StreamingPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Stream unavailable");
     }
-  }, [connected]);
+  }, [connected, marketStreaming]);
 
   useEffect(() => {
-    if (!stream?.quote.last_price) return;
+    if (!marketStreaming || !stream?.quote.last_price) return;
     const vol = stream.quote.volume ?? 0;
     setSecondCandles((prev) =>
       appendSecondCandle(prev, stream.quote.last_price, vol, lastQuoteVolumeRef.current)
     );
     lastQuoteVolumeRef.current = vol;
-  }, [stream]);
+  }, [stream, marketStreaming]);
 
   useEffect(() => {
     if (!connected) {
@@ -138,8 +171,20 @@ export default function StreamingPage() {
     }
   }, [connected]);
 
+  const loadSession = useCallback(async () => {
+    if (!connected || !aiStreaming) return;
+    try {
+      const res = await fetch("/api/kite/nifty-session", { credentials: "include" });
+      const json = await res.json();
+      if (!res.ok) return;
+      setSessionData(json.data as NiftySessionResponse);
+    } catch {
+      /* keep last session snapshot */
+    }
+  }, [connected, aiStreaming]);
+
   const loadGemini = useCallback(async () => {
-    if (!connected || geminiInflight.current || !stream || secondCandles.length === 0) return;
+    if (!connected || !marketStreaming || !aiStreaming || geminiInflight.current || !stream || secondCandlesRef.current.length === 0) return;
     geminiInflight.current = true;
     try {
       const atmRow = chain?.chain.find((row) => row.isAtm);
@@ -159,12 +204,14 @@ export default function StreamingPage() {
           volumePerSecond: liveMetrics.volumePerSecond,
           sessionHigh: liveMetrics.sessionHigh,
           sessionLow: liveMetrics.sessionLow,
-          fibLevels: fibLevels.map((f) => ({ label: f.label, price: f.price })),
+          fibLevels: sessionFibLevels.map((f) => ({ label: f.label, price: f.price })),
           atmStrike: chain?.atmStrike ?? null,
           expiry: chain?.expiry ?? null,
           atmCeLtp: atmRow?.ce?.quote?.last_price ?? null,
           atmPeLtp: atmRow?.pe?.quote?.last_price ?? null,
-          lastCandle: secondCandles[secondCandles.length - 1],
+          sessionContext: sessionContextRef.current,
+          recent1s: recent1sRef.current,
+          lastCandle: secondCandlesRef.current[secondCandlesRef.current.length - 1] ?? null,
         }),
       });
       const json = await res.json();
@@ -184,26 +231,59 @@ export default function StreamingPage() {
     } finally {
       geminiInflight.current = false;
     }
-  }, [connected, stream, secondCandles, chain, technicals, liveMetrics, fibLevels, gemini]);
+  }, [connected, marketStreaming, aiStreaming, stream, chain, technicals, liveMetrics, sessionFibLevels, gemini]);
+
+  const toggleMarketStreaming = () => {
+    setMarketStreaming((prev) => {
+      const next = !prev;
+      try {
+        sessionStorage.setItem(STREAMING_LIVE_KEY, next ? "on" : "off");
+      } catch {
+        /* ignore */
+      }
+      if (!next) {
+        setFormulaTrading(false);
+      }
+      return next;
+    });
+  };
+
+  const toggleAiStreaming = () => {
+    setAiStreaming((prev) => {
+      const next = !prev;
+      try {
+        sessionStorage.setItem(STREAMING_AI_KEY, next ? "on" : "off");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
-    if (!connected) return;
+    if (!connected || !marketStreaming) return;
     setLoading(true);
-    Promise.all([loadStream(), loadChain()]).finally(() => setLoading(false));
-  }, [connected, loadStream, loadChain]);
+    Promise.all([loadStream(), loadChain(), loadSession()]).finally(() => setLoading(false));
+  }, [connected, marketStreaming, loadStream, loadChain, loadSession]);
 
   useEffect(() => {
-    if (!connected) return;
+    if (!connected || !aiStreaming) return;
+    const interval = window.setInterval(loadSession, SESSION_REFRESH_MS);
+    return () => window.clearInterval(interval);
+  }, [connected, aiStreaming, loadSession]);
+
+  useEffect(() => {
+    if (!connected || !marketStreaming) return;
     const interval = window.setInterval(loadStream, REFRESH_MS);
     return () => window.clearInterval(interval);
-  }, [connected, loadStream]);
+  }, [connected, marketStreaming, loadStream]);
 
   useEffect(() => {
-    if (!connected) return;
+    if (!connected || !marketStreaming || !aiStreaming) return;
     const interval = window.setInterval(loadGemini, REFRESH_MS);
     loadGemini();
     return () => window.clearInterval(interval);
-  }, [connected, loadGemini]);
+  }, [connected, marketStreaming, aiStreaming, loadGemini]);
 
   useEffect(() => {
     if (!pageFullscreen) return;
@@ -213,6 +293,18 @@ export default function StreamingPage() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [pageFullscreen]);
+
+  const handleStartFormulaTrading = () => {
+    if (!connected || !chain || !marketStreaming) return;
+    if (
+      !window.confirm(
+        "Start Formula Trading?\n\nCall: RSI(14) < 15 for 2 candles + spot > VWAP\nPut: RSI(14) > 75 for 2 candles + spot < VWAP\n\nExit: TP +8–12% · SL −15% · 20 min · hard 3:15 PM\nRisk: 1% capital/trade · stop after 2 losses · 5-candle cooldown\n\nAlternates Option 1 ↔ 2. REAL Zerodha orders — no Gemini."
+      )
+    ) {
+      return;
+    }
+    setFormulaTrading(true);
+  };
 
   const tradeUrl = gemini?.suggestion
     ? legToUrl(gemini.suggestion.action, gemini.suggestion.strike)
@@ -239,17 +331,56 @@ export default function StreamingPage() {
 
   const renderGeminiPanel = () => (
     <>
-      <div className="card-header">
-        <h3 className="card-title">Gemini AI · 3.5 Flash</h3>
-        <p className="card-desc">Real-time Nifty options trade suggestions</p>
+      <div className="card-header flex-between flex-wrap gap-3 stream-ai-panel-header">
+        <div>
+          <h3 className="card-title">Gemini AI · 3.5 Flash</h3>
+          <p className="card-desc">Real-time Nifty options trade suggestions</p>
+          {aiStreaming && sessionData?.session && (
+            <p className="text-muted" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
+              Session context: {sessionData.session.barCount} x 1m bars since 09:15 · day{" "}
+              {sessionData.session.sessionTrend} · refreshed every 60s
+            </p>
+          )}
+        </div>
+        <label className="stream-ai-toggle" title={aiStreaming ? "Pause AI to save Gemini cost" : "Resume AI streaming"}>
+          <span className="stream-ai-toggle-label">{aiStreaming ? "AI On" : "AI Off"}</span>
+          <input
+            type="checkbox"
+            checked={aiStreaming}
+            onChange={toggleAiStreaming}
+            aria-label="Toggle Gemini AI streaming"
+          />
+          <span className="stream-ai-toggle-track" aria-hidden />
+        </label>
       </div>
 
-      {geminiError && <div className="alert alert-error mb-4">{geminiError}</div>}
-      {geminiWarning && !geminiError && (
+      {!marketStreaming && (
+        <div className="alert alert-warning mb-4" style={{ fontSize: "0.875rem" }}>
+          Market streaming is paused. Turn Stream On to refresh quotes and build new candles.
+        </div>
+      )}
+
+      {!aiStreaming && (
+        <div className="alert alert-warning mb-4" style={{ fontSize: "0.875rem" }}>
+          AI streaming paused — no Gemini API calls. Chart still updates live. Toggle <strong>AI On</strong> to resume.
+        </div>
+      )}
+
+      {geminiError && aiStreaming && <div className="alert alert-error mb-4">{geminiError}</div>}
+      {geminiWarning && !geminiError && aiStreaming && (
         <div className="alert alert-warning mb-4">{geminiWarning}</div>
       )}
 
-      {gemini?.suggestion ? (
+      {!aiStreaming && gemini?.suggestion ? (
+        <div className="stream-ai-content">
+          <span className="badge badge-default mb-3">Last suggestion (paused)</span>
+          <p className="stream-ai-summary">{gemini.suggestion.summary}</p>
+          <p className="text-muted" style={{ fontSize: "0.8125rem" }}>
+            {gemini.suggestion.action.replace(/_/g, " ")}
+            {gemini.suggestion.strike ? ` · Strike ${formatNumber(gemini.suggestion.strike, 0)}` : ""}
+          </p>
+        </div>
+      ) : gemini?.suggestion ? (
         <div className="stream-ai-content">
           <div className="flex gap-2 flex-wrap mb-4">
             <span className={cn("badge", gemini.suggestion.bias === "bullish" ? "badge-success" : gemini.suggestion.bias === "bearish" ? "badge-danger" : "badge-default")}>
@@ -305,11 +436,15 @@ export default function StreamingPage() {
             {" · "}Not financial advice
           </p>
         </div>
-      ) : (
+      ) : aiStreaming ? (
         <div className="spinner-center" style={{ minHeight: "12rem" }}>
           <div className="spinner spinner-sm" />
           <p className="text-muted mt-3" style={{ fontSize: "0.875rem" }}>Analyzing market…</p>
         </div>
+      ) : (
+        <p className="text-muted" style={{ fontSize: "0.875rem", minHeight: "8rem" }}>
+          Turn AI On when you want fresh trade suggestions.
+        </p>
       )}
     </>
   );
@@ -318,32 +453,63 @@ export default function StreamingPage() {
     <div className="flex-between flex-wrap gap-4 mb-6">
       <div className="page-header" style={{ marginBottom: 0 }}>
         <h1>Nifty 50 Streaming</h1>
-        <p>Live 1-second candles with Fib, RSI, volume, and Gemini AI every second</p>
+        <p>Live 1-second candles with volume, RSI, and Gemini AI</p>
       </div>
       <div className="flex gap-2 flex-wrap items-center">
         {stream && (
           <>
-            <span className="badge badge-success">Live · 1s</span>
+            <span className={cn("badge", marketStreaming ? "badge-success" : "badge-warning")}>
+              {marketStreaming ? "Live · 1s" : "Stream paused"}
+            </span>
             <span className={cn("badge", getChangeClass(stream.quote.change))}>
               {stream.quote.change >= 0 ? "+" : ""}
               {formatNumber(stream.quote.change)} ({formatNumber(stream.quote.change_percent)}%)
             </span>
             {stream.updatedAt && (
               <span className="text-muted" style={{ fontSize: "0.75rem" }}>
-                Updated {formatIndianDateTime(new Date(stream.updatedAt))}
+                {marketStreaming ? "Updated" : "Last"} {formatIndianDateTime(new Date(stream.updatedAt))}
               </span>
             )}
           </>
         )}
         {connected && (
-          <button
-            type="button"
-            className="btn btn-outline btn-sm"
-            onClick={() => setPageFullscreen(!pageFullscreen)}
-          >
+          <>
+            <label
+              className="stream-ai-toggle stream-ai-toggle-header"
+              title={marketStreaming ? "Pause Nifty quote streaming" : "Resume live streaming"}
+            >
+              <span className="stream-ai-toggle-label">{marketStreaming ? "Stream On" : "Stream Off"}</span>
+              <input
+                type="checkbox"
+                checked={marketStreaming}
+                onChange={toggleMarketStreaming}
+                aria-label="Toggle market data streaming"
+              />
+              <span className="stream-ai-toggle-track" aria-hidden />
+            </label>
+            <label
+              className="stream-ai-toggle stream-ai-toggle-header"
+              title={aiStreaming ? "Pause AI to save Gemini cost" : "Resume AI streaming"}
+            >
+              <span className="stream-ai-toggle-label">{aiStreaming ? "AI On" : "AI Off"}</span>
+              <input
+                type="checkbox"
+                checked={aiStreaming}
+                onChange={toggleAiStreaming}
+                disabled={!marketStreaming}
+                aria-label="Toggle Gemini AI streaming"
+              />
+              <span className="stream-ai-toggle-track" aria-hidden />
+            </label>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={() => setPageFullscreen(!pageFullscreen)}
+            >
             {pageFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
             {pageFullscreen ? "Exit fullscreen" : "Fullscreen"}
           </button>
+          </>
         )}
       </div>
     </div>
@@ -390,10 +556,22 @@ export default function StreamingPage() {
                 </p>
               )}
             </div>
+            <div className="stream-chart-toolbar flex gap-2 flex-wrap items-center px-4 pb-3">
+              <button
+                type="button"
+                className={cn("btn btn-sm", formulaTrading ? "btn-primary" : "btn-secondary")}
+                onClick={handleStartFormulaTrading}
+                disabled={formulaTrading || !connected || !chain || !marketStreaming}
+              >
+                Formula Trading
+              </button>
+              {!marketStreaming && (
+                <span className="text-muted text-sm">Turn Stream On to resume live candles</span>
+              )}
+            </div>
             {secondCandles.length > 0 ? (
               <StreamingChart
                 candles={secondCandles}
-                fibLevels={fibLevels}
                 rsiSeries={rsiSeries}
                 height={pageFullscreen ? CHART_HEIGHT_FULLSCREEN : CHART_HEIGHT}
               />
@@ -401,6 +579,18 @@ export default function StreamingPage() {
               <p className="text-muted p-4">Building 1-second candles from live quotes…</p>
             )}
           </div>
+
+          {formulaTrading && (
+            <FormulaTradeRunner
+              chain={chain}
+              rsi14={technicals.rsi14}
+              recentRsi={recentRsi}
+              spotPrice={stream?.quote.last_price ?? 0}
+              vwap={technicals.vwap}
+              candleCount={secondCandles.length}
+              onStop={() => setFormulaTrading(false)}
+            />
+          )}
 
           <div className="stream-metrics-grid mb-4">
             <MetricCard label="Volume / Sec" value={formatNumber(liveMetrics.volumePerSecond, 0)} hint="Current 1s bar" />
@@ -422,15 +612,6 @@ export default function StreamingPage() {
                     ? "text-up"
                     : undefined
               }
-            />
-            <MetricCard
-              label="Fib 50%"
-              value={
-                fibLevels.find((f) => f.ratio === 0.5)
-                  ? formatNumber(fibLevels.find((f) => f.ratio === 0.5)!.price)
-                  : "—"
-              }
-              hint="Mid retracement"
             />
             <MetricCard label="SMA 9" value={technicals.sma9 != null ? formatNumber(technicals.sma9) : "—"} />
             <MetricCard label="EMA 9" value={technicals.ema9 != null ? formatNumber(technicals.ema9) : "—"} />

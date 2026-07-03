@@ -1,4 +1,4 @@
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { FormEvent, useEffect, useState } from "react";
 import { Zap } from "lucide-react";
 import { useAuth } from "@/contexts/auth-context";
@@ -8,7 +8,7 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [isSignUp, setIsSignUp] = useState(false);
+  const [isSignUp, setIsSignUp] = useState(true);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -39,10 +39,10 @@ export default function LoginPage() {
     <div className="login-page">
       <div className="login-box">
         <div className="login-logo">
-          <Link to="/" className="logo" style={{ justifyContent: "center" }}>
+          <div className="logo" style={{ justifyContent: "center" }}>
             <div className="logo-icon"><Zap size={20} /></div>
             <span className="logo-text">OptionFlow</span>
-          </Link>
+          </div>
         </div>
 
         <div className="card">
