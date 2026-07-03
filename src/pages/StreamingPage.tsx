@@ -2,23 +2,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Maximize2, Minimize2 } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
-import { CandlestickChart } from "@/components/streaming/CandlestickChart";
+import { StreamingChart } from "@/components/streaming/StreamingChart";
 import { useKite } from "@/contexts/kite-context";
+import type { ParsedCandle } from "@/lib/candles";
+import { appendSecondCandle } from "@/lib/second-candles";
 import {
-  mergeLiveQuote,
-  parseKiteCandles,
-  priceVelocity,
-  volumePerSecond,
-} from "@/lib/candles";
-import {
-  buildMovingAverageSeries,
+  buildRsiSeries,
   buildTechnicalSnapshot,
+  calculateFibonacciRetracement,
 } from "@/lib/technical-indicators";
 import type { OptionChainResponse } from "@/types/kite";
 import type { GeminiSuggestionResponse, NiftyStreamResponse } from "@/types/streaming";
 import { cn, formatNumber, getChangeClass } from "@/lib/utils";
+import { formatIndianDateTime } from "@/lib/market-time";
 
 const REFRESH_MS = 1000;
+const CHART_HEIGHT = 480;
+const CHART_HEIGHT_FULLSCREEN = 560;
 
 function legToUrl(action: string, strike: number | null) {
   if (!strike || action === "WAIT") return null;
@@ -49,37 +49,38 @@ function MetricCard({
 export default function StreamingPage() {
   const { connected, loginUrl } = useKite();
   const [stream, setStream] = useState<NiftyStreamResponse | null>(null);
+  const [secondCandles, setSecondCandles] = useState<ParsedCandle[]>([]);
   const [chain, setChain] = useState<OptionChainResponse | null>(null);
   const [gemini, setGemini] = useState<GeminiSuggestionResponse | null>(null);
   const [geminiError, setGeminiError] = useState("");
   const [geminiWarning, setGeminiWarning] = useState("");
-  const [aiFullscreen, setAiFullscreen] = useState(false);
+  const [pageFullscreen, setPageFullscreen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const geminiInflight = useRef(false);
+  const lastQuoteVolumeRef = useRef(0);
 
-  const candles = useMemo(() => {
-    if (!stream) return [];
-    const parsed = parseKiteCandles(stream.candles as unknown[]);
-    return mergeLiveQuote(parsed, stream.quote.last_price, stream.quote.volume);
-  }, [stream]);
-
-  const technicals = useMemo(() => buildTechnicalSnapshot(candles), [candles]);
-  const sma9Series = useMemo(() => buildMovingAverageSeries(candles, 9), [candles]);
-  const sma20Series = useMemo(() => buildMovingAverageSeries(candles, 20), [candles]);
+  const technicals = useMemo(() => buildTechnicalSnapshot(secondCandles), [secondCandles]);
+  const rsiSeries = useMemo(() => buildRsiSeries(secondCandles, 14), [secondCandles]);
+  const fibLevels = useMemo(() => {
+    if (secondCandles.length === 0) return [];
+    const high = Math.max(...secondCandles.map((c) => c.high));
+    const low = Math.min(...secondCandles.map((c) => c.low));
+    return calculateFibonacciRetracement(high, low);
+  }, [secondCandles]);
 
   const liveMetrics = useMemo(() => {
-    const last = candles[candles.length - 1];
+    const last = secondCandles[secondCandles.length - 1];
     if (!last) {
       return { volumePerSecond: 0, priceVelocity: 0, sessionHigh: 0, sessionLow: 0 };
     }
     return {
-      volumePerSecond: volumePerSecond(last),
-      priceVelocity: priceVelocity(last),
-      sessionHigh: Math.max(...candles.map((c) => c.high)),
-      sessionLow: Math.min(...candles.map((c) => c.low)),
+      volumePerSecond: last.volume,
+      priceVelocity: last.close - last.open,
+      sessionHigh: Math.max(...secondCandles.map((c) => c.high)),
+      sessionLow: Math.min(...secondCandles.map((c) => c.low)),
     };
-  }, [candles]);
+  }, [secondCandles]);
 
   const loadStream = useCallback(async () => {
     if (!connected) return;
@@ -91,6 +92,22 @@ export default function StreamingPage() {
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Stream unavailable");
+    }
+  }, [connected]);
+
+  useEffect(() => {
+    if (!stream?.quote.last_price) return;
+    const vol = stream.quote.volume ?? 0;
+    setSecondCandles((prev) =>
+      appendSecondCandle(prev, stream.quote.last_price, vol, lastQuoteVolumeRef.current)
+    );
+    lastQuoteVolumeRef.current = vol;
+  }, [stream]);
+
+  useEffect(() => {
+    if (!connected) {
+      setSecondCandles([]);
+      lastQuoteVolumeRef.current = 0;
     }
   }, [connected]);
 
@@ -107,7 +124,7 @@ export default function StreamingPage() {
   }, [connected]);
 
   const loadGemini = useCallback(async () => {
-    if (!connected || geminiInflight.current || !stream || candles.length === 0) return;
+    if (!connected || geminiInflight.current || !stream || secondCandles.length === 0) return;
     geminiInflight.current = true;
     try {
       const atmRow = chain?.chain.find((row) => row.isAtm);
@@ -127,11 +144,12 @@ export default function StreamingPage() {
           volumePerSecond: liveMetrics.volumePerSecond,
           sessionHigh: liveMetrics.sessionHigh,
           sessionLow: liveMetrics.sessionLow,
+          fibLevels: fibLevels.map((f) => ({ label: f.label, price: f.price })),
           atmStrike: chain?.atmStrike ?? null,
           expiry: chain?.expiry ?? null,
           atmCeLtp: atmRow?.ce?.quote?.last_price ?? null,
           atmPeLtp: atmRow?.pe?.quote?.last_price ?? null,
-          lastCandle: candles[candles.length - 1],
+          lastCandle: secondCandles[secondCandles.length - 1],
         }),
       });
       const json = await res.json();
@@ -151,7 +169,7 @@ export default function StreamingPage() {
     } finally {
       geminiInflight.current = false;
     }
-  }, [connected, stream, candles, chain, technicals, liveMetrics, gemini]);
+  }, [connected, stream, secondCandles, chain, technicals, liveMetrics, fibLevels, gemini]);
 
   useEffect(() => {
     if (!connected) return;
@@ -161,9 +179,7 @@ export default function StreamingPage() {
 
   useEffect(() => {
     if (!connected) return;
-    const interval = window.setInterval(() => {
-      loadStream();
-    }, REFRESH_MS);
+    const interval = window.setInterval(loadStream, REFRESH_MS);
     return () => window.clearInterval(interval);
   }, [connected, loadStream]);
 
@@ -174,35 +190,24 @@ export default function StreamingPage() {
     return () => window.clearInterval(interval);
   }, [connected, loadGemini]);
 
+  useEffect(() => {
+    if (!pageFullscreen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPageFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [pageFullscreen]);
+
   const tradeUrl = gemini?.suggestion
     ? legToUrl(gemini.suggestion.action, gemini.suggestion.strike)
     : null;
 
-  useEffect(() => {
-    if (!aiFullscreen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAiFullscreen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [aiFullscreen]);
-
-  const renderGeminiPanel = (fullscreen = false) => (
+  const renderGeminiPanel = () => (
     <>
-      <div className={cn("card-header flex-between flex-wrap gap-3", fullscreen && "mb-4")}>
-        <div>
-          <h3 className="card-title">Gemini AI · 3.5 Flash</h3>
-          <p className="card-desc">Real-time Nifty options trade suggestions</p>
-        </div>
-        <button
-          type="button"
-          className="btn btn-outline btn-sm"
-          onClick={() => setAiFullscreen(!fullscreen)}
-          aria-label={fullscreen ? "Exit fullscreen" : "Open AI fullscreen"}
-        >
-          {fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-          {fullscreen ? "Exit fullscreen" : "Fullscreen"}
-        </button>
+      <div className="card-header">
+        <h3 className="card-title">Gemini AI · 3.5 Flash</h3>
+        <p className="card-desc">Real-time Nifty options trade suggestions</p>
       </div>
 
       {geminiError && <div className="alert alert-error mb-4">{geminiError}</div>}
@@ -232,21 +237,15 @@ export default function StreamingPage() {
 
           <div className="stream-ai-section">
             <p className="label">Entry Plan</p>
-            <p className="text-muted" style={{ fontSize: fullscreen ? "1rem" : "0.875rem" }}>
-              {gemini.suggestion.entryPlan}
-            </p>
+            <p className="text-muted" style={{ fontSize: "0.875rem" }}>{gemini.suggestion.entryPlan}</p>
           </div>
           <div className="stream-ai-section">
             <p className="label">Risk Plan</p>
-            <p className="text-muted" style={{ fontSize: fullscreen ? "1rem" : "0.875rem" }}>
-              {gemini.suggestion.riskPlan}
-            </p>
+            <p className="text-muted" style={{ fontSize: "0.875rem" }}>{gemini.suggestion.riskPlan}</p>
           </div>
           <div className="stream-ai-section">
             <p className="label">Invalidation</p>
-            <p className="text-muted" style={{ fontSize: fullscreen ? "1rem" : "0.875rem" }}>
-              {gemini.suggestion.invalidation}
-            </p>
+            <p className="text-muted" style={{ fontSize: "0.875rem" }}>{gemini.suggestion.invalidation}</p>
           </div>
 
           {gemini.suggestion.strike && (
@@ -263,7 +262,7 @@ export default function StreamingPage() {
 
           <p className="text-muted mt-4" style={{ fontSize: "0.6875rem" }}>
             Model: {gemini.model}
-            {gemini.updatedAt ? ` · Updated ${new Date(gemini.updatedAt).toLocaleTimeString("en-IN")}` : ""}
+            {gemini.updatedAt ? ` · Updated ${formatIndianDateTime(new Date(gemini.updatedAt))}` : ""}
             {" · "}Not financial advice
           </p>
         </div>
@@ -276,25 +275,15 @@ export default function StreamingPage() {
     </>
   );
 
-  if (aiFullscreen) {
-    return (
-      <DashboardShell hideSidebar>
-        <div className="stream-ai-fullscreen card">
-          {renderGeminiPanel(true)}
-        </div>
-      </DashboardShell>
-    );
-  }
-
-  return (
-    <DashboardShell>
-      <div className="flex-between flex-wrap gap-4 mb-6">
-        <div className="page-header" style={{ marginBottom: 0 }}>
-          <h1>Nifty 50 Streaming</h1>
-          <p>Live 1-minute candles, technical metrics, and Gemini trade suggestions every second</p>
-        </div>
+  const renderHeader = () => (
+    <div className="flex-between flex-wrap gap-4 mb-6">
+      <div className="page-header" style={{ marginBottom: 0 }}>
+        <h1>Nifty 50 Streaming</h1>
+        <p>Live 1-second candles with Fib, RSI, volume, and Gemini AI every second</p>
+      </div>
+      <div className="flex gap-2 flex-wrap items-center">
         {stream && (
-          <div className="flex gap-2 flex-wrap items-center">
+          <>
             <span className="badge badge-success">Live · 1s</span>
             <span className={cn("badge", getChangeClass(stream.quote.change))}>
               {stream.quote.change >= 0 ? "+" : ""}
@@ -302,14 +291,28 @@ export default function StreamingPage() {
             </span>
             {stream.updatedAt && (
               <span className="text-muted" style={{ fontSize: "0.75rem" }}>
-                Updated {new Date(stream.updatedAt).toLocaleTimeString("en-IN")}
+                Updated {formatIndianDateTime(new Date(stream.updatedAt))}
               </span>
             )}
-          </div>
+          </>
+        )}
+        {connected && (
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => setPageFullscreen(!pageFullscreen)}
+          >
+            {pageFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            {pageFullscreen ? "Exit fullscreen" : "Fullscreen"}
+          </button>
         )}
       </div>
+    </div>
+  );
 
-      {!connected ? (
+  const renderStreamContent = () => {
+    if (!connected) {
+      return (
         <div className="card">
           <p className="text-muted">Connect Zerodha to stream Nifty 50 candles and AI suggestions.</p>
           {loginUrl && (
@@ -318,99 +321,109 @@ export default function StreamingPage() {
             </a>
           )}
         </div>
-      ) : loading && !stream ? (
+      );
+    }
+
+    if (loading && !stream) {
+      return (
         <div className="spinner-center" style={{ minHeight: "16rem" }}>
           <div className="spinner spinner-sm" />
         </div>
-      ) : (
-        <div className="stream-layout">
-          <div className="stream-main">
-            {error && <div className="alert alert-error mb-4">{error}</div>}
+      );
+    }
 
-            <div className="card mb-4">
-              <div className="card-header flex-between flex-wrap gap-3">
-                <div>
-                  <h3 className="card-title">Nifty 50 · 1 Min</h3>
-                  <p className="card-desc">{stream?.instrument ?? "NSE:NIFTY 50"}</p>
-                </div>
-                {stream && (
-                  <p className={cn("font-semibold", getChangeClass(stream.quote.change))} style={{ fontSize: "1.5rem" }}>
-                    {formatNumber(stream.quote.last_price)}
-                  </p>
-                )}
+    return (
+      <div className="stream-layout">
+        <div className="stream-main">
+          {error && <div className="alert alert-error mb-4">{error}</div>}
+
+          <div className="card mb-4">
+            <div className="card-header flex-between flex-wrap gap-3">
+              <div>
+                <h3 className="card-title">Nifty 50 · 1 Sec</h3>
+                <p className="card-desc">
+                  {stream?.instrument ?? "NSE:NIFTY 50"} · {secondCandles.length} candles buffered
+                </p>
               </div>
-              {candles.length > 0 ? (
-                <CandlestickChart candles={candles} sma9={sma9Series} sma20={sma20Series} />
-              ) : (
-                <p className="text-muted p-4">Waiting for intraday candles…</p>
+              {stream && (
+                <p className={cn("font-semibold", getChangeClass(stream.quote.change))} style={{ fontSize: "1.5rem" }}>
+                  {formatNumber(stream.quote.last_price)}
+                </p>
               )}
             </div>
-
-            <div className="stream-metrics-grid mb-4">
-              <MetricCard
-                label="Volume / Sec"
-                value={liveMetrics.volumePerSecond > 0 ? formatNumber(liveMetrics.volumePerSecond, 0) : "—"}
-                hint="Current 1m candle pace"
+            {secondCandles.length > 0 ? (
+              <StreamingChart
+                candles={secondCandles}
+                fibLevels={fibLevels}
+                rsiSeries={rsiSeries}
+                height={pageFullscreen ? CHART_HEIGHT_FULLSCREEN : CHART_HEIGHT}
               />
-              <MetricCard
-                label="Price Velocity"
-                value={`${liveMetrics.priceVelocity >= 0 ? "+" : ""}${formatNumber(liveMetrics.priceVelocity, 3)}/s`}
-                hint="Open to close per second"
-                valueClass={getChangeClass(liveMetrics.priceVelocity)}
-              />
-              <MetricCard label="Session High" value={formatNumber(liveMetrics.sessionHigh)} />
-              <MetricCard label="Session Low" value={formatNumber(liveMetrics.sessionLow)} />
-              <MetricCard
-                label="RSI (14)"
-                value={technicals.rsi14 != null ? formatNumber(technicals.rsi14, 1) : "—"}
-                hint={technicals.rsi14 != null && technicals.rsi14 > 70 ? "Overbought zone" : technicals.rsi14 != null && technicals.rsi14 < 30 ? "Oversold zone" : "Momentum"}
-                valueClass={
-                  technicals.rsi14 != null && technicals.rsi14 > 70
-                    ? "text-down"
-                    : technicals.rsi14 != null && technicals.rsi14 < 30
-                      ? "text-up"
-                      : undefined
-                }
-              />
-              <MetricCard label="SMA 9" value={technicals.sma9 != null ? formatNumber(technicals.sma9) : "—"} />
-              <MetricCard label="SMA 20" value={technicals.sma20 != null ? formatNumber(technicals.sma20) : "—"} />
-              <MetricCard label="SMA 50" value={technicals.sma50 != null ? formatNumber(technicals.sma50) : "—"} />
-              <MetricCard label="EMA 9" value={technicals.ema9 != null ? formatNumber(technicals.ema9) : "—"} />
-              <MetricCard label="EMA 21" value={technicals.ema21 != null ? formatNumber(technicals.ema21) : "—"} />
-              <MetricCard
-                label="VWAP"
-                value={technicals.vwap != null ? formatNumber(technicals.vwap) : "—"}
-                hint="Intraday volume weighted"
-              />
-              <MetricCard label="ATR (14)" value={technicals.atr14 != null ? formatNumber(technicals.atr14) : "—"} hint="Volatility" />
-              <MetricCard
-                label="MACD Hist"
-                value={technicals.macd ? formatNumber(technicals.macd.histogram, 3) : "—"}
-                valueClass={technicals.macd ? getChangeClass(technicals.macd.histogram) : undefined}
-              />
-              <MetricCard
-                label="Bollinger"
-                value={
-                  technicals.bollinger
-                    ? `${formatNumber(technicals.bollinger.lower)} – ${formatNumber(technicals.bollinger.upper)}`
-                    : "—"
-                }
-                hint="Lower – upper band"
-              />
-              <MetricCard
-                label="Trend"
-                value={technicals.trend.toUpperCase()}
-                hint={technicals.emaCross !== "none" ? `${technicals.emaCross} cross` : "EMA 9 vs 21"}
-                valueClass={technicals.trend === "bullish" ? "text-up" : technicals.trend === "bearish" ? "text-down" : undefined}
-              />
-            </div>
+            ) : (
+              <p className="text-muted p-4">Building 1-second candles from live quotes…</p>
+            )}
           </div>
 
-          <aside className="stream-ai-panel card">
-            {renderGeminiPanel(false)}
-          </aside>
+          <div className="stream-metrics-grid mb-4">
+            <MetricCard label="Volume / Sec" value={formatNumber(liveMetrics.volumePerSecond, 0)} hint="Current 1s bar" />
+            <MetricCard
+              label="Price Move / Sec"
+              value={`${liveMetrics.priceVelocity >= 0 ? "+" : ""}${formatNumber(liveMetrics.priceVelocity, 2)}`}
+              valueClass={getChangeClass(liveMetrics.priceVelocity)}
+            />
+            <MetricCard label="Range High" value={formatNumber(liveMetrics.sessionHigh)} />
+            <MetricCard label="Range Low" value={formatNumber(liveMetrics.sessionLow)} />
+            <MetricCard
+              label="RSI (14)"
+              value={technicals.rsi14 != null ? formatNumber(technicals.rsi14, 1) : "—"}
+              hint={technicals.rsi14 != null && technicals.rsi14 > 70 ? "Overbought" : technicals.rsi14 != null && technicals.rsi14 < 30 ? "Oversold" : "On chart"}
+              valueClass={
+                technicals.rsi14 != null && technicals.rsi14 > 70
+                  ? "text-down"
+                  : technicals.rsi14 != null && technicals.rsi14 < 30
+                    ? "text-up"
+                    : undefined
+              }
+            />
+            <MetricCard
+              label="Fib 50%"
+              value={
+                fibLevels.find((f) => f.ratio === 0.5)
+                  ? formatNumber(fibLevels.find((f) => f.ratio === 0.5)!.price)
+                  : "—"
+              }
+              hint="Mid retracement"
+            />
+            <MetricCard label="SMA 9" value={technicals.sma9 != null ? formatNumber(technicals.sma9) : "—"} />
+            <MetricCard label="EMA 9" value={technicals.ema9 != null ? formatNumber(technicals.ema9) : "—"} />
+            <MetricCard label="VWAP" value={technicals.vwap != null ? formatNumber(technicals.vwap) : "—"} />
+            <MetricCard
+              label="Trend"
+              value={technicals.trend.toUpperCase()}
+              valueClass={technicals.trend === "bullish" ? "text-up" : technicals.trend === "bearish" ? "text-down" : undefined}
+            />
+          </div>
         </div>
-      )}
+
+        <aside className="stream-ai-panel card">{renderGeminiPanel()}</aside>
+      </div>
+    );
+  };
+
+  if (pageFullscreen) {
+    return (
+      <DashboardShell hideSidebar>
+        <div className="stream-page-fullscreen">
+          {renderHeader()}
+          {renderStreamContent()}
+        </div>
+      </DashboardShell>
+    );
+  }
+
+  return (
+    <DashboardShell>
+      {renderHeader()}
+      {renderStreamContent()}
     </DashboardShell>
   );
 }

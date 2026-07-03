@@ -152,6 +152,39 @@ export function buildMovingAverageSeries(candles: ParsedCandle[], period: number
   return series;
 }
 
+export interface FibLevel {
+  ratio: number;
+  price: number;
+  label: string;
+}
+
+export function calculateFibonacciRetracement(high: number, low: number): FibLevel[] {
+  const diff = high - low;
+  if (diff <= 0) return [];
+  const ratios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+  return ratios.map((ratio) => ({
+    ratio,
+    price: high - diff * ratio,
+    label: ratio === 0 ? "0%" : ratio === 1 ? "100%" : `${(ratio * 100).toFixed(1)}%`,
+  }));
+}
+
+export interface RsiPoint {
+  time: string;
+  value: number;
+}
+
+export function buildRsiSeries(candles: ParsedCandle[], period = 14): RsiPoint[] {
+  const closes = candles.map((c) => c.close);
+  const series: RsiPoint[] = [];
+  for (let i = period; i < closes.length; i += 1) {
+    const rsi = calculateRsi(closes.slice(0, i + 1), period);
+    if (rsi == null) continue;
+    series.push({ time: candles[i].time, value: rsi });
+  }
+  return series;
+}
+
 export function buildTechnicalSnapshot(candles: ParsedCandle[]): TechnicalSnapshot {
   const closes = candles.map((c) => c.close);
   const ema9Series = emaSeries(closes, 9);

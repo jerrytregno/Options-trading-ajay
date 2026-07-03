@@ -3,13 +3,17 @@ export interface NiftyStreamQuote {
   change: number;
   change_percent: number;
   volume?: number;
-  oi?: number;
+  ohlc?: {
+    open?: number;
+    high?: number;
+    low?: number;
+    close?: number;
+  };
 }
 
 export interface NiftyStreamResponse {
   instrument: string;
-  interval: string;
-  candles: unknown[];
+  interval: "second";
   quote: NiftyStreamQuote;
   updatedAt: string;
 }

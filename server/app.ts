@@ -12,6 +12,7 @@ import {
   filterStrikesAroundAtm,
   findAtmStrike,
 } from "../src/lib/greeks.js";
+import { getIndianMarketContext } from "../src/lib/market-time.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, "..");
@@ -363,16 +364,6 @@ function getHistoricalDateRange(days: number) {
   const from = new Date();
   from.setDate(from.getDate() - days);
   return { from: formatKiteDateTime(from), to: formatKiteDateTime(to) };
-}
-
-function getIntradayRange() {
-  const now = new Date();
-  const from = new Date(now);
-  from.setHours(9, 15, 0, 0);
-  if (now < from) {
-    from.setDate(from.getDate() - 1);
-  }
-  return { from: formatKiteDateTime(from), to: formatKiteDateTime(now) };
 }
 
 const GEMINI_MODEL_OUTPUT_LIMIT = 65536;
@@ -779,32 +770,25 @@ app.get("/api/kite/nifty-stream", async (req, res) => {
 
   try {
     const instrument = "NSE:NIFTY 50";
-    const range = getIntradayRange();
-    const historical = await fetchHistoricalCandles(
-      accessToken,
-      instrument,
-      "minute",
-      range.from,
-      range.to
-    );
     const quotes = await kiteGet<Record<string, {
       last_price: number;
       change?: number;
       change_percent?: number;
       volume?: number;
+      ohlc?: { open?: number; high?: number; low?: number; close?: number };
     }>>(`/quote?i=${encodeURIComponent(instrument)}`, accessToken);
     const quote = quotes[instrument];
 
     return res.json({
       data: {
         instrument,
-        interval: "minute",
-        candles: historical.candles,
+        interval: "second",
         quote: {
           last_price: quote?.last_price ?? 0,
           change: quote?.change ?? 0,
           change_percent: quote?.change_percent ?? 0,
           volume: quote?.volume ?? 0,
+          ohlc: quote?.ohlc,
         },
         updatedAt: new Date().toISOString(),
       },
@@ -837,13 +821,25 @@ app.post("/api/gemini/trade-suggestion", async (req, res) => {
 
   try {
     const input = req.body as Record<string, unknown>;
-    const prompt = `You are an expert Indian Nifty 50 options intraday trader.
-Analyze the live snapshot and recommend one actionable Nifty weekly options trade.
-Prefer ATM or one-strike OTM. Use WAIT when signals conflict or RSI is mid-range without trend.
-Keep each field concise for 1-minute intraday context.
+    const marketContext = getIndianMarketContext();
+    const snapshot = { marketContext, ...input };
 
-Live snapshot:
-${JSON.stringify(input)}`;
+    const prompt = `You are an expert Indian Nifty 50 options intraday trader on NSE F&O.
+
+IMPORTANT — use this exact clock and session (Indian Standard Time):
+- Current date & time: ${marketContext.currentDateTimeIST}
+- NSE F&O session: ${marketContext.sessionHoursIST}, ${marketContext.sessionDays}
+- Session status: ${marketContext.sessionStatus}${marketContext.isMarketOpen ? ` (${marketContext.minutesFromOpen} min since open, ${marketContext.minutesToClose} min to close)` : ""}
+
+Rules:
+- Only recommend active intraday trades when session status is "open".
+- If pre_market, post_market, or closed_weekend → action should be WAIT with reason about session timing.
+- After ~3:15 PM IST favour MIS square-off / no new entries unless strong edge.
+- Prefer ATM or one-strike OTM Nifty weekly options (MIS for intraday).
+- Keep each field concise for 1-second intraday context.
+
+Live snapshot (includes marketContext):
+${JSON.stringify(snapshot)}`;
 
     const { text, thinking } = await callGemini(prompt);
     const parsed = parseGeminiJson(text);

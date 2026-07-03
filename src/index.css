@@ -372,10 +372,23 @@ td { padding: 0.75rem 1rem; border-bottom: 1px solid rgba(36, 48, 71, 0.5); }
 }
 .legend-sma9 { background: #60a5fa; }
 .legend-sma20 { background: #fbbf24; }
+.legend-fib { background: #93c5fd; }
+.legend-vol { background: #34d399; }
+.legend-rsi { background: #a78bfa; }
 .stream-ai-panel { position: sticky; top: 1rem; }
 .stream-ai-content { display: flex; flex-direction: column; gap: 0.75rem; }
 .stream-ai-summary { font-size: 0.9375rem; line-height: 1.5; }
 .stream-ai-section { padding-top: 0.25rem; }
+.stream-page-fullscreen {
+  min-height: calc(100vh - 2rem);
+  padding-bottom: 1.5rem;
+}
+.stream-page-fullscreen .stream-layout {
+  min-height: calc(100vh - 8rem);
+}
+.stream-page-fullscreen .stream-ai-panel {
+  position: static;
+}
 .stream-ai-fullscreen {
   min-height: calc(100vh - 3rem);
   display: flex;
