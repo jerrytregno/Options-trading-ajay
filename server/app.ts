@@ -461,7 +461,19 @@ let geminiEntryCache: {
   model: string;
   updatedAt: string;
 } | null = null;
+let geminiEntryCacheKey = "";
 let geminiEntryCacheExpiry = 0;
+
+function buildEntryCacheKey(input: Record<string, unknown>) {
+  const ltp = Number(input.optionLtp ?? 0);
+  const spot = Number(input.spot ?? 0);
+  return [
+    String(input.plannedAction ?? input.leg ?? ""),
+    String(input.strike ?? ""),
+    Math.round(ltp),
+    Math.round(spot),
+  ].join("|");
+}
 
 function extractJsonObject(text: string) {
   const start = text.indexOf("{");
@@ -945,14 +957,15 @@ app.post("/api/gemini/entry-timing", async (req, res) => {
   }
 
   const now = Date.now();
-  if (geminiEntryCache && now < geminiEntryCacheExpiry) {
+  const input = req.body as Record<string, unknown>;
+  const cacheKey = buildEntryCacheKey(input);
+  if (geminiEntryCache && geminiEntryCacheKey === cacheKey && now < geminiEntryCacheExpiry) {
     return res.json({
       data: { ...geminiEntryCache, cached: true, refreshInMs: geminiEntryCacheExpiry - now },
     });
   }
 
   try {
-    const input = req.body as Record<string, unknown>;
     const marketContext = getIndianMarketContext();
 
     if (!marketContext.isMarketOpen) {
@@ -974,8 +987,8 @@ Clock (IST): ${marketContext.currentDateTimeIST}
 Session: ${marketContext.sessionStatus}, ${marketContext.minutesToClose} min to close
 
 Return JSON only:
-- ENTER when entry conditions from the plan are met NOW (momentum, premium, spot vs strike).
-- WAIT when setup is valid but timing is not ideal yet.
+- ENTER when entry conditions from the plan are met NOW (momentum, premium, spot vs strike). If the setup is still valid and premium is tradeable, prefer ENTER over prolonged WAIT.
+- WAIT only when timing is genuinely not ideal yet (max ~1-2 checks), not indefinitely.
 - ABORT when invalidation/risk plan is breached — do not enter.
 
 Planned trade snapshot:
@@ -997,6 +1010,7 @@ ${JSON.stringify({ marketContext, ...input })}`;
     };
 
     geminiEntryCache = payload;
+    geminiEntryCacheKey = cacheKey;
     geminiEntryCacheExpiry = now + gemini.entryCacheMs;
 
     return res.json({ data: payload });

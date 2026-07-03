@@ -50,6 +50,8 @@ export function AutoTradeRunner({
   const [error, setError] = useState("");
   const runningRef = useRef(false);
   const phaseRef = useRef<AutoTradePhase>("idle");
+  const ltpRef = useRef(0);
+  const spotPriceRef = useRef(spotPrice);
 
   const quantity = lots * lotSize;
   const { transactionType } = parseTradeLeg(leg);
@@ -65,6 +67,14 @@ export function AutoTradeRunner({
   useEffect(() => {
     phaseRef.current = phase;
   }, [phase]);
+
+  useEffect(() => {
+    spotPriceRef.current = spotPrice;
+  }, [spotPrice]);
+
+  useEffect(() => {
+    ltpRef.current = ltp;
+  }, [ltp]);
 
   const refreshLtp = useCallback(async () => {
     try {
@@ -97,8 +107,8 @@ export function AutoTradeRunner({
           riskPlan: plan.riskPlan,
           invalidation: plan.invalidation,
           summary: plan.summary,
-          spot: spotPrice,
-          optionLtp: ltp,
+          spot: spotPriceRef.current,
+          optionLtp: ltpRef.current,
           targetPremium: plan.targetPremium,
           stopPremium: plan.stopPremium,
         }),
@@ -106,8 +116,12 @@ export function AutoTradeRunner({
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Entry check failed");
       const data = json.data as EntryTimingApiResponse;
-      setLastSignal(`${data.signal}: ${data.reason}`);
-      pushLog(`AI → ${data.signal}: ${data.reason}`, data.signal === "ENTER" ? "success" : "info");
+      const cachedNote = data.cached ? " (cached)" : "";
+      setLastSignal(`${data.signal}: ${data.reason}${cachedNote}`);
+      pushLog(
+        `AI → ${data.signal}: ${data.reason}${cachedNote}`,
+        data.signal === "ENTER" ? "success" : "info"
+      );
 
       if (data.signal === "ABORT") {
         setPhase("cancelled");
@@ -119,7 +133,8 @@ export function AutoTradeRunner({
       if (data.signal === "ENTER" && phaseRef.current === "waiting") {
         setPhase("entering");
         pushLog("Placing entry order…", "info");
-        const limit = data.limitPrice && data.limitPrice > 0 ? data.limitPrice : ltp;
+        const liveLtp = ltpRef.current;
+        const limit = data.limitPrice && data.limitPrice > 0 ? data.limitPrice : liveLtp;
         const orderType = data.limitPrice && data.limitPrice > 0 ? "LIMIT" : "MARKET";
         const payload: Record<string, string | number> = {
           tradingsymbol,
@@ -135,26 +150,18 @@ export function AutoTradeRunner({
 
         const result = await placeKiteOrder(payload);
         setEntryOrderId(result.order_id);
-        setEntryPremium(limit > 0 ? limit : ltp);
+        setEntryPremium(limit > 0 ? limit : liveLtp);
         setPhase("in_position");
-        pushLog(`Entry filled · Order ${result.order_id} @ ${formatNumber(limit > 0 ? limit : ltp)}`, "success");
+        pushLog(
+          `Entry filled · Order ${result.order_id} @ ${formatNumber(limit > 0 ? limit : liveLtp)}`,
+          "success"
+        );
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Entry check failed";
       pushLog(msg, "error");
     }
-  }, [
-    plan,
-    strike,
-    leg,
-    spotPrice,
-    ltp,
-    tradingsymbol,
-    transactionType,
-    product,
-    quantity,
-    pushLog,
-  ]);
+  }, [plan, strike, leg, tradingsymbol, transactionType, product, quantity, pushLog]);
 
   const checkExit = useCallback(async () => {
     if (phaseRef.current !== "in_position" || ltp <= 0 || entryPremium <= 0) return;
@@ -206,8 +213,10 @@ export function AutoTradeRunner({
     runningRef.current = true;
     setPhase("waiting");
     pushLog("Auto-trade started — waiting for AI entry signal", "info");
-    refreshLtp();
-    checkEntry();
+    void (async () => {
+      await refreshLtp();
+      checkEntry();
+    })();
   }, [plan.action, leg, strike, pushLog, refreshLtp, checkEntry]);
 
   const stop = () => {
@@ -235,6 +244,7 @@ export function AutoTradeRunner({
 
   useEffect(() => {
     if (phase !== "waiting") return;
+    checkEntry();
     const timer = window.setInterval(checkEntry, ENTRY_CHECK_MS);
     return () => window.clearInterval(timer);
   }, [phase, checkEntry]);
