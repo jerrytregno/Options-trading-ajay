@@ -364,6 +364,74 @@ function getHistoricalDateRange(days: number) {
   return { from: formatKiteDateTime(from), to: formatKiteDateTime(to) };
 }
 
+function getIntradayRange() {
+  const now = new Date();
+  const from = new Date(now);
+  from.setHours(9, 15, 0, 0);
+  if (now < from) {
+    from.setDate(from.getDate() - 1);
+  }
+  return { from: formatKiteDateTime(from), to: formatKiteDateTime(now) };
+}
+
+function getGeminiConfig() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const model = process.env.GEMINI_MODEL ?? "gemini-3.5-flash";
+  return { configured: Boolean(apiKey), apiKey: apiKey ?? null, model };
+}
+
+function extractGeminiText(payload: unknown) {
+  const data = payload as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    error?: { message?: string };
+  };
+  if (data.error?.message) throw new Error(data.error.message);
+  const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("") ?? "";
+  if (!text.trim()) throw new Error("Empty response from Gemini");
+  return text.trim();
+}
+
+function parseGeminiJson(text: string) {
+  const trimmed = text.trim();
+  try {
+    if (trimmed.startsWith("{")) return JSON.parse(trimmed) as Record<string, unknown>;
+    const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced?.[1]) return JSON.parse(fenced[1]) as Record<string, unknown>;
+  } catch {
+    /* fall through */
+  }
+  throw new Error("Gemini returned invalid JSON");
+}
+
+async function callGemini(prompt: string) {
+  const config = getGeminiConfig();
+  if (!config.apiKey) throw new Error("Gemini API key not configured");
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.35,
+          maxOutputTokens: 768,
+          responseMimeType: "application/json",
+        },
+      }),
+    }
+  );
+
+  const json: unknown = await res.json();
+  if (!res.ok) {
+    const message =
+      (json as { error?: { message?: string } }).error?.message ?? "Gemini request failed";
+    throw new Error(message);
+  }
+  return extractGeminiText(json);
+}
+
 async function fetchHistoricalCandles(
   accessToken: string,
   resolvedKey: string,
@@ -556,6 +624,110 @@ app.get("/api/kite/watchlist-quotes", async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch watchlist quotes";
     return res.status(401).json({ error: message });
+  }
+});
+
+app.get("/api/kite/nifty-stream", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  try {
+    const instrument = "NSE:NIFTY 50";
+    const range = getIntradayRange();
+    const historical = await fetchHistoricalCandles(
+      accessToken,
+      instrument,
+      "minute",
+      range.from,
+      range.to
+    );
+    const quotes = await kiteGet<Record<string, {
+      last_price: number;
+      change?: number;
+      change_percent?: number;
+      volume?: number;
+    }>>(`/quote?i=${encodeURIComponent(instrument)}`, accessToken);
+    const quote = quotes[instrument];
+
+    return res.json({
+      data: {
+        instrument,
+        interval: "minute",
+        candles: historical.candles,
+        quote: {
+          last_price: quote?.last_price ?? 0,
+          change: quote?.change ?? 0,
+          change_percent: quote?.change_percent ?? 0,
+          volume: quote?.volume ?? 0,
+        },
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to stream Nifty data";
+    return res.status(401).json({ error: message });
+  }
+});
+
+app.post("/api/gemini/trade-suggestion", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const gemini = getGeminiConfig();
+  if (!gemini.configured) {
+    return res.status(503).json({ error: "Gemini API key not configured on server" });
+  }
+
+  try {
+    const input = req.body as Record<string, unknown>;
+    const prompt = `You are an expert Indian Nifty 50 options intraday trader. Analyze the live snapshot and return ONLY valid JSON with this exact shape:
+{
+  "bias": "bullish" | "bearish" | "neutral",
+  "action": "CE_BUY" | "CE_SELL" | "PE_BUY" | "PE_SELL" | "WAIT",
+  "strike": number | null,
+  "product": "MIS" | "NRML",
+  "orderType": "MARKET" | "LIMIT",
+  "confidence": "high" | "medium" | "low",
+  "summary": "one sentence",
+  "entryPlan": "short actionable entry plan",
+  "riskPlan": "stop loss / position sizing guidance",
+  "invalidation": "what cancels the setup"
+}
+
+Rules:
+- Prefer ATM or one-strike OTM Nifty weekly options.
+- Use WAIT when signals conflict or RSI is mid-range without trend.
+- Keep language concise and actionable for a 1-minute scalping/intraday context.
+- strike must be a valid Nifty strike near ATM when action is not WAIT.
+
+Live snapshot:
+${JSON.stringify(input)}`;
+
+    const text = await callGemini(prompt);
+    const parsed = parseGeminiJson(text);
+    const suggestion = {
+      bias: parsed.bias ?? "neutral",
+      action: parsed.action ?? "WAIT",
+      strike: typeof parsed.strike === "number" ? parsed.strike : null,
+      product: parsed.product === "NRML" ? "NRML" : "MIS",
+      orderType: parsed.orderType === "MARKET" ? "MARKET" : "LIMIT",
+      confidence: parsed.confidence ?? "medium",
+      summary: String(parsed.summary ?? "No suggestion available."),
+      entryPlan: String(parsed.entryPlan ?? ""),
+      riskPlan: String(parsed.riskPlan ?? ""),
+      invalidation: String(parsed.invalidation ?? ""),
+    };
+
+    return res.json({
+      data: {
+        suggestion,
+        model: gemini.model,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Gemini suggestion failed";
+    return res.status(502).json({ error: message });
   }
 });
 
