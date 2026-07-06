@@ -712,3 +712,38 @@
 .stream-page-fullscreen .stream-ai-panel {
   position: static;
 }
+
+.stream-page .stream-hero {
+  padding-right: 3.5rem;
+}
+
+[data-theme="light"] .stream-toolbar {
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.95), rgba(244, 246, 249, 0.9));
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
+}
+[data-theme="light"] .stream-symbol-card {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.9), rgba(244, 246, 249, 0.5));
+}
+[data-theme="light"] .stream-symbol-card.is-active {
+  background: #ffffff;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+}
+[data-theme="light"] .stream-chart-card {
+  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.07);
+}
+[data-theme="light"] .stream-ai-panel {
+  background: linear-gradient(180deg, rgba(96, 165, 250, 0.08) 0%, var(--surface) 30%);
+}
+[data-theme="light"] .stream-ai-notice-warning {
+  color: rgba(15, 23, 42, 0.75);
+}
+[data-theme="light"] .stream-formula-panel {
+  background: linear-gradient(145deg, rgba(167, 139, 250, 0.06), rgba(99, 102, 241, 0.03));
+}
+[data-theme="light"] .stream-formula-log,
+[data-theme="light"] .stream-ai-block {
+  background: rgba(15, 23, 42, 0.04);
+}
+[data-theme="light"] .stream-chart-legend-modern {
+  background: rgba(15, 23, 42, 0.03);
+}

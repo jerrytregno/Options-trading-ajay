@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { ParsedCandle } from "@/lib/candles";
 import type { RsiPoint } from "@/lib/technical-indicators";
+import { useTheme } from "@/contexts/theme-context";
 
 interface StreamingChartProps {
   candles: ParsedCandle[];
@@ -10,7 +11,7 @@ interface StreamingChartProps {
   symbol?: string;
 }
 
-const COLORS = {
+const DARK_COLORS = {
   bgTop: "#0c0c0e",
   bgBottom: "#050506",
   panelBorder: "rgba(255, 255, 255, 0.1)",
@@ -30,6 +31,29 @@ const COLORS = {
   lastPrice: "#f05252",
   lastPriceBg: "rgba(240, 82, 82, 0.18)",
 };
+
+const LIGHT_COLORS = {
+  bgTop: "#ffffff",
+  bgBottom: "#f8fafc",
+  panelBorder: "rgba(15, 23, 42, 0.1)",
+  grid: "rgba(15, 23, 42, 0.06)",
+  axis: "rgba(15, 23, 42, 0.2)",
+  label: "rgba(15, 23, 42, 0.72)",
+  labelDim: "rgba(15, 23, 42, 0.45)",
+  bull: "#059669",
+  bullGlow: "rgba(5, 150, 105, 0.2)",
+  bear: "#dc2626",
+  bearGlow: "rgba(220, 38, 38, 0.18)",
+  bullVol: "rgba(5, 150, 105, 0.45)",
+  bearVol: "rgba(220, 38, 38, 0.4)",
+  rsi: "#7c3aed",
+  rsiFill: "rgba(124, 58, 237, 0.1)",
+  rsiBand: "rgba(15, 23, 42, 0.08)",
+  lastPrice: "#dc2626",
+  lastPriceBg: "rgba(220, 38, 38, 0.1)",
+};
+
+type ChartColors = typeof DARK_COLORS;
 
 const MAX_VISIBLE = 120;
 const MIN_SLOT = 4;
@@ -176,8 +200,8 @@ function pickTimeLabelIndices(candles: ParsedCandle[], startIndex: number, xForI
   return indices;
 }
 
-function drawPanelFrame(ctx: CanvasRenderingContext2D, panel: PanelRect) {
-  ctx.strokeStyle = COLORS.panelBorder;
+function drawPanelFrame(ctx: CanvasRenderingContext2D, panel: PanelRect, colors: ChartColors) {
+  ctx.strokeStyle = colors.panelBorder;
   ctx.lineWidth = 1;
   ctx.strokeRect(panel.left + 0.5, panel.top + 0.5, panel.width - 1, panel.height - 1);
 }
@@ -189,11 +213,12 @@ function drawHorizontalGrid(
   yMin: number,
   yMax: number,
   drawLabels: boolean,
-  labelFormatter: (v: number) => string
+  labelFormatter: (v: number) => string,
+  colors: ChartColors
 ) {
-  ctx.strokeStyle = COLORS.grid;
+  ctx.strokeStyle = colors.grid;
   ctx.lineWidth = 1;
-  ctx.fillStyle = COLORS.label;
+  ctx.fillStyle = colors.label;
   ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
@@ -216,7 +241,8 @@ function drawTimeAxis(
   layout: ChartLayout,
   candles: ParsedCandle[],
   labelIndices: number[],
-  xForIndex: (index: number) => number
+  xForIndex: (index: number) => number,
+  colors: ChartColors
 ) {
   const visible = candles.slice(layout.startIndex);
   const spanMs =
@@ -225,14 +251,14 @@ function drawTimeAxis(
       : 60_000;
   const axisY = layout.rsi.top + layout.rsi.height + 10;
 
-  ctx.strokeStyle = COLORS.axis;
+  ctx.strokeStyle = colors.axis;
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(layout.pad.left, layout.rsi.top + layout.rsi.height);
   ctx.lineTo(layout.pad.left + layout.price.width, layout.rsi.top + layout.rsi.height);
   ctx.stroke();
 
-  ctx.fillStyle = COLORS.labelDim;
+  ctx.fillStyle = colors.labelDim;
   ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
@@ -241,9 +267,9 @@ function drawTimeAxis(
     const candle = candles[idx];
     if (!candle) continue;
     const x = xForIndex(idx);
-    ctx.fillStyle = COLORS.grid;
+    ctx.fillStyle = colors.grid;
     ctx.fillRect(x, layout.price.top, 1, layout.rsi.top + layout.rsi.height - layout.price.top);
-    ctx.fillStyle = COLORS.labelDim;
+    ctx.fillStyle = colors.labelDim;
     ctx.fillText(formatTimeLabel(candle.timestamp, spanMs), x, axisY);
   }
 }
@@ -256,11 +282,14 @@ export function StreamingChart({
 }: StreamingChartProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const { isLight } = useTheme();
 
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container || candles.length === 0) return;
+
+    const COLORS = isLight ? LIGHT_COLORS : DARK_COLORS;
 
     const draw = () => {
       const width = container.clientWidth;
@@ -293,9 +322,10 @@ export function StreamingChart({
       const labelIndices = pickTimeLabelIndices(candles, layout.startIndex, xForIndex);
 
       drawHorizontalGrid(ctx, layout.price, priceTickValues, layout.yMin, layout.yMax, true, (v) =>
-        v.toFixed(2)
+        v.toFixed(2),
+        COLORS
       );
-      drawPanelFrame(ctx, layout.price);
+      drawPanelFrame(ctx, layout.price, COLORS);
 
       visible.forEach((candle, localIdx) => {
         const index = layout.startIndex + localIdx;
@@ -356,7 +386,7 @@ export function StreamingChart({
       ctx.textBaseline = "middle";
       ctx.fillText(lastLabel, labelX + 7, lastY);
 
-      drawPanelFrame(ctx, layout.volume);
+      drawPanelFrame(ctx, layout.volume, COLORS);
       ctx.fillStyle = COLORS.labelDim;
       ctx.font = "600 9px ui-sans-serif, system-ui";
       ctx.textAlign = "left";
@@ -382,7 +412,7 @@ export function StreamingChart({
         ctx.fill();
       });
 
-      drawPanelFrame(ctx, layout.rsi);
+      drawPanelFrame(ctx, layout.rsi, COLORS);
       const rsiY = (value: number) =>
         layout.rsi.top + ((100 - value) / 100) * layout.rsi.height;
 
@@ -487,14 +517,14 @@ export function StreamingChart({
         );
       }
 
-      drawTimeAxis(ctx, layout, candles, labelIndices, xForIndex);
+      drawTimeAxis(ctx, layout, candles, labelIndices, xForIndex, COLORS);
     };
 
     draw();
     const observer = new ResizeObserver(draw);
     observer.observe(container);
     return () => observer.disconnect();
-  }, [candles, rsiSeries, height]);
+  }, [candles, rsiSeries, height, isLight]);
 
   return (
     <div ref={containerRef} className="stream-chart-wrap stream-chart-wrap-modern">

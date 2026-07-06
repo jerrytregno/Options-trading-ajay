@@ -21,6 +21,90 @@
   --chart-label: rgba(255, 255, 255, 0.55);
 }
 
+[data-theme="light"] {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --surface-elevated: #f0f2f5;
+  --surface-hover: #e8ebef;
+  --border: rgba(15, 23, 42, 0.1);
+  --border-strong: rgba(15, 23, 42, 0.16);
+  --muted: rgba(15, 23, 42, 0.55);
+  --text: #0f172a;
+  --text-secondary: rgba(15, 23, 42, 0.82);
+  --primary: #0f172a;
+  --primary-hover: #1e293b;
+  --primary-fg: #ffffff;
+  --success: #16a34a;
+  --danger: #dc2626;
+  --warning: #d97706;
+  --chart-bg: #fafbfc;
+  --chart-grid: rgba(15, 23, 42, 0.07);
+  --chart-label: rgba(15, 23, 42, 0.5);
+  color-scheme: light;
+}
+
+[data-theme="light"] body::before {
+  background:
+    radial-gradient(ellipse 70% 45% at 50% -15%, rgba(99, 102, 241, 0.07), transparent),
+    radial-gradient(ellipse 50% 35% at 100% 0%, rgba(34, 201, 151, 0.05), transparent);
+}
+
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.18);
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.28);
+}
+
+[data-theme="light"] .card {
+  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.06);
+}
+[data-theme="light"] .nav-link.active {
+  background: rgba(15, 23, 42, 0.06);
+}
+[data-theme="light"] .sidebar {
+  box-shadow: 4px 0 24px rgba(15, 23, 42, 0.06);
+}
+[data-theme="light"] .stream-ai-toggle-track::after {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.2);
+}
+
+.dashboard-theme-toggle {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 60;
+}
+
+.theme-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  height: 2.25rem;
+  padding: 0 0.875rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+}
+.theme-toggle-btn:hover {
+  background: var(--surface-hover);
+  transform: translateY(-1px);
+}
+.theme-toggle-btn-compact {
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border-radius: 10px;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html {
