@@ -1,7 +1,7 @@
 import type { GeminiTradeSuggestion } from "@/types/streaming";
 import type { ProductType, TradeLeg } from "@/lib/trade-calculations";
 import { parseTradeLeg } from "@/lib/trade-calculations";
-import { buildProtectedMarketOrder } from "@/lib/kite-orders";
+import { buildProtectedMarketOrder, normalizeKiteOrderBody } from "@/lib/kite-orders";
 
 export const AUTO_TRADE_PLAN_KEY = "optionflow_auto_trade_plan";
 
@@ -106,7 +106,7 @@ export async function placeKiteOrder(payload: Record<string, string | number>) {
   const body =
     orderType === "MARKET" || orderType === "SL-M"
       ? buildProtectedMarketOrder(payload)
-      : payload;
+      : normalizeKiteOrderBody(payload);
 
   const res = await fetch("/api/kite/orders", {
     method: "POST",
@@ -116,7 +116,60 @@ export async function placeKiteOrder(payload: Record<string, string | number>) {
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error ?? "Order failed");
-  return json.data as { order_id: string };
+  const orderId = json.data?.order_id;
+  if (!orderId) throw new Error("Order placed but Zerodha returned no order id");
+  return { order_id: String(orderId) };
+}
+
+export interface KiteOrderRecord {
+  order_id: string;
+  status: string;
+  status_message?: string;
+  tradingsymbol?: string;
+  filled_quantity?: number;
+  quantity?: number;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+export async function fetchKiteOrder(orderId: string): Promise<KiteOrderRecord | null> {
+  const res = await fetch(`/api/kite/orders/${encodeURIComponent(orderId)}`, {
+    credentials: "include",
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error ?? "Failed to fetch order status");
+  return (json.data as KiteOrderRecord | null) ?? null;
+}
+
+/** Poll until Kite marks the order COMPLETE or terminal failure. */
+export async function waitForKiteOrderComplete(
+  orderId: string,
+  maxMs = 20_000,
+  intervalMs = 750
+): Promise<KiteOrderRecord> {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    const order = await fetchKiteOrder(orderId);
+    if (!order) throw new Error(`Order ${orderId} not found on Zerodha`);
+    const status = order.status?.toUpperCase() ?? "";
+    if (status === "COMPLETE") return order;
+    if (status === "REJECTED" || status === "CANCELLED") {
+      throw new Error(order.status_message ?? `Exit order ${status.toLowerCase()}`);
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(`Order ${orderId} not filled within ${Math.round(maxMs / 1000)}s`);
+}
+
+export async function fetchNetPositionQty(tradingsymbol: string, product = "MIS"): Promise<number> {
+  const res = await fetch("/api/kite/positions", { credentials: "include" });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error ?? "Failed to fetch positions");
+  const net = (json.data?.net ?? []) as Array<{ tradingsymbol: string; product: string; quantity: number }>;
+  const pos = net.find((p) => p.tradingsymbol === tradingsymbol && p.product === product);
+  return pos?.quantity ?? 0;
 }
 
 export function defaultProduct(plan: AutoTradePlan): ProductType {

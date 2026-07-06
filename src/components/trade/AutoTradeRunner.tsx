@@ -9,6 +9,7 @@ import {
   placeKiteOrder,
   shouldExitPosition,
 } from "@/lib/auto-trade";
+import { useConfirm } from "@/contexts/confirm-context";
 import { buildProtectedMarketOrder } from "@/lib/kite-orders";
 import { legLabel, parseTradeLeg, productForExchange, type TradeLeg } from "@/lib/trade-calculations";
 import type { EntryTimingApiResponse } from "@/types/auto-trade";
@@ -41,6 +42,7 @@ export function AutoTradeRunner({
   autoStart = false,
   onCancel,
 }: AutoTradeRunnerProps) {
+  const { confirm } = useConfirm();
   const [phase, setPhase] = useState<AutoTradePhase>("idle");
   const [ltp, setLtp] = useState(0);
   const [entryPremium, setEntryPremium] = useState(0);
@@ -212,18 +214,27 @@ export function AutoTradeRunner({
     await squareOff(exitCheck.reason);
   }, [leg, entryPremium, ltp, plan.targetPremium, plan.stopPremium, squareOff]);
 
-  const start = useCallback((skipConfirm = false) => {
+  const start = useCallback(async (skipConfirm = false) => {
     if (plan.action === "WAIT") {
       setError("AI suggested WAIT — no auto-trade for this setup");
       return;
     }
-    if (
-      !skipConfirm &&
-      !window.confirm(
-        `Start AI auto-trade for ${legLabel(leg)} @ strike ${strike}?\n\nThis will place REAL orders on Zerodha when AI signals ENTER, and exit at target/stop.`
-      )
-    ) {
-      return;
+    if (!skipConfirm) {
+      const ok = await confirm({
+        title: "Start AI auto-trade?",
+        body: (
+          <>
+            <p>
+              {legLabel(leg)} @ strike {formatNumber(strike)}
+            </p>
+            <p>This will place REAL orders on Zerodha when AI signals ENTER, and exit at target/stop.</p>
+            <p className="confirm-note">REAL Zerodha orders — real money.</p>
+          </>
+        ),
+        confirmLabel: "Start auto-trade",
+        tone: "danger",
+      });
+      if (!ok) return;
     }
     setError("");
     setLogs([]);
@@ -234,19 +245,26 @@ export function AutoTradeRunner({
       await refreshLtp();
       checkEntry();
     })();
-  }, [plan.action, leg, strike, pushLog, refreshLtp, checkEntry]);
+  }, [plan.action, leg, strike, pushLog, refreshLtp, checkEntry, confirm]);
 
   const stop = async () => {
     if (stopping || phase === "exiting") return;
 
     if (phaseRef.current === "in_position") {
-      if (
-        !window.confirm(
-          `Stop auto-trade and square off ${legLabel(leg)} @ strike ${strike}?\n\nThis will place a REAL exit order on Zerodha.`
-        )
-      ) {
-        return;
-      }
+      const ok = await confirm({
+        title: "Stop & exit position?",
+        body: (
+          <>
+            <p>
+              Stop auto-trade and square off {legLabel(leg)} @ strike {formatNumber(strike)}.
+            </p>
+            <p className="confirm-note">This will place a REAL exit order on Zerodha.</p>
+          </>
+        ),
+        confirmLabel: "Stop & exit",
+        tone: "danger",
+      });
+      if (!ok) return;
       setStopping(true);
       runningRef.current = false;
       await squareOff("Stopped by user");

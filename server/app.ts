@@ -7,6 +7,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import { WATCHLIST_ITEMS } from "../src/lib/watchlist.js";
+import { getStreamInstrument } from "../src/lib/stream-instruments.js";
 import {
   calculateGreeks,
   filterStrikesAroundAtm,
@@ -15,6 +16,7 @@ import {
 import { getIndianMarketContext, getNseSessionKiteRange } from "../src/lib/market-time.js";
 import { parseKiteCandles } from "../src/lib/candles.js";
 import { buildSessionContext } from "../src/lib/session-context.js";
+import { buildTechnicalSnapshot } from "../src/lib/technical-indicators.js";
 import {
   normalizeKiteOrderBody,
   resolveMarketProtection,
@@ -272,11 +274,16 @@ function getOptionSide(instrument: KiteInstrument): "CE" | "PE" | null {
   return null;
 }
 
-function filterNiftyOptions(instruments: KiteInstrument[]) {
+function filterUnderlyingOptions(
+  instruments: KiteInstrument[],
+  chainSymbol: string,
+  chainExchange: string
+) {
+  const segment = `${chainExchange}-OPT`;
   return instruments.filter(
     (item) =>
-      item.segment === "NFO-OPT" &&
-      /^NIFTY\d/.test(item.tradingsymbol) &&
+      item.segment === segment &&
+      item.name === chainSymbol &&
       (item.tradingsymbol.endsWith("CE") || item.tradingsymbol.endsWith("PE"))
   );
 }
@@ -442,13 +449,47 @@ interface GeminiSuggestionPayload {
   invalidation: string;
 }
 
-let geminiSuggestionCache: {
-  suggestion: GeminiSuggestionPayload;
-  model: string;
-  updatedAt: string;
-  thinking?: string;
-} | null = null;
-let geminiSuggestionCacheExpiry = 0;
+let geminiSuggestionCaches = new Map<
+  string,
+  {
+    suggestion: GeminiSuggestionPayload;
+    model: string;
+    updatedAt: string;
+    thinking?: string;
+    expiry: number;
+  }
+>();
+
+function geminiSuggestionCacheKey(input: Record<string, unknown>) {
+  return String(input.underlyingId ?? "nifty50");
+}
+
+function buildGeminiTradePrompt(input: Record<string, unknown>, marketContext: ReturnType<typeof getIndianMarketContext>) {
+  const label = String(input.instrumentLabel ?? "Nifty 50");
+  const symbol = String(input.chainSymbol ?? "NIFTY");
+  const exchange = String(input.chainExchange ?? "NFO");
+
+  return `You are an expert Indian options intraday trader on ${exchange} (${label} / ${symbol}).
+
+IMPORTANT — use this exact clock and session (Indian Standard Time):
+- Current date & time: ${marketContext.currentDateTimeIST}
+- NSE/BSE F&O session: ${marketContext.sessionHoursIST}, ${marketContext.sessionDays}
+- Session status: ${marketContext.sessionStatus}${marketContext.isMarketOpen ? ` (${marketContext.minutesFromOpen} min since open, ${marketContext.minutesToClose} min to close)` : ""}
+
+Rules:
+- Underlying: ${label} (${symbol}) on ${exchange}.
+- Only recommend active intraday trades when session status is "open".
+- If pre_market, post_market, or closed_weekend → action should be WAIT with reason about session timing.
+- After ~3:15 PM IST favour MIS square-off / no new entries unless strong edge.
+- Prefer ATM or one-strike OTM weekly/monthly options (MIS for intraday).
+- For index (${symbol}): standard lot sizing. For stock options: note liquidity.
+- Keep each field concise for 1-second intraday context.
+- Use sessionContext for full-day structure (open, high, low, VWAP, opening range, recent 1m bars).
+- Use recent1s for the last ~60 seconds only; do not ignore sessionContext when choosing CE vs PE.
+
+Live snapshot (includes marketContext):
+${JSON.stringify({ marketContext, ...input })}`;
+}
 
 const GEMINI_ENTRY_SCHEMA = {
   type: "object",
@@ -837,12 +878,13 @@ app.get("/api/kite/watchlist-quotes", async (req, res) => {
   }
 });
 
-app.get("/api/kite/nifty-stream", async (req, res) => {
+app.get("/api/kite/quote-stream", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
+  const instrument = (req.query.instrument as string | undefined)?.trim();
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+  if (!instrument) return res.status(400).json({ error: "instrument query param is required" });
 
   try {
-    const instrument = "NSE:NIFTY 50";
     const quotes = await kiteGet<Record<string, {
       last_price: number;
       change?: number;
@@ -867,15 +909,140 @@ app.get("/api/kite/nifty-stream", async (req, res) => {
       },
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to stream quote";
+    return res.status(401).json({ error: message });
+  }
+});
+
+/** @deprecated use /api/kite/quote-stream?instrument=NSE:NIFTY+50 */
+app.get("/api/kite/nifty-stream", async (req, res) => {
+  req.query.instrument = "NSE:NIFTY 50";
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  const instrument = "NSE:NIFTY 50";
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+  try {
+    const quotes = await kiteGet<Record<string, {
+      last_price: number;
+      change?: number;
+      change_percent?: number;
+      volume?: number;
+      ohlc?: { open?: number; high?: number; low?: number; close?: number };
+    }>>(`/quote?i=${encodeURIComponent(instrument)}`, accessToken);
+    const quote = quotes[instrument];
+    return res.json({
+      data: {
+        instrument,
+        interval: "second",
+        quote: {
+          last_price: quote?.last_price ?? 0,
+          change: quote?.change ?? 0,
+          change_percent: quote?.change_percent ?? 0,
+          volume: quote?.volume ?? 0,
+          ohlc: quote?.ohlc,
+        },
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to stream Nifty data";
     return res.status(401).json({ error: message });
+  }
+});
+
+const INSTRUMENT_SESSION_CACHE_MS = 60000;
+const instrumentSessionCache = new Map<
+  string,
+  {
+    data: {
+      instrument: string;
+      session: ReturnType<typeof buildSessionContext>;
+      candles: ReturnType<typeof parseKiteCandles>;
+      technicals: ReturnType<typeof buildTechnicalSnapshot> | null;
+      note: string;
+      updatedAt: string;
+      cached?: boolean;
+      stale?: boolean;
+    };
+    updatedAt: string;
+    expiry: number;
+  }
+>();
+
+async function loadInstrumentSessionPayload(accessToken: string, instrument: string) {
+  const marketContext = getIndianMarketContext();
+  if (!marketContext.isMarketOpen && marketContext.sessionStatus !== "post_market") {
+    return {
+      instrument,
+      session: null,
+      candles: [],
+      technicals: null,
+      note: `Session ${marketContext.sessionStatus}`,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  const range = getNseSessionKiteRange();
+  const historical = await fetchHistoricalCandles(
+    accessToken,
+    instrument,
+    "minute",
+    range.from,
+    range.to
+  );
+  const candles = parseKiteCandles(historical.candles as unknown[]);
+  const session = buildSessionContext(candles, range.dateIST);
+  const technicals = buildTechnicalSnapshot(candles);
+  return {
+    instrument,
+    session,
+    candles,
+    technicals,
+    note: session ? `${session.barCount} x 1m bars since 09:15 IST` : "No session candles",
+    updatedAt: new Date().toISOString(),
+    cached: false,
+  };
+}
+
+app.get("/api/kite/instrument-session", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  const instrument = (req.query.instrument as string | undefined)?.trim();
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+  if (!instrument) return res.status(400).json({ error: "instrument query param is required" });
+
+  const now = Date.now();
+  const cached = instrumentSessionCache.get(instrument);
+  if (cached && now < cached.expiry) {
+    return res.json({
+      data: { ...cached.data, cached: true, updatedAt: cached.updatedAt },
+    });
+  }
+
+  try {
+    const payload = await loadInstrumentSessionPayload(accessToken, instrument);
+    instrumentSessionCache.set(instrument, {
+      data: payload,
+      updatedAt: payload.updatedAt,
+      expiry: now + INSTRUMENT_SESSION_CACHE_MS,
+    });
+    return res.json({ data: payload });
+  } catch (error) {
+    if (cached) {
+      return res.json({
+        data: { ...cached.data, cached: true, stale: true },
+      });
+    }
+    const message = error instanceof Error ? error.message : "Failed to load session";
+    return res.status(502).json({ error: message });
   }
 });
 
 const NIFTY_SESSION_CACHE_MS = 60000;
 let niftySessionCache: {
   data: {
+    instrument: string;
     session: ReturnType<typeof buildSessionContext>;
+    candles: ReturnType<typeof parseKiteCandles>;
+    technicals: ReturnType<typeof buildTechnicalSnapshot> | null;
     note: string;
     updatedAt: string;
     cached?: boolean;
@@ -886,7 +1053,9 @@ let niftySessionCache: {
 let niftySessionCacheExpiry = 0;
 
 app.get("/api/kite/nifty-session", async (req, res) => {
+  req.query.instrument = "NSE:NIFTY 50";
   const accessToken = req.cookies[TOKEN_COOKIE];
+  const instrument = "NSE:NIFTY 50";
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
 
   const now = Date.now();
@@ -897,37 +1066,9 @@ app.get("/api/kite/nifty-session", async (req, res) => {
   }
 
   try {
-    const marketContext = getIndianMarketContext();
-    if (!marketContext.isMarketOpen && marketContext.sessionStatus !== "post_market") {
-      return res.json({
-        data: {
-          session: null,
-          note: `Session ${marketContext.sessionStatus}`,
-          updatedAt: new Date().toISOString(),
-        },
-      });
-    }
-
-    const range = getNseSessionKiteRange();
-    const historical = await fetchHistoricalCandles(
-      accessToken,
-      "NSE:NIFTY 50",
-      "minute",
-      range.from,
-      range.to
-    );
-    const candles = parseKiteCandles(historical.candles as unknown[]);
-    const session = buildSessionContext(candles, range.dateIST);
-    const payload = {
-      session,
-      note: session ? `${session.barCount} x 1m bars since 09:15 IST` : "No session candles",
-      updatedAt: new Date().toISOString(),
-      cached: false,
-    };
-
+    const payload = await loadInstrumentSessionPayload(accessToken, instrument);
     niftySessionCache = { data: payload, updatedAt: payload.updatedAt };
     niftySessionCacheExpiry = now + NIFTY_SESSION_CACHE_MS;
-
     return res.json({ data: payload });
   } catch (error) {
     if (niftySessionCache) {
@@ -950,39 +1091,25 @@ app.post("/api/gemini/trade-suggestion", async (req, res) => {
   }
 
   const now = Date.now();
-  if (geminiSuggestionCache && now < geminiSuggestionCacheExpiry) {
+  const input = req.body as Record<string, unknown>;
+  const cacheKey = geminiSuggestionCacheKey(input);
+  const cached = geminiSuggestionCaches.get(cacheKey);
+  if (cached && now < cached.expiry) {
     return res.json({
       data: {
-        ...geminiSuggestionCache,
+        suggestion: cached.suggestion,
+        model: cached.model,
+        updatedAt: cached.updatedAt,
+        thinking: cached.thinking,
         cached: true,
-        refreshInMs: geminiSuggestionCacheExpiry - now,
+        refreshInMs: cached.expiry - now,
       },
     });
   }
 
   try {
-    const input = req.body as Record<string, unknown>;
     const marketContext = getIndianMarketContext();
-    const snapshot = { marketContext, ...input };
-
-    const prompt = `You are an expert Indian Nifty 50 options intraday trader on NSE F&O.
-
-IMPORTANT — use this exact clock and session (Indian Standard Time):
-- Current date & time: ${marketContext.currentDateTimeIST}
-- NSE F&O session: ${marketContext.sessionHoursIST}, ${marketContext.sessionDays}
-- Session status: ${marketContext.sessionStatus}${marketContext.isMarketOpen ? ` (${marketContext.minutesFromOpen} min since open, ${marketContext.minutesToClose} min to close)` : ""}
-
-Rules:
-- Only recommend active intraday trades when session status is "open".
-- If pre_market, post_market, or closed_weekend → action should be WAIT with reason about session timing.
-- After ~3:15 PM IST favour MIS square-off / no new entries unless strong edge.
-- Prefer ATM or one-strike OTM Nifty weekly options (MIS for intraday).
-- Keep each field concise for 1-second intraday context.
-- Use sessionContext for full-day structure (open, high, low, VWAP, opening range, recent 1m bars).
-- Use recent1s for the last ~60 seconds only; do not ignore sessionContext when choosing CE vs PE.
-
-Live snapshot (includes marketContext):
-${JSON.stringify(snapshot)}`;
+    const prompt = buildGeminiTradePrompt(input, marketContext);
 
     const { text, thinking } = await callGemini(prompt);
     const parsed = parseGeminiJson(text);
@@ -996,23 +1123,27 @@ ${JSON.stringify(snapshot)}`;
       refreshInMs: gemini.cacheMs,
     };
 
-    geminiSuggestionCache = {
+    geminiSuggestionCaches.set(cacheKey, {
       suggestion,
       model: gemini.model,
       updatedAt: payload.updatedAt,
       thinking: payload.thinking,
-    };
-    geminiSuggestionCacheExpiry = now + gemini.cacheMs;
+      expiry: now + gemini.cacheMs,
+    });
 
     return res.json({ data: payload });
   } catch (error) {
-    if (geminiSuggestionCache) {
+    const stale = geminiSuggestionCaches.get(cacheKey);
+    if (stale) {
       return res.json({
         data: {
-          ...geminiSuggestionCache,
+          suggestion: stale.suggestion,
+          model: stale.model,
+          updatedAt: stale.updatedAt,
+          thinking: stale.thinking,
           cached: true,
           stale: true,
-          refreshInMs: Math.max(geminiSuggestionCacheExpiry - now, 0),
+          refreshInMs: Math.max(stale.expiry - now, 0),
           warning: error instanceof Error ? error.message : "Using last AI suggestion",
         },
       });
@@ -1193,10 +1324,12 @@ app.get("/api/kite/watchlist-history", async (req, res) => {
 
 app.get("/api/kite/option-chain", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
-  const symbol = "NIFTY";
-  const exchange = "NFO";
+  const underlyingId = (req.query.underlying as string | undefined) ?? "nifty50";
+  const streamInst = getStreamInstrument(underlyingId);
+  const symbol = streamInst.chainSymbol;
+  const exchange = streamInst.chainExchange;
   const expiryParam = req.query.expiry as string | undefined;
-  const spotKey = "NSE:NIFTY 50";
+  const spotKey = streamInst.kiteKey;
 
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
 
@@ -1204,13 +1337,13 @@ app.get("/api/kite/option-chain", async (req, res) => {
     const allInstruments = await getCachedInstruments(exchange);
 
     if (allInstruments.length === 0) {
-      return res.status(502).json({ error: "Failed to load NFO instrument master from Zerodha" });
+      return res.status(502).json({ error: `Failed to load ${exchange} instrument master from Zerodha` });
     }
 
-    const underlyingOptions = filterNiftyOptions(allInstruments);
+    const underlyingOptions = filterUnderlyingOptions(allInstruments, symbol, exchange);
 
     if (underlyingOptions.length === 0) {
-      return res.status(404).json({ error: "No Nifty 50 options found" });
+      return res.status(404).json({ error: `No ${streamInst.label} options found` });
     }
 
     const expiries = [...new Set(underlyingOptions.map((i) => i.expiry).filter(Boolean))] as string[];
@@ -1277,6 +1410,7 @@ app.get("/api/kite/option-chain", async (req, res) => {
 
     return res.json({
       data: {
+        underlyingId: streamInst.id,
         symbol,
         exchange,
         expiry: selectedExpiry,
@@ -1340,6 +1474,19 @@ app.get("/api/kite/holdings", async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch holdings";
     return res.status(401).json({ error: message });
+  }
+});
+
+app.get("/api/kite/orders/:orderId", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+  try {
+    const data = await kiteGet<unknown[]>(`/orders/${req.params.orderId}`, accessToken);
+    const order = Array.isArray(data) ? data[0] : data;
+    return res.json({ data: order ?? null });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to fetch order";
+    return res.status(400).json({ error: message });
   }
 });
 

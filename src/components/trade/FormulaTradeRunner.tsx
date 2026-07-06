@@ -1,22 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  checkFormulaEntry,
   checkFormulaExit,
-  flipFormulaOption,
   FORMULA_OPTIONS,
   FORMULA_RULES,
+  FORMULA_VARIANTS,
+  formulaCallEntryLabel,
+  formulaPutEntryLabel,
+  formulaUsesVwap,
+  fetchFormulaOptionChain,
   formulaLotsForRisk,
-  getStoredFormulaOption,
+  pickFormulaEntryOption,
   type FormulaEntryContext,
   type FormulaOptionId,
   type FormulaPhase,
+  type FormulaVariantId,
   isPastFormulaHardExit,
+  isInFormulaHardExitWindow,
   placeFormulaEntry,
   placeFormulaExit,
   premiumProfitPct,
   resolveFormulaInstrument,
-  storeNextFormulaOption,
 } from "@/lib/formula-trade";
+import { fetchNetPositionQty, waitForKiteOrderComplete } from "@/lib/auto-trade";
+import { useConfirm } from "@/contexts/confirm-context";
 import { legLabel } from "@/lib/trade-calculations";
 import type { OptionChainResponse } from "@/types/kite";
 import { cn, formatCurrency, formatNumber } from "@/lib/utils";
@@ -32,6 +38,7 @@ export interface FormulaLogEntry {
 
 interface FormulaTradeRunnerProps {
   chain: OptionChainResponse | null;
+  formulaVariant: FormulaVariantId;
   rsi14: number | null;
   recentRsi: number[];
   spotPrice: number;
@@ -42,6 +49,7 @@ interface FormulaTradeRunnerProps {
 
 export function FormulaTradeRunner({
   chain,
+  formulaVariant,
   rsi14,
   recentRsi,
   spotPrice,
@@ -49,8 +57,9 @@ export function FormulaTradeRunner({
   candleCount,
   onStop,
 }: FormulaTradeRunnerProps) {
+  const { confirm } = useConfirm();
   const [phase, setPhase] = useState<FormulaPhase>("waiting");
-  const [activeOption, setActiveOption] = useState<FormulaOptionId>(() => getStoredFormulaOption());
+  const [activeOption, setActiveOption] = useState<FormulaOptionId>(1);
   const [ltp, setLtp] = useState(0);
   const [entryPremium, setEntryPremium] = useState(0);
   const [entryTimeMs, setEntryTimeMs] = useState(0);
@@ -84,11 +93,17 @@ export function FormulaTradeRunner({
   const capitalRef = useRef(0);
   const consecutiveLossesRef = useRef(0);
   const cooldownTargetRef = useRef(0);
+  const exitingRef = useRef(false);
 
+  const setPhaseSync = useCallback((next: FormulaPhase) => {
+    phaseRef.current = next;
+    setPhase(next);
+  }, []);
+  const variantRule = FORMULA_VARIANTS[formulaVariant];
+  const usesVwap = formulaUsesVwap(formulaVariant);
   const rule = FORMULA_OPTIONS[activeOption];
   const profitPct = premiumProfitPct(entryPremium, ltp);
-  const minutesInTrade =
-    entryTimeMs > 0 ? Math.floor((Date.now() - entryTimeMs) / 60000) : 0;
+  const inEodExitWindow = isInFormulaHardExitWindow();
 
   const pushLog = useCallback((message: string, type: FormulaLogEntry["type"] = "info") => {
     setLogs((prev) => [
@@ -164,45 +179,38 @@ export function FormulaTradeRunner({
     };
   }, []);
 
-  const beginWaiting = useCallback(
-    (option: FormulaOptionId) => {
-      if (isPastFormulaHardExit()) {
-        setPhase("stopped");
-        pushLog("Past 3:15 PM IST — no new entries", "warning");
-        runningRef.current = false;
-        onStop?.();
-        return;
-      }
-      setActiveOption(option);
-      setEntryOrderId("");
-      setExitOrderId("");
-      setEntryPremium(0);
-      setEntryTimeMs(0);
-      setLtp(0);
-      setTradingsymbol("");
-      setPhase("waiting");
-      pushLog(
-        `${FORMULA_OPTIONS[option].name} — waiting for ${FORMULA_OPTIONS[option].entryLabel}`,
-        "info"
-      );
-    },
-    [pushLog, onStop]
-  );
+  const beginWaiting = useCallback(() => {
+    if (isPastFormulaHardExit()) {
+      setPhaseSync("stopped");
+      pushLog("Past 3:15 PM IST — no new entries (EOD exit window)", "warning");
+      runningRef.current = false;
+      onStop?.();
+      return;
+    }
+    setEntryOrderId("");
+    setExitOrderId("");
+    setEntryPremium(0);
+    setEntryTimeMs(0);
+    setLtp(0);
+    setTradingsymbol("");
+    entryPremiumRef.current = 0;
+    entryTimeMsRef.current = 0;
+    ltpRef.current = 0;
+    tradingsymbolRef.current = "";
+    setPhaseSync("waiting");
+    pushLog("Waiting for Call or Put signal (one trade at a time)", "info");
+  }, [pushLog, onStop, setPhaseSync]);
 
-  const startCooldown = useCallback(
-    (nextOption: FormulaOptionId) => {
-      const target = candleCountRef.current + FORMULA_RULES.cooldownCandles;
-      cooldownTargetRef.current = target;
-      setCooldownTarget(target);
-      setActiveOption(nextOption);
-      setPhase("cooldown");
-      pushLog(
-        `Cooldown ${FORMULA_RULES.cooldownCandles} candles · next ${FORMULA_OPTIONS[nextOption].name}`,
-        "info"
-      );
-    },
-    [pushLog]
-  );
+  const startCooldown = useCallback(() => {
+    const target = candleCountRef.current + FORMULA_RULES.cooldownCandles;
+    cooldownTargetRef.current = target;
+    setCooldownTarget(target);
+    setPhaseSync("cooldown");
+    pushLog(
+      `Cooldown ${FORMULA_RULES.cooldownCandles} × 1m bars · then next valid Call or Put`,
+      "info"
+    );
+  }, [pushLog, setPhaseSync]);
 
   const haltAfterLosses = useCallback(() => {
     setPhase("stopped");
@@ -213,38 +221,58 @@ export function FormulaTradeRunner({
 
   const refreshLtp = useCallback(async () => {
     const symbol = tradingsymbolRef.current;
-    if (!symbol) return;
+    if (!symbol) return 0;
     try {
       const res = await fetch(
         `/api/kite/quotes?instruments=${encodeURIComponent(`NFO:${symbol}`)}`,
         { credentials: "include" }
       );
       const json = await res.json();
-      if (!res.ok) return;
+      if (!res.ok) return ltpRef.current;
       const quote = json.data?.[`NFO:${symbol}`] as { last_price?: number } | undefined;
-      if (quote?.last_price) setLtp(quote.last_price);
+      if (quote?.last_price) {
+        ltpRef.current = quote.last_price;
+        setLtp(quote.last_price);
+        return quote.last_price;
+      }
     } catch {
       /* ignore */
     }
+    return ltpRef.current;
   }, []);
 
   const squareOff = useCallback(
     async (reason: string) => {
-      if (phaseRef.current !== "in_position") return;
-      setPhase("exiting");
-      pushLog(`${reason} — squaring off`, "warning");
+      if (phaseRef.current !== "in_position" || exitingRef.current) return;
+
+      const symbol = tradingsymbolRef.current;
+      const qty = quantityRef.current;
+      const leg = legRef.current;
+      if (!symbol || qty <= 0) {
+        pushLog("Exit blocked — missing tradingsymbol or quantity", "error");
+        return;
+      }
+
+      exitingRef.current = true;
+      setPhaseSync("exiting");
+      pushLog(`${reason} — placing Zerodha exit`, "warning");
+
       try {
-        await refreshLtp();
-        const result = await placeFormulaExit(
-          tradingsymbolRef.current,
-          legRef.current,
-          quantityRef.current
-        );
+        const liveLtp = await refreshLtp();
+        const result = await placeFormulaExit(symbol, leg, qty);
+        pushLog(`Exit order submitted · ${result.order_id}`, "info");
+
+        await waitForKiteOrderComplete(result.order_id);
+
+        const openQty = await fetchNetPositionQty(symbol, "MIS");
+        if (openQty !== 0) {
+          throw new Error(`Position still open on Zerodha (${openQty} qty remaining)`);
+        }
+
         setExitOrderId(result.order_id);
-        const pnl =
-          (ltpRef.current - entryPremiumRef.current) * quantityRef.current;
+        const pnl = (liveLtp - entryPremiumRef.current) * qty;
         pushLog(
-          `Exit ${result.order_id} · P&L ${formatCurrency(pnl)} · ${formatNumber(premiumProfitPct(entryPremiumRef.current, ltpRef.current), 1)}%`,
+          `Exit filled · ${result.order_id} · P&L ${formatCurrency(pnl)} · ${formatNumber(premiumProfitPct(entryPremiumRef.current, liveLtp), 1)}%`,
           pnl >= 0 ? "success" : "error"
         );
 
@@ -262,42 +290,48 @@ export function FormulaTradeRunner({
         }
 
         if (losses >= FORMULA_RULES.maxConsecutiveLosses) {
+          exitingRef.current = false;
           haltAfterLosses();
           return;
         }
 
-        const next = flipFormulaOption(activeOptionRef.current);
-        storeNextFormulaOption(next);
-        startCooldown(next);
+        exitingRef.current = false;
+        startCooldown();
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Exit failed";
-        setPhase("stopped");
+        exitingRef.current = false;
+        setPhaseSync("in_position");
         setError(msg);
-        pushLog(msg, "error");
-        runningRef.current = false;
-        onStop?.();
+        pushLog(`${msg} — will retry exit on next check`, "error");
       }
     },
-    [pushLog, startCooldown, haltAfterLosses, onStop, refreshLtp]
+    [pushLog, startCooldown, haltAfterLosses, refreshLtp, setPhaseSync]
   );
 
   const tryEntry = useCallback(async () => {
     if (phaseRef.current !== "waiting" || !runningRef.current) return;
     if (isPastFormulaHardExit()) return;
 
-    const option = activeOptionRef.current;
-    if (!checkFormulaEntry(option, entryContext())) return;
+    const ctx = entryContext();
+    const option = pickFormulaEntryOption(ctx, formulaVariant);
+    if (option == null) return;
 
-    const instrument = resolveFormulaInstrument(chain, FORMULA_OPTIONS[option].leg);
+    setActiveOption(option);
+    activeOptionRef.current = option;
+    legRef.current = FORMULA_OPTIONS[option].leg;
+
+    const liveChain = (await fetchFormulaOptionChain("nifty50")) ?? chain;
+    const spot = spotRef.current;
+    const instrument = resolveFormulaInstrument(liveChain, FORMULA_OPTIONS[option].leg, spot);
     if (!instrument) {
       pushLog("ATM option not found — waiting for chain", "warning");
       return;
     }
 
     setPhase("entering");
-    const ctx = entryContext();
+    phaseRef.current = "entering";
     pushLog(
-      `${FORMULA_OPTIONS[option].name} signal · RSI ${recentRsiRef.current.slice(-2).map((r) => formatNumber(r, 1)).join(", ")} · spot ${formatNumber(ctx.spot)} vs VWAP ${ctx.vwap != null ? formatNumber(ctx.vwap) : "—"}`,
+      `${FORMULA_OPTIONS[option].name} @ ${formatNumber(instrument.strike)} · RSI ${recentRsiRef.current.slice(-FORMULA_RULES.rsiConfirmCandles).map((r) => formatNumber(r, 1)).join(", ")}${usesVwap ? ` · spot ${formatNumber(ctx.spot)} vs VWAP ${ctx.vwap != null ? formatNumber(ctx.vwap) : "—"}` : ""}`,
       "success"
     );
 
@@ -323,26 +357,30 @@ export function FormulaTradeRunner({
       const result = await placeFormulaEntry(instrument.tradingsymbol, FORMULA_OPTIONS[option].leg, qty);
 
       const now = Date.now();
+      tradingsymbolRef.current = instrument.tradingsymbol;
+      entryPremiumRef.current = entryLtp;
+      entryTimeMsRef.current = now;
+      quantityRef.current = qty;
       setTradingsymbol(instrument.tradingsymbol);
       setStrike(instrument.strike);
       setEntryOrderId(result.order_id);
       setEntryPremium(entryLtp);
       setEntryTimeMs(now);
-      entryTimeMsRef.current = now;
+      ltpRef.current = entryLtp;
       setLtp(entryLtp);
-      setPhase("in_position");
+      setPhaseSync("in_position");
       pushLog(
         `Entry ${result.order_id} · ${lots} lot(s) @ ${formatNumber(entryLtp)} · 1% risk sizing`,
         "success"
       );
     } catch (err) {
-      setPhase("waiting");
+      setPhaseSync("waiting");
       pushLog(err instanceof Error ? err.message : "Entry failed", "error");
     }
-  }, [chain, entryContext, pushLog]);
+  }, [chain, entryContext, pushLog, usesVwap, setPhaseSync]);
 
   const tryExit = useCallback(async () => {
-    if (phaseRef.current !== "in_position" || entryPremiumRef.current <= 0) return;
+    if (phaseRef.current !== "in_position" || exitingRef.current || entryPremiumRef.current <= 0) return;
     const liveLtp = ltpRef.current > 0 ? ltpRef.current : entryPremiumRef.current;
     const profit = premiumProfitPct(entryPremiumRef.current, liveLtp);
     const exitCheck = checkFormulaExit(profit, entryTimeMsRef.current);
@@ -354,18 +392,14 @@ export function FormulaTradeRunner({
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
-    const opt = getStoredFormulaOption();
-    pushLog(
-      `Formula loop · ${FORMULA_OPTIONS[opt].name} first · alternates 1 ↔ 2`,
-      "info"
-    );
-    beginWaiting(opt);
-  }, [beginWaiting, pushLog]);
+    pushLog(`Formula loop · ${variantRule.name} (${variantRule.shortLabel}) · one trade at a time`, "info");
+    beginWaiting();
+  }, [beginWaiting, pushLog, variantRule.name, variantRule.shortLabel]);
 
   useEffect(() => {
     if (phase !== "cooldown") return;
     if (candleCountRef.current >= cooldownTargetRef.current) {
-      beginWaiting(activeOptionRef.current);
+      beginWaiting();
     }
   }, [candleCount, phase, beginWaiting]);
 
@@ -386,20 +420,25 @@ export function FormulaTradeRunner({
   useEffect(() => {
     if (!runningRef.current || phase !== "in_position") return;
     const timer = window.setInterval(() => void tryExit(), CHECK_MS);
-    tryExit();
+    void tryExit();
     return () => window.clearInterval(timer);
-  }, [phase, tryExit, ltp]);
+  }, [phase, tryExit]);
 
   const stopLoop = async () => {
     if (stopping) return;
     if (phaseRef.current === "in_position") {
-      if (
-        !window.confirm(
-          "Stop formula trading and square off the open position?\n\nThis places a REAL exit on Zerodha."
-        )
-      ) {
-        return;
-      }
+      const ok = await confirm({
+        title: "Stop & exit position?",
+        body: (
+          <>
+            <p>Stop formula trading and square off the open position.</p>
+            <p className="confirm-note">This places a REAL exit on Zerodha.</p>
+          </>
+        ),
+        confirmLabel: "Stop & exit",
+        tone: "danger",
+      });
+      if (!ok) return;
       setStopping(true);
       runningRef.current = false;
       await squareOff("Stopped by user");
@@ -423,8 +462,14 @@ export function FormulaTradeRunner({
         <div>
           <h3 className="card-title">Formula Trading</h3>
           <p className="card-desc">
-            {rule.name} · Loop 1 ↔ 2 · {cycles} cycle{cycles === 1 ? "" : "s"} · losses{" "}
-            {consecutiveLosses}/{FORMULA_RULES.maxConsecutiveLosses}
+            {variantRule.name} · {variantRule.shortLabel} · 1m signals · 1s execution
+            {" · "}
+            {phase === "in_position" || phase === "entering" || phase === "exiting"
+              ? rule.name
+              : "Next: Call or Put (first valid signal)"}
+            {" · "}
+            {cycles} cycle{cycles === 1 ? "" : "s"} · losses {consecutiveLosses}/
+            {FORMULA_RULES.maxConsecutiveLosses}
           </p>
         </div>
         <span
@@ -437,35 +482,41 @@ export function FormulaTradeRunner({
                 : "badge-default"
           )}
         >
-          {phase === "cooldown" ? `cooldown (${cooldownLeft})` : phase.replace("_", " ")}
+          {phase === "cooldown" ? `cooldown (${cooldownLeft}m bars)` : phase.replace("_", " ")}
         </span>
       </div>
 
       <div className="formula-trade-rules mb-4">
         <p className="text-muted" style={{ fontSize: "0.8125rem", margin: 0 }}>
-          <strong>Call:</strong> RSI &lt; 15 for 2 candles + spot &gt; VWAP
+          <strong>Strike:</strong> Always ATM · CE or PE from live spot
         </p>
         <p className="text-muted" style={{ fontSize: "0.8125rem", margin: "0.35rem 0 0" }}>
-          <strong>Put:</strong> RSI &gt; 75 for 2 candles + spot &lt; VWAP
+          <strong>Call:</strong> {formulaCallEntryLabel(formulaVariant)}
         </p>
         <p className="text-muted" style={{ fontSize: "0.8125rem", margin: "0.35rem 0 0" }}>
-          <strong>Exit:</strong> TP +8–12% · SL −15% · 20 min · hard 3:15 PM
+          <strong>Put:</strong> {formulaPutEntryLabel(formulaVariant)}
         </p>
         <p className="text-muted" style={{ fontSize: "0.8125rem", margin: "0.35rem 0 0" }}>
-          <strong>Risk:</strong> 1% capital/trade · stop after 2 losses · 5-candle cooldown
+          <strong>Exit:</strong> TP +8–12% · SL −15% · 3:15–3:29 exit ≥0.5% · force 3:29 PM
+        </p>
+        <p className="text-muted" style={{ fontSize: "0.8125rem", margin: "0.35rem 0 0" }}>
+          <strong>Loop:</strong> Next valid Call or Put · one open position only
+        </p>
+        <p className="text-muted" style={{ fontSize: "0.8125rem", margin: "0.35rem 0 0" }}>
+          <strong>Risk:</strong> 1% capital/trade · stop after 2 losses · 5 × 1m bar cooldown
         </p>
       </div>
 
       <div className="auto-trade-stats mb-4">
         <div className="auto-trade-stat">
-          <p className="stream-metric-label">RSI (14)</p>
+          <p className="stream-metric-label">RSI (14 · 1m)</p>
           <p className="stream-metric-value">{rsi14 != null ? formatNumber(rsi14, 1) : "—"}</p>
         </div>
         <div className="auto-trade-stat">
-          <p className="stream-metric-label">Spot vs VWAP</p>
+          <p className="stream-metric-label">Spot{usesVwap ? " vs VWAP (1m)" : ""}</p>
           <p className="stream-metric-value" style={{ fontSize: "0.875rem" }}>
             {spotPrice > 0 ? formatNumber(spotPrice) : "—"}
-            {vwap != null ? ` / ${formatNumber(vwap)}` : ""}
+            {usesVwap && vwap != null ? ` / ${formatNumber(vwap)}` : ""}
           </p>
         </div>
         {phase === "in_position" && (
@@ -475,7 +526,7 @@ export function FormulaTradeRunner({
               <p
                 className={cn(
                   "stream-metric-value",
-                  profitPct >= FORMULA_RULES.takeProfitMinPct
+                  profitPct >= (inEodExitWindow ? FORMULA_RULES.hardExitMinProfitPct : FORMULA_RULES.takeProfitMinPct)
                     ? "text-up"
                     : profitPct <= -FORMULA_RULES.stopLossPct
                       ? "text-down"
@@ -486,9 +537,11 @@ export function FormulaTradeRunner({
               </p>
             </div>
             <div className="auto-trade-stat">
-              <p className="stream-metric-label">Time in trade</p>
-              <p className="stream-metric-value">
-                {minutesInTrade}/{FORMULA_RULES.timeStopMinutes}m
+              <p className="stream-metric-label">Exit target</p>
+              <p className="stream-metric-value" style={{ fontSize: "0.875rem" }}>
+                {inEodExitWindow
+                  ? `≥${FORMULA_RULES.hardExitMinProfitPct}% until 3:29`
+                  : `TP ≥${FORMULA_RULES.takeProfitMinPct}%`}
               </p>
             </div>
           </>

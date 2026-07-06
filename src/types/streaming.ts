@@ -42,10 +42,16 @@ export interface GeminiSuggestionResponse {
   refreshInMs?: number;
 }
 
+import type { ParsedCandle } from "@/lib/candles";
+import type { TechnicalSnapshot } from "@/lib/technical-indicators";
+
 export type { SessionContextCompact } from "@/lib/session-context";
 
 export interface NiftySessionResponse {
   session: import("@/lib/session-context").SessionContextCompact | null;
+  instrument?: string;
+  candles?: ParsedCandle[];
+  technicals?: TechnicalSnapshot | null;
   note?: string;
   updatedAt: string;
   cached?: boolean;
