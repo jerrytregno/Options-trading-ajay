@@ -19,6 +19,15 @@
 /build
 /dist
 
+trading-ai/data/**/*.csv
+trading-ai/data/**/*.json
+!trading-ai/data/**/.gitkeep
+trading-ai/model/**/*.pkl
+trading-ai/model/**/metrics.json
+!trading-ai/model/.gitkeep
+!trading-ai/model/**/.gitkeep
+trading-ai/catboost_info/
+
 # python
 __pycache__/
 *.pyc
@@ -36,6 +45,10 @@ yarn-error.log*
 # env files
 .env
 .env*.local
+
+/data/kite-trade-history.json
+/trading-ai/data/ml-trading/*.json
+!trading-ai/data/ml-trading/.gitkeep
 
 # typescript
 *.tsbuildinfo

@@ -264,6 +264,11 @@ button, input, select { font: inherit; }
   color: var(--warning);
   border: 1px solid rgba(251, 191, 36, 0.25);
 }
+.alert-info {
+  background: rgba(96, 165, 250, 0.1);
+  color: #93c5fd;
+  border: 1px solid rgba(96, 165, 250, 0.25);
+}
 
 .spinner {
   width: 2rem; height: 2rem; border: 2px solid rgba(255, 255, 255, 0.25);

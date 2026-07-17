@@ -1,7 +1,46 @@
+import "./load-env.js";
 import app from "./app.js";
+import {
+  getEgressRelayUrl,
+  getRelaySecret,
+  getResolvedProxyUrl,
+  isKiteEgressRelayConfigured,
+  isKiteProxyEnabled,
+  probeDirectIpv4,
+  probeRelayEgressIpv4,
+} from "./kite-http.js";
+import { isIpWhitelistedForKite } from "../src/lib/kite-trading-ip.js";
 
 const PORT = Number(process.env.PORT) || 3001;
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`API server running on http://localhost:${PORT}`);
+  const directIp = await probeDirectIpv4(true);
+  const relayOn = isKiteEgressRelayConfigured();
+
+  console.log(`[kite] localhost dev — orders exit via your Mac's public IP (not 127.0.0.1)`);
+  if (isKiteProxyEnabled()) {
+    const proxyUrl = getResolvedProxyUrl();
+    console.log(`[kite] KITE_PROXY_URL → ${proxyUrl?.replace(/:[^:@/]+@/, ":***@") ?? "proxy"}`);
+  }
+
+  if (relayOn) {
+    const relayIp = await probeRelayEgressIpv4();
+    const relayUrl = getEgressRelayUrl();
+    if (relayIp && isIpWhitelistedForKite(relayIp)) {
+      console.log(`[kite] Relay ${relayUrl} → egress ${relayIp} (whitelisted)`);
+    } else if (!getRelaySecret()) {
+      console.log(`[kite] Set KITE_RELAY_SECRET in .env.local (must match Vercel), then restart`);
+    } else {
+      console.log(`[kite] Relay configured but unreachable — redeploy Vercel with latest code + KITE_RELAY_SECRET`);
+    }
+  } else if (directIp && !isIpWhitelistedForKite(directIp)) {
+    console.log(
+      `[kite] Off-whitelist network (${directIp}) — Kite API will route via ${getEgressRelayUrl() ?? "Vercel"}`,
+    );
+  }
+
+  if (directIp && isIpWhitelistedForKite(directIp)) {
+    console.log(`[kite] Kite egress ${directIp} (whitelisted — direct)`);
+  }
 });

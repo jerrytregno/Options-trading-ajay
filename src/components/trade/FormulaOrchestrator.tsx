@@ -10,6 +10,8 @@ import {
   FORMULA_VARIANTS,
   formulaCallEntryLabel,
   formulaPutEntryLabel,
+  formulaUsesEma,
+  formulaEmaTrendLabel,
   fetchFormulaOptionChain,
   formulaLotsForRisk,
   pickFormulaEntryOption,
@@ -53,6 +55,8 @@ interface InstrumentSnapshot {
   spot: number;
   recentRsi: number[];
   vwap: number | null;
+  ema20: number | null;
+  ema50: number | null;
   rsi14: number | null;
   minuteCandleCount: number;
 }
@@ -67,8 +71,20 @@ function buildInstrumentSnapshot(feed: InstrumentFeed): InstrumentSnapshot {
     spot: last?.close ?? 0,
     recentRsi: rsiSeries.slice(-5).map((p) => p.value),
     vwap: technicals.vwap,
+    ema20: technicals.ema20,
+    ema50: technicals.ema50,
     rsi14: technicals.rsi14,
     minuteCandleCount: minutes.length,
+  };
+}
+
+function entryContextFromSnapshot(snap: InstrumentSnapshot) {
+  return {
+    recentRsi: snap.recentRsi,
+    spot: snap.spot,
+    vwap: snap.vwap,
+    ema20: snap.ema20,
+    ema50: snap.ema50,
   };
 }
 
@@ -236,14 +252,16 @@ export function FormulaOrchestrator({
         const rsiLabel = snap.rsi14 != null ? formatNumber(snap.rsi14, 1) : "—";
 
         if (phaseRef.current === "waiting" && snap.recentRsi.length > 0 && !entriesBlocked) {
-          const signal = pickFormulaEntryOption(
-            { recentRsi: snap.recentRsi, spot: snap.spot, vwap: snap.vwap },
-            formulaVariant
-          );
+          const ctx = entryContextFromSnapshot(snap);
+          const signal = pickFormulaEntryOption(ctx, formulaVariant);
+          const emaHint =
+            formulaUsesEma(formulaVariant) && snap.ema20 != null && snap.ema50 != null
+              ? ` · EMA ${formulaEmaTrendLabel(ctx)}`
+              : "";
           if (signal != null) {
-            status[inst.id] = `SIGNAL · ${FORMULA_OPTIONS[signal].name} · RSI ${rsiLabel}`;
+            status[inst.id] = `SIGNAL · ${FORMULA_OPTIONS[signal].name} · RSI ${rsiLabel}${emaHint}`;
           } else {
-            status[inst.id] = `RSI ${rsiLabel} · watching`;
+            status[inst.id] = `RSI ${rsiLabel}${emaHint} · watching`;
           }
         } else if (entriesBlocked) {
           status[inst.id] = `RSI ${rsiLabel} · scan only (past 3:15)`;
@@ -423,7 +441,7 @@ export function FormulaOrchestrator({
 
         const instId = activeInstRef.current?.id ?? "nifty50";
         const feed = feedsRef.current.get(instId);
-        const snap = feed ? buildInstrumentSnapshot(feed) : { minuteCandleCount: 0, spot: 0, recentRsi: [], vwap: null, rsi14: null };
+        const snap = feed ? buildInstrumentSnapshot(feed) : { minuteCandleCount: 0, spot: 0, recentRsi: [], vwap: null, ema20: null, ema50: null, rsi14: null };
         exitingRef.current = false;
         startCooldown(instId, snap.minuteCandleCount);
       } catch (err) {
@@ -449,10 +467,7 @@ export function FormulaOrchestrator({
       const snap = buildInstrumentSnapshot(feed);
       if (snap.recentRsi.length === 0 || snap.spot <= 0) continue;
 
-      const option = pickFormulaEntryOption(
-        { recentRsi: snap.recentRsi, spot: snap.spot, vwap: snap.vwap },
-        formulaVariant
-      );
+      const option = pickFormulaEntryOption(entryContextFromSnapshot(snap), formulaVariant);
       if (option == null) continue;
 
       enteringRef.current = true;
@@ -477,7 +492,11 @@ export function FormulaOrchestrator({
       }
 
       pushLog(
-        `[${inst.label}] ${FORMULA_OPTIONS[option].name} @ ${formatNumber(resolved.strike)} · RSI ${formatNumber(snap.recentRsi[snap.recentRsi.length - 1], 1)}`,
+        `[${inst.label}] ${FORMULA_OPTIONS[option].name} @ ${formatNumber(resolved.strike)} · RSI ${formatNumber(snap.recentRsi[snap.recentRsi.length - 1], 1)}${
+          formulaUsesEma(formulaVariant) && snap.ema20 != null && snap.ema50 != null
+            ? ` · EMA20 ${formatNumber(snap.ema20)} · EMA50 ${formatNumber(snap.ema50)}`
+            : ""
+        }`,
         "success"
       );
       pushLog(`Other scanners paused — trade active on ${inst.label}`, "info");
@@ -610,7 +629,7 @@ export function FormulaOrchestrator({
       <div className="stream-formula-head">
         <div>
           <p className="card-title" style={{ fontSize: "0.9375rem" }}>
-            {variantRule.name} · Multi-symbol engine
+            {variantRule.displayName} · Multi-symbol engine
           </p>
           <p className="card-desc" style={{ marginTop: "0.2rem" }}>
             {phase === "in_position" && activeInstrument

@@ -1,5 +1,8 @@
 import { Link, useLocation } from "react-router-dom";
 import {
+  Bot,
+  Brain,
+  BrainCircuit,
   LayoutDashboard,
   LineChart,
   Settings,
@@ -18,6 +21,9 @@ import { useKite } from "@/contexts/kite-context";
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/dashboard/streaming", label: "Streaming", icon: Radio },
+  { href: "/dashboard/prediction", label: "Prediction Model", icon: Brain },
+  { href: "/dashboard/ml-trading", label: "ML Trading", icon: BrainCircuit },
+  { href: "/dashboard/gemini", label: "Options AI", icon: Bot },
   { href: "/dashboard/trade", label: "Trade", icon: TrendingUp },
   { href: "/dashboard/options", label: "Nifty Options", icon: LineChart },
   { href: "/dashboard/portfolio", label: "Portfolio", icon: Wallet },

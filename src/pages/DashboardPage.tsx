@@ -168,7 +168,8 @@ export default function DashboardPage() {
           </div>
           <div className="grid-2">
             {[
-              { href: "/dashboard/streaming", label: "Nifty Streaming", desc: "1m candles, RSI, Gemini AI" },
+              { href: "/dashboard/streaming", label: "Market Streaming", desc: "1s charts & formula trading" },
+              { href: "/dashboard/gemini", label: "Options AI", desc: "Autonomous CE/PE loop trading" },
               { href: "/dashboard/options", label: "Nifty Options", desc: "Live CE/PE chain with Greeks" },
               { href: "/dashboard/trade", label: "Order Ticket", desc: "Call/Put buy & sell with margin" },
               { href: "/dashboard/portfolio", label: "Portfolio", desc: "View positions & P&L" },

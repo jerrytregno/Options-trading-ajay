@@ -1,8 +1,11 @@
+import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { ExternalLink, Unplug, CheckCircle2, AlertCircle } from "lucide-react";
+import { Check, Copy, ExternalLink, Unplug, CheckCircle2, AlertCircle } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useAuth } from "@/contexts/auth-context";
 import { useKite } from "@/contexts/kite-context";
+import { cn } from "@/lib/utils";
+import { KITE_IP_WHITELIST_HELP, type TradingIpInfo } from "@/lib/kite-trading-ip";
 
 export default function SettingsPage() {
   const { user } = useAuth();
@@ -10,6 +13,32 @@ export default function SettingsPage() {
   const [searchParams] = useSearchParams();
   const kiteStatus = searchParams.get("kite");
   const errorMessage = searchParams.get("message");
+  const [tradingIpInfo, setTradingIpInfo] = useState<TradingIpInfo | null>(null);
+  const [ipCopied, setIpCopied] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch("/api/kite/trading-ip?refresh=1", { credentials: "include" });
+        const json = await res.json();
+        if (res.ok) setTradingIpInfo(json.data as TradingIpInfo);
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, []);
+
+  const copyWhitelistIp = useCallback(async () => {
+    const ip = tradingIpInfo?.outboundIp ?? tradingIpInfo?.whitelistIp;
+    if (!ip) return;
+    try {
+      await navigator.clipboard.writeText(ip);
+      setIpCopied(true);
+      window.setTimeout(() => setIpCopied(false), 2000);
+    } catch {
+      /* ignore */
+    }
+  }, [tradingIpInfo?.outboundIp, tradingIpInfo?.whitelistIp]);
 
   return (
     <DashboardShell>
@@ -23,6 +52,117 @@ export default function SettingsPage() {
       )}
       {kiteStatus === "error" && errorMessage && (
         <div className="alert alert-error flex gap-2"><AlertCircle size={16} /> {decodeURIComponent(errorMessage)}</div>
+      )}
+
+      {tradingIpInfo && (
+        <div className={cn("card mb-4 trading-ip-card", (!tradingIpInfo.egressReady || tradingIpInfo.ipMismatch) && "trading-ip-card-warn")}>
+          <div className="flex-between flex-wrap gap-3 mb-3">
+            <div>
+              <h3 className="card-title">Trading IP (Kite whitelist)</h3>
+              <p className="card-desc">{KITE_IP_WHITELIST_HELP}</p>
+            </div>
+            <span
+              className={`badge ${
+                tradingIpInfo.egressReady && !tradingIpInfo.ipMismatch
+                  ? "badge-success"
+                  : tradingIpInfo.proxyEnabled
+                    ? "badge-warning"
+                    : "badge-danger"
+              }`}
+            >
+              {tradingIpInfo.egressReady && !tradingIpInfo.ipMismatch
+                ? tradingIpInfo.proxyEnabled
+                  ? "Proxy · ready"
+                  : "Egress OK"
+                : tradingIpInfo.ipMismatch
+                  ? "IP mismatch"
+                  : "Check egress"}
+            </span>
+          </div>
+          {(!tradingIpInfo.egressReady || tradingIpInfo.ipMismatch) && (
+            <div className="alert alert-error mb-3" style={{ fontSize: "0.8125rem" }}>
+              {tradingIpInfo.note}
+              {tradingIpInfo.ipMismatch && tradingIpInfo.deployment === "local" && (
+                <ol className="mt-2 mb-0" style={{ paddingLeft: "1.25rem" }}>
+                  <li>
+                    Generate a secret: <code>openssl rand -hex 24</code>
+                  </li>
+                  <li>
+                    Set <code>KITE_RELAY_SECRET</code> in <code>.env.local</code> and the same value in Vercel →
+                    Project → Settings → Environment Variables
+                  </li>
+                  <li>Redeploy Vercel (push latest code — relay API must be live)</li>
+                  <li>Restart <code>npm run dev</code></li>
+                </ol>
+              )}
+            </div>
+          )}
+          <div className="trading-ip-row">
+            {tradingIpInfo.outboundIp ? (
+              <code className="trading-ip-value">{tradingIpInfo.outboundIp}</code>
+            ) : tradingIpInfo.whitelistIp ? (
+              <code className="trading-ip-value">{tradingIpInfo.whitelistIp}</code>
+            ) : null}
+            {(tradingIpInfo.outboundIp ?? tradingIpInfo.whitelistIp) && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => void copyWhitelistIp()}>
+              {ipCopied ? <Check size={14} /> : <Copy size={14} />}
+              {ipCopied ? "Copied" : "Copy IP"}
+            </button>
+            )}
+            <a
+              href={tradingIpInfo.kiteConsoleUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="btn btn-outline btn-sm"
+            >
+              Kite app settings <ExternalLink size={14} />
+            </a>
+          </div>
+          <p className="text-muted mt-3" style={{ fontSize: "0.8125rem" }}>
+            {tradingIpInfo.allowedIps?.length > 0 && (
+              <>
+                Kite whitelist (only these used): <code>{tradingIpInfo.allowedIps.join(" · ")}</code>
+                <br />
+              </>
+            )}
+            {tradingIpInfo.networkIp && tradingIpInfo.allowedIps.includes(tradingIpInfo.networkIp) && (
+              <>
+                Your network: <code>{tradingIpInfo.networkIp}</code> (whitelisted — direct)
+                <br />
+              </>
+            )}
+            {tradingIpInfo.outboundIp ? (
+              <>
+                Kite API egress: <code>{tradingIpInfo.outboundIp}</code>
+                <br />
+              </>
+            ) : (
+              <>
+                Kite API egress: <span className="text-down">none — relay or switch network</span>
+                <br />
+              </>
+            )}
+            {tradingIpInfo.rejectedOrderIp && (
+              <>Last Kite rejection: <code>{tradingIpInfo.rejectedOrderIp}</code><br /></>
+            )}
+            {tradingIpInfo.note}
+            {tradingIpInfo.configuredIp && tradingIpInfo.pinDiffersFromEgress && (
+              <>
+                {" "}
+                · Optional pin: <code>KITE_TRADING_IP={tradingIpInfo.configuredIp}</code>
+              </>
+            )}
+            {tradingIpInfo.configuredIp &&
+              tradingIpInfo.egressReady &&
+              !tradingIpInfo.pinDiffersFromEgress &&
+              tradingIpInfo.outboundIp === tradingIpInfo.configuredIp && (
+              <>
+                {" "}
+                · <code>KITE_TRADING_IP={tradingIpInfo.configuredIp}</code>
+              </>
+            )}
+          </p>
+        </div>
       )}
 
       <div className="grid-2">

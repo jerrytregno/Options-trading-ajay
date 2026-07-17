@@ -57,3 +57,62 @@ export function buildLimitExitOrder(
     validity: "DAY",
   });
 }
+
+export const NIFTY_OPTION_TICK = 0.05;
+export const DEFAULT_BRACKET_STOPLOSS_POINTS = 20;
+
+export function roundToOptionTick(value: number, tick = NIFTY_OPTION_TICK) {
+  return Math.round(value / tick) * tick;
+}
+
+/** Premium points above entry for a fixed INR profit target. */
+export function profitTargetPointsFromInr(quantity: number, targetProfitInr: number) {
+  const qty = Math.max(1, quantity);
+  return roundToOptionTick(targetProfitInr / qty);
+}
+
+/** Limit / bracket target premium: entry + (target INR ÷ qty). */
+export function profitTargetPremiumPrice(
+  entryPremium: number,
+  quantity: number,
+  targetProfitInr: number
+) {
+  const qty = Math.max(1, quantity);
+  return roundToOptionTick(entryPremium + targetProfitInr / qty);
+}
+
+/** Bracket entry — Zerodha squares off at entry + squareoff points (profit target). */
+export function buildBracketEntryOrder(
+  fields: Record<string, string | number>,
+  quantity: number,
+  targetProfitInr: number,
+  stoplossPoints = DEFAULT_BRACKET_STOPLOSS_POINTS,
+  marketProtection = "-1"
+) {
+  const squareoff = profitTargetPointsFromInr(quantity, targetProfitInr);
+  const orderType = String(fields.order_type ?? "MARKET").toUpperCase();
+  const payload: Record<string, string | number> = {
+    ...fields,
+    variety: "bo",
+    validity: "DAY",
+    squareoff,
+    stoploss: stoplossPoints,
+  };
+  if (orderType === "MARKET" || orderType === "SL-M") {
+    return normalizeKiteOrderBody(payload, marketProtection);
+  }
+  return normalizeKiteOrderBody(payload);
+}
+
+export function kiteOrdersApiPath(variety: string) {
+  switch (variety.toLowerCase()) {
+    case "bo":
+      return "/orders/bo";
+    case "co":
+      return "/orders/co";
+    case "amo":
+      return "/orders/amo";
+    default:
+      return "/orders/regular";
+  }
+}

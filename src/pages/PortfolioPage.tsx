@@ -1,14 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Upload } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useKite } from "@/contexts/kite-context";
 import {
-  buildClosedTrades,
   normalizeKiteOrder,
   pnlByExitOrderId,
   summarizePortfolioPnl,
   type ClosedTradeRow,
   type KiteOrderRow,
 } from "@/lib/portfolio-pnl";
+import {
+  loadStoredClosedTrades,
+  mergeStoredClosedTrades,
+  saveStoredClosedTrades,
+} from "@/lib/trade-history-storage";
 import type { KiteHolding, KitePosition } from "@/types/kite";
 import { cn, formatCurrency, formatNumber, getChangeClass } from "@/lib/utils";
 
@@ -18,9 +23,12 @@ function formatOrderTime(value: string) {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
+  const now = new Date();
+  const sameYear = date.getFullYear() === now.getFullYear();
   return date.toLocaleString("en-IN", {
     day: "2-digit",
     month: "short",
+    ...(sameYear ? {} : { year: "numeric" }),
     hour: "2-digit",
     minute: "2-digit",
   });
@@ -31,8 +39,13 @@ export default function PortfolioPage() {
   const [positions, setPositions] = useState<KitePosition[]>([]);
   const [holdings, setHoldings] = useState<KiteHolding[]>([]);
   const [orders, setOrders] = useState<KiteOrderRow[]>([]);
+  const [closedTrades, setClosedTrades] = useState<ClosedTradeRow[]>([]);
+  const [tradeHistoryNote, setTradeHistoryNote] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
   const [tab, setTab] = useState<PortfolioTab>("trades");
+  const importInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!connected) {
@@ -41,10 +54,11 @@ export default function PortfolioPage() {
     }
     async function load() {
       try {
-        const [posRes, holdRes, ordRes] = await Promise.all([
+        const [posRes, holdRes, ordRes, tradesRes] = await Promise.all([
           fetch("/api/kite/positions", { credentials: "include" }),
           fetch("/api/kite/holdings", { credentials: "include" }),
           fetch("/api/kite/orders", { credentials: "include" }),
+          fetch("/api/kite/portfolio/trades", { credentials: "include" }),
         ]);
         if (posRes.ok) {
           const { data } = await posRes.json();
@@ -61,6 +75,17 @@ export default function PortfolioPage() {
             .filter((row): row is KiteOrderRow => row != null);
           setOrders(parsed);
         }
+        if (tradesRes.ok) {
+          const json = await tradesRes.json();
+          const fromApi = Array.isArray(json.data) ? (json.data as ClosedTradeRow[]) : [];
+          const merged = mergeStoredClosedTrades(loadStoredClosedTrades(), fromApi);
+          saveStoredClosedTrades(merged);
+          setClosedTrades(merged);
+          setTradeHistoryNote(typeof json.meta?.note === "string" ? json.meta.note : null);
+        } else {
+          const local = loadStoredClosedTrades();
+          if (local.length) setClosedTrades(local);
+        }
       } finally {
         setLoading(false);
       }
@@ -68,12 +93,36 @@ export default function PortfolioPage() {
     load();
   }, [connected]);
 
-  const closedTrades = useMemo(() => buildClosedTrades(orders), [orders]);
   const pnlSummary = useMemo(
     () => summarizePortfolioPnl(positions, closedTrades),
     [positions, closedTrades]
   );
   const exitOrderPnl = useMemo(() => pnlByExitOrderId(closedTrades), [closedTrades]);
+
+  async function handleTradebookImport(file: File) {
+    setImporting(true);
+    setImportError(null);
+    try {
+      const csv = await file.text();
+      const res = await fetch("/api/kite/portfolio/trades/import", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csv }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Import failed");
+      const fromApi = Array.isArray(json.data) ? (json.data as ClosedTradeRow[]) : [];
+      const merged = mergeStoredClosedTrades(loadStoredClosedTrades(), fromApi);
+      saveStoredClosedTrades(merged);
+      setClosedTrades(merged);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setImporting(false);
+      if (importInputRef.current) importInputRef.current.value = "";
+    }
+  }
 
   const renderTradeRow = (trade: ClosedTradeRow) => (
     <tr key={trade.id}>
@@ -124,7 +173,8 @@ export default function PortfolioPage() {
         </div>
       ) : (
         <>
-          <div className="flex gap-2 mb-6 flex-wrap">
+          <div className="flex-between flex-wrap gap-3 mb-6">
+            <div className="flex gap-2 flex-wrap">
             {(
               [
                 ["trades", `Trades (${closedTrades.length})`],
@@ -142,7 +192,47 @@ export default function PortfolioPage() {
                 {label}
               </button>
             ))}
+            </div>
+            {tab === "trades" && (
+              <>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  hidden
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void handleTradebookImport(file);
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline"
+                  disabled={importing}
+                  onClick={() => importInputRef.current?.click()}
+                >
+                  <Upload size={14} />
+                  {importing ? "Importing…" : "Import tradebook CSV"}
+                </button>
+              </>
+            )}
           </div>
+          {tab === "trades" && tradeHistoryNote && (
+            <p className="text-muted text-sm mb-4" style={{ marginTop: "-0.5rem" }}>
+              {tradeHistoryNote} Import past trades from{" "}
+              <a
+                href="https://console.zerodha.com/reports/tradebook"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Zerodha Console → Tradebook
+              </a>
+              .
+            </p>
+          )}
+          {importError && (
+            <p className="text-down text-sm mb-4">{importError}</p>
+          )}
 
           <div className="card card-flush">
             {loading ? (

@@ -26,6 +26,8 @@ export interface TechnicalSnapshot {
   sma50: number | null;
   ema9: number | null;
   ema21: number | null;
+  ema20: number | null;
+  ema50: number | null;
   macd: MacdPoint | null;
   bollinger: BollingerPoint | null;
   vwap: number | null;
@@ -189,8 +191,12 @@ export function buildTechnicalSnapshot(candles: ParsedCandle[]): TechnicalSnapsh
   const closes = candles.map((c) => c.close);
   const ema9Series = emaSeries(closes, 9);
   const ema21Series = emaSeries(closes, 21);
+  const ema20Series = emaSeries(closes, 20);
+  const ema50Series = emaSeries(closes, 50);
   const ema9 = ema9Series.length ? ema9Series[ema9Series.length - 1] : null;
   const ema21 = ema21Series.length ? ema21Series[ema21Series.length - 1] : null;
+  const ema20 = ema20Series.length ? ema20Series[ema20Series.length - 1] : null;
+  const ema50 = ema50Series.length ? ema50Series[ema50Series.length - 1] : null;
   const sma9 = sma(closes, 9);
   const sma20 = sma(closes, 20);
   const sma50 = sma(closes, 50);
@@ -221,6 +227,8 @@ export function buildTechnicalSnapshot(candles: ParsedCandle[]): TechnicalSnapsh
     sma50,
     ema9,
     ema21,
+    ema20,
+    ema50,
     macd,
     bollinger,
     vwap,

@@ -176,6 +176,8 @@ export function FormulaTradeRunner({
       recentRsi: recentRsiRef.current,
       spot: spotRef.current,
       vwap: vwapRef.current,
+      ema20: null,
+      ema50: null,
     };
   }, []);
 

@@ -1,10 +1,9 @@
+import "./load-env.js";
 import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
-import { gunzipSync } from "zlib";
 import cookieParser from "cookie-parser";
 import cors from "cors";
-import dotenv from "dotenv";
 import express from "express";
 import { WATCHLIST_ITEMS } from "../src/lib/watchlist.js";
 import { getStreamInstrument } from "../src/lib/stream-instruments.js";
@@ -16,17 +15,42 @@ import {
 import { getIndianMarketContext, getNseSessionKiteRange } from "../src/lib/market-time.js";
 import { parseKiteCandles } from "../src/lib/candles.js";
 import { buildSessionContext } from "../src/lib/session-context.js";
+import {
+  RSI_CALL_FORCE_THRESHOLD,
+  RSI_PUT_FORCE_THRESHOLD,
+} from "../src/lib/gemini-trade-rules.js";
 import { buildTechnicalSnapshot } from "../src/lib/technical-indicators.js";
 import {
   normalizeKiteOrderBody,
   resolveMarketProtection,
 } from "../src/lib/kite-orders.js";
+import { fetchLiveAtmScenarios } from "./prediction-option-pnl.js";
+import { getKiteInstruments } from "./kite-instruments.js";
+import { getRelaySecret, kiteHttpFetch } from "./kite-http.js";
+import {
+  assertKiteEgressReady,
+  buildTradingIpInfo,
+  enrichKiteIpOrderError,
+} from "./trading-ip.js";
+import {
+  backtestPredictionDay,
+  getPredictionStatus,
+  livePrediction,
+  trainPredictionModel,
+  type PredictionDeps,
+} from "./prediction.js";
+import {
+  importTradebookCsvIntoHistory,
+  syncTodayOrdersIntoHistory,
+} from "./trade-history.js";
+import {
+  getMlTradingStatus,
+  matchMlTradingPattern,
+  syncMlTradingData,
+} from "./ml-trading.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.join(__dirname, "..");
 
-dotenv.config({ path: path.join(projectRoot, ".env.local") });
-dotenv.config({ path: path.join(projectRoot, ".env") });
 const app = express();
 const KITE_BASE = "https://api.kite.trade";
 const TOKEN_COOKIE = "kite_access_token";
@@ -82,19 +106,23 @@ function getLoginUrl() {
 
 async function kiteGet<T>(path: string, accessToken: string): Promise<T> {
   const config = getKiteConfig();
-  const res = await fetch(`${KITE_BASE}${path}`, {
+  const res = await kiteHttpFetch(`${KITE_BASE}${path}`, {
     headers: {
       "X-Kite-Version": "3",
       Authorization: `token ${config.apiKey}:${accessToken}`,
     },
   });
   const json: unknown = await res.json();
-  return parseKiteResponse<T>(json);
+  try {
+    return parseKiteResponse<T>(json);
+  } catch (error) {
+    throw await enrichKiteApiError(error);
+  }
 }
 
 async function kitePost<T>(path: string, accessToken: string, body: Record<string, string>): Promise<T> {
   const config = getKiteConfig();
-  const res = await fetch(`${KITE_BASE}${path}`, {
+  const res = await kiteHttpFetch(`${KITE_BASE}${path}`, {
     method: "POST",
     headers: {
       "X-Kite-Version": "3",
@@ -104,12 +132,16 @@ async function kitePost<T>(path: string, accessToken: string, body: Record<strin
     body: new URLSearchParams(body),
   });
   const json: unknown = await res.json();
-  return parseKiteResponse<T>(json);
+  try {
+    return parseKiteResponse<T>(json);
+  } catch (error) {
+    throw await enrichKiteApiError(error);
+  }
 }
 
 async function kitePostJson<T>(path: string, accessToken: string, body: unknown): Promise<T> {
   const config = getKiteConfig();
-  const res = await fetch(`${KITE_BASE}${path}`, {
+  const res = await kiteHttpFetch(`${KITE_BASE}${path}`, {
     method: "POST",
     headers: {
       "X-Kite-Version": "3",
@@ -119,7 +151,17 @@ async function kitePostJson<T>(path: string, accessToken: string, body: unknown)
     body: JSON.stringify(body),
   });
   const json: unknown = await res.json();
-  return parseKiteResponse<T>(json);
+  try {
+    return parseKiteResponse<T>(json);
+  } catch (error) {
+    throw await enrichKiteApiError(error);
+  }
+}
+
+async function enrichKiteApiError(error: unknown): Promise<Error> {
+  const raw = error instanceof Error ? error.message : "Kite API error";
+  const message = await enrichKiteIpOrderError(raw);
+  return new Error(message);
 }
 
 interface KiteInstrument {
@@ -134,94 +176,19 @@ interface KiteInstrument {
   exchange: string;
 }
 
-function parseCsvLine(line: string) {
-  const values: string[] = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (char === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-    if (char === "," && !inQuotes) {
-      values.push(current.trim());
-      current = "";
-      continue;
-    }
-    current += char;
-  }
-
-  values.push(current.trim());
-  return values;
-}
-
-function parseInstrumentsCsv(csv: string): KiteInstrument[] {
-  const normalized = csv.replace(/^\uFEFF/, "").trim();
-  const lines = normalized.split("\n");
-  if (lines.length < 2) return [];
-
-  const headers = parseCsvLine(lines[0]);
-  return lines.slice(1).flatMap((line) => {
-    if (!line.trim()) return [];
-
-    const values = parseCsvLine(line);
-    const row: Record<string, string> = {};
-    headers.forEach((header, index) => {
-      row[header.trim()] = values[index]?.trim() ?? "";
-    });
-
-    const instrumentToken = Number(row.instrument_token);
-    if (!Number.isFinite(instrumentToken)) return [];
-
-    return [{
-      instrument_token: instrumentToken,
-      tradingsymbol: row.tradingsymbol,
-      name: row.name,
-      expiry: row.expiry || undefined,
-      strike: row.strike ? Number(row.strike) : undefined,
-      lot_size: Number(row.lot_size),
-      instrument_type: row.instrument_type,
-      segment: row.segment,
-      exchange: row.exchange,
-    }];
-  });
-}
-
-const instrumentsCache = new Map<string, { data: KiteInstrument[]; time: number }>();
-const INSTRUMENTS_CACHE_TTL = 60 * 60 * 1000;
-
-async function fetchInstruments(exchange: string): Promise<KiteInstrument[]> {
-  const res = await fetch(`${KITE_BASE}/instruments/${exchange}`, {
-    headers: { "X-Kite-Version": "3" },
-  });
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch ${exchange} instruments (${res.status})`);
-  }
-
-  const buffer = Buffer.from(await res.arrayBuffer());
-  let csv: string;
-
-  try {
-    csv = gunzipSync(buffer).toString("utf-8");
-  } catch {
-    csv = buffer.toString("utf-8");
-  }
-
-  return parseInstrumentsCsv(csv);
-}
-
-async function getCachedInstruments(exchange: string) {
-  const cached = instrumentsCache.get(exchange);
-  if (cached && Date.now() - cached.time < INSTRUMENTS_CACHE_TTL) {
-    return cached.data;
-  }
-
-  const data = await fetchInstruments(exchange);
-  instrumentsCache.set(exchange, { data, time: Date.now() });
-  return data;
+async function getCachedInstruments(exchange: string): Promise<KiteInstrument[]> {
+  const rows = await getKiteInstruments(exchange);
+  return rows.map((row) => ({
+    instrument_token: row.instrument_token,
+    tradingsymbol: row.tradingsymbol,
+    name: row.name ?? "",
+    expiry: row.expiry,
+    strike: row.strike,
+    lot_size: row.lot_size ?? 1,
+    instrument_type: row.instrument_type ?? "",
+    segment: row.segment ?? "",
+    exchange: row.exchange ?? exchange,
+  }));
 }
 
 interface KiteQuotePayload {
@@ -231,8 +198,8 @@ interface KiteQuotePayload {
   change?: number;
   change_percent?: number;
   depth?: {
-    buy?: { price: number; quantity: number }[];
-    sell?: { price: number; quantity: number }[];
+    buy?: { price: number; quantity: number; orders?: number }[];
+    sell?: { price: number; quantity: number; orders?: number }[];
   };
 }
 
@@ -331,7 +298,7 @@ async function getMcxInstruments() {
   return mcxInstrumentsCache;
 }
 
-function resolveMcxKey(baseName: string, instruments: KiteInstrument[]) {
+function resolveNearestFutureKey(baseName: string, instruments: KiteInstrument[]) {
   const futures = instruments
     .filter((item) => item.name === baseName && item.instrument_type === "FUT" && item.expiry)
     .sort((a, b) => new Date(a.expiry!).getTime() - new Date(b.expiry!).getTime());
@@ -339,7 +306,17 @@ function resolveMcxKey(baseName: string, instruments: KiteInstrument[]) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const nearest = futures.find((item) => new Date(item.expiry!) >= today) ?? futures[0];
-  return nearest ? `${nearest.exchange}:${nearest.tradingsymbol}` : null;
+  if (!nearest) return null;
+  return {
+    kiteKey: `${nearest.exchange}:${nearest.tradingsymbol}`,
+    tradingsymbol: nearest.tradingsymbol,
+    expiry: nearest.expiry,
+  };
+}
+
+function resolveMcxKey(baseName: string, instruments: KiteInstrument[]) {
+  const resolved = resolveNearestFutureKey(baseName, instruments);
+  return resolved?.kiteKey ?? null;
 }
 
 async function resolveWatchlistKeys() {
@@ -383,9 +360,9 @@ const GEMINI_MODEL_OUTPUT_LIMIT = 65536;
 
 function getGeminiConfig() {
   const apiKey = process.env.GEMINI_API_KEY;
-  const model = process.env.GEMINI_MODEL ?? "gemini-3.5-flash";
+  const model = process.env.GEMINI_MODEL ?? "gemini-3.1-flash-lite";
   const cacheMs = Math.max(Number(process.env.GEMINI_CACHE_MS ?? 1000), 1000);
-  const entryCacheMs = Math.max(Number(process.env.GEMINI_ENTRY_CACHE_MS ?? 15000), 5000);
+  const entryCacheMs = Math.max(Number(process.env.GEMINI_ENTRY_CACHE_MS ?? 10000), 1000);
 
   const thinkingBudgetRaw = process.env.GEMINI_THINKING_BUDGET ?? "-1";
   const thinkingBudget =
@@ -409,11 +386,44 @@ function getGeminiConfig() {
   };
 }
 
+/** Cap thinking so structured JSON output is not truncated (counts toward maxOutputTokens). */
+function resolveThinkingBudget(config: ReturnType<typeof getGeminiConfig>, cap: number) {
+  if (config.thinkingBudget === -1) return cap;
+  return Math.min(config.thinkingBudget, cap);
+}
+
+function compactStreamingSnapshotForEntry(snapshot: Record<string, unknown> | undefined) {
+  if (!snapshot) return undefined;
+  const technicals = snapshot.technicals as Record<string, unknown> | undefined;
+  const recentSeconds = Array.isArray(snapshot.recentSeconds)
+    ? snapshot.recentSeconds.slice(-30)
+    : [];
+  return {
+    spot: snapshot.spot,
+    liveNow: snapshot.liveNow,
+    recentSeconds,
+    recentRsi1m: snapshot.recentRsi1m,
+    technicals: technicals
+      ? {
+          rsi14: technicals.rsi14,
+          vwap: technicals.vwap,
+          ema9: technicals.ema9,
+          ema20: technicals.ema20,
+          ema50: technicals.ema50,
+          trend: technicals.trend,
+          macd: technicals.macd,
+          bollinger: technicals.bollinger,
+          atr14: technicals.atr14,
+        }
+      : undefined,
+  };
+}
+
 const GEMINI_TRADE_SCHEMA = {
   type: "object",
   properties: {
     bias: { type: "string", enum: ["bullish", "bearish", "neutral"] },
-    action: { type: "string", enum: ["CE_BUY", "CE_SELL", "PE_BUY", "PE_SELL", "WAIT"] },
+    action: { type: "string", enum: ["CE_BUY", "PE_BUY", "WAIT"] },
     strike: { type: "number", nullable: true },
     product: { type: "string", enum: ["MIS", "NRML"] },
     orderType: { type: "string", enum: ["MARKET", "LIMIT"] },
@@ -461,7 +471,84 @@ let geminiSuggestionCaches = new Map<
 >();
 
 function geminiSuggestionCacheKey(input: Record<string, unknown>) {
-  return String(input.underlyingId ?? "nifty50");
+  const tech = input.technicals as Record<string, unknown> | undefined;
+  const spot = Math.round(Number(input.spot ?? 0));
+  const rsi = Math.round(Number(tech?.rsi14 ?? input.rsi ?? 0));
+  return `${String(input.underlyingId ?? "nifty50")}|${spot}|${rsi}`;
+}
+
+const RSI_PUT_BIAS_THRESHOLD = RSI_PUT_FORCE_THRESHOLD;
+const RSI_CALL_BIAS_THRESHOLD = RSI_CALL_FORCE_THRESHOLD;
+
+function extractRsi14(input: Record<string, unknown>): number | null {
+  const liveNow = input.liveNow as Record<string, unknown> | undefined;
+  const tech = input.technicals as Record<string, unknown> | undefined;
+  const rsi = liveNow?.rsi14 ?? tech?.rsi14 ?? input.rsi;
+  return typeof rsi === "number" && Number.isFinite(rsi) ? rsi : null;
+}
+
+/** RSI extremes are hard rules; 30–70 zone keeps Gemini's choice. */
+function applyRsiDirectionBias(
+  suggestion: GeminiSuggestionPayload,
+  input: Record<string, unknown>,
+): GeminiSuggestionPayload {
+  const rsi = extractRsi14(input);
+  if (rsi == null) return suggestion;
+
+  if (rsi > RSI_PUT_BIAS_THRESHOLD) {
+    if (suggestion.action === "PE_BUY") return suggestion;
+    return {
+      ...suggestion,
+      action: "PE_BUY",
+      bias: "bearish",
+      confidence: "high",
+      summary: `RSI ${rsi.toFixed(1)} > ${RSI_PUT_BIAS_THRESHOLD} → Put Buy. ${suggestion.summary}`,
+    };
+  }
+
+  if (rsi < RSI_CALL_BIAS_THRESHOLD) {
+    if (suggestion.action === "CE_BUY") return suggestion;
+    return {
+      ...suggestion,
+      action: "CE_BUY",
+      bias: "bullish",
+      confidence: "high",
+      summary: `RSI ${rsi.toFixed(1)} < ${RSI_CALL_BIAS_THRESHOLD} → Call Buy. ${suggestion.summary}`,
+    };
+  }
+
+  return suggestion;
+}
+
+function extractRsiFromEntryInput(input: Record<string, unknown>): number | null {
+  const snapshot = input.streamingSnapshot as Record<string, unknown> | undefined;
+  if (snapshot) return extractRsi14(snapshot);
+  return extractRsi14(input);
+}
+
+function applyRsiEntryGuard(
+  input: Record<string, unknown>,
+  payload: { signal: string; reason: string; limitPrice: number | null },
+) {
+  const rsi = extractRsiFromEntryInput(input);
+  const planned = String(input.plannedAction ?? input.leg ?? "");
+  if (rsi == null) return payload;
+
+  if (rsi > RSI_PUT_BIAS_THRESHOLD && planned === "CE_BUY") {
+    return {
+      signal: "ABORT",
+      reason: `RSI ${rsi.toFixed(1)} > ${RSI_PUT_BIAS_THRESHOLD} — Call Buy plan invalid; need Put Buy`,
+      limitPrice: null,
+    };
+  }
+  if (rsi < RSI_CALL_BIAS_THRESHOLD && planned === "PE_BUY") {
+    return {
+      signal: "ABORT",
+      reason: `RSI ${rsi.toFixed(1)} < ${RSI_CALL_BIAS_THRESHOLD} — Put Buy plan invalid; need Call Buy`,
+      limitPrice: null,
+    };
+  }
+  return payload;
 }
 
 function buildGeminiTradePrompt(input: Record<string, unknown>, marketContext: ReturnType<typeof getIndianMarketContext>) {
@@ -482,12 +569,17 @@ Rules:
 - If pre_market, post_market, or closed_weekend → action should be WAIT with reason about session timing.
 - After ~3:15 PM IST favour MIS square-off / no new entries unless strong edge.
 - Prefer ATM or one-strike OTM weekly/monthly options (MIS for intraday).
-- For index (${symbol}): standard lot sizing. For stock options: note liquidity.
+- ENTRY actions: ONLY "CE_BUY" or "PE_BUY" (buy to open long options). NEVER "CE_SELL" or "PE_SELL" — no naked short/writing (margin). The app auto-sells to close after the profit target.
+- Auto-trade loop exits each position at +₹${Number(input.exitTargetProfitInr ?? 150)} premium P&L (handled by app — do not estimate profit).
+- Use liveNow (spot, volume, RSI, EMA, VWAP refreshed every second) and recentSeconds (last ~60 one-second spot+volume ticks) plus technicals, fibLevels, sessionContext, recent1s, recentRsi1m, allMarkets.
+- RSI direction rules (mandatory):
+  • RSI(14) > ${RSI_PUT_BIAS_THRESHOLD} → action MUST be PE_BUY (Put Buy).
+  • RSI(14) < ${RSI_CALL_BIAS_THRESHOLD} → action MUST be CE_BUY (Call Buy).
+  • RSI between ${RSI_CALL_BIAS_THRESHOLD} and ${RSI_PUT_BIAS_THRESHOLD} → you choose CE_BUY vs PE_BUY using EMA stack, spot vs VWAP/EMA20, MACD, trend, volume, and recentSeconds momentum.
+- Weigh ema20 vs ema50 stack, spot vs ema20/vwap, and volume together when RSI is in the neutral zone.
 - Keep each field concise for 1-second intraday context.
-- Use sessionContext for full-day structure (open, high, low, VWAP, opening range, recent 1m bars).
-- Use recent1s for the last ~60 seconds only; do not ignore sessionContext when choosing CE vs PE.
 
-Live snapshot (includes marketContext):
+Live streaming snapshot (full technicals + multi-market context):
 ${JSON.stringify({ marketContext, ...input })}`;
 }
 
@@ -542,17 +634,24 @@ function extractGeminiResponse(payload: unknown) {
   const parts = data.candidates?.[0]?.content?.parts ?? [];
   const thoughts: string[] = [];
   const outputs: string[] = [];
+  const jsonFallbacks: string[] = [];
 
   for (const part of parts) {
     if (!part.text?.trim()) continue;
-    if (part.thought) thoughts.push(part.text.trim());
-    else outputs.push(part.text.trim());
+    if (part.thought) {
+      thoughts.push(part.text.trim());
+      if (part.text.includes("{")) jsonFallbacks.push(part.text.trim());
+      continue;
+    }
+    outputs.push(part.text.trim());
   }
 
   let text = outputs.join("\n").trim();
+  if (!text && jsonFallbacks.length > 0) {
+    text = jsonFallbacks.join("\n").trim();
+  }
   if (!text && parts.length > 0) {
     text = parts
-      .filter((part) => !part.thought)
       .map((part) => part.text ?? "")
       .join("")
       .trim();
@@ -560,13 +659,57 @@ function extractGeminiResponse(payload: unknown) {
 
   if (!text) {
     const reason = data.candidates?.[0]?.finishReason;
-    throw new Error(reason ? `Empty Gemini response (${reason})` : "Empty response from Gemini");
+    throw new Error(reason ? `Empty Options AI response (${reason})` : "Empty response from Options AI");
   }
 
   return {
     text,
     thinking: thoughts.join("\n\n").trim(),
+    finishReason: data.candidates?.[0]?.finishReason,
   };
+}
+
+function recoverPartialGeminiJson(text: string): Record<string, unknown> | null {
+  const signalMatch = text.match(/"signal"\s*:\s*"(ENTER|WAIT|ABORT)"/i);
+  if (signalMatch) {
+    const reasonMatch = text.match(/"reason"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    const limitMatch = text.match(/"limitPrice"\s*:\s*(null|-?\d+(?:\.\d+)?)/);
+    let limitPrice: number | null = null;
+    if (limitMatch && limitMatch[1] !== "null") {
+      const parsedLimit = Number(limitMatch[1]);
+      limitPrice = Number.isFinite(parsedLimit) ? parsedLimit : null;
+    }
+    return {
+      signal: signalMatch[1].toUpperCase(),
+      reason: reasonMatch?.[1]?.replace(/\\"/g, '"') ?? "Recovered from partial AI response",
+      limitPrice,
+    };
+  }
+
+  const actionMatch = text.match(/"action"\s*:\s*"(CE_BUY|PE_BUY|WAIT)"/i);
+  if (actionMatch) {
+    const pick = (key: string) => text.match(new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`))?.[1];
+    const pickNum = (key: string) => {
+      const m = text.match(new RegExp(`"${key}"\\s*:\\s*(null|-?\\d+(?:\\.\\d+)?)`));
+      if (!m || m[1] === "null") return null;
+      const n = Number(m[1]);
+      return Number.isFinite(n) ? n : null;
+    };
+    return {
+      action: actionMatch[1].toUpperCase(),
+      bias: pick("bias") ?? "neutral",
+      confidence: pick("confidence") ?? "medium",
+      summary: pick("summary") ?? "Recovered from partial AI response",
+      entryPlan: pick("entryPlan") ?? "",
+      riskPlan: pick("riskPlan") ?? "",
+      invalidation: pick("invalidation") ?? "",
+      product: pick("product") ?? "MIS",
+      orderType: pick("orderType") ?? "MARKET",
+      strike: pickNum("strike"),
+    };
+  }
+
+  return null;
 }
 
 function parseGeminiJson(text: string) {
@@ -587,15 +730,29 @@ function parseGeminiJson(text: string) {
     }
   }
 
-  throw new Error("Gemini returned invalid JSON");
+  throw new Error("Options AI returned invalid JSON");
+}
+
+function parseGeminiJsonLenient(text: string, finishReason?: string) {
+  try {
+    return parseGeminiJson(text);
+  } catch {
+    const recovered = recoverPartialGeminiJson(text);
+    if (recovered) return recovered;
+    if (finishReason === "MAX_TOKENS") {
+      throw new Error("Options AI response truncated — increase GEMINI_MAX_OUTPUT_TOKENS");
+    }
+    throw new Error("Options AI returned invalid JSON");
+  }
 }
 
 function normalizeGeminiSuggestion(parsed: Record<string, unknown>): GeminiSuggestionPayload {
-  const actionValues = new Set(["CE_BUY", "CE_SELL", "PE_BUY", "PE_SELL", "WAIT"]);
+  const entryActions = new Set(["CE_BUY", "PE_BUY"]);
   const biasValues = new Set(["bullish", "bearish", "neutral"]);
   const confidenceValues = new Set(["high", "medium", "low"]);
 
-  const action = actionValues.has(String(parsed.action)) ? String(parsed.action) : "WAIT";
+  const rawAction = String(parsed.action ?? "WAIT");
+  const action = entryActions.has(rawAction) ? rawAction : "WAIT";
   const bias = biasValues.has(String(parsed.bias)) ? String(parsed.bias) : "neutral";
   const confidence = confidenceValues.has(String(parsed.confidence))
     ? String(parsed.confidence)
@@ -617,7 +774,7 @@ function normalizeGeminiSuggestion(parsed: Record<string, unknown>): GeminiSugge
 
 async function callGeminiEntry(prompt: string) {
   const config = getGeminiConfig();
-  if (!config.apiKey) throw new Error("Gemini API key not configured");
+  if (!config.apiKey) throw new Error("Options AI API key not configured");
 
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.apiKey}`,
@@ -628,12 +785,12 @@ async function callGeminiEntry(prompt: string) {
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: 0.2,
-          maxOutputTokens: 512,
+          maxOutputTokens: Math.max(config.maxOutputTokens, 4096),
           responseMimeType: "application/json",
           responseSchema: GEMINI_ENTRY_SCHEMA,
           thinkingConfig: {
-            includeThoughts: false,
-            thinkingBudget: 1024,
+            includeThoughts: true,
+            thinkingBudget: resolveThinkingBudget(config, 2048),
           },
         },
       }),
@@ -643,7 +800,7 @@ async function callGeminiEntry(prompt: string) {
   const json: unknown = await res.json();
   if (!res.ok) {
     const message =
-      (json as { error?: { message?: string } }).error?.message ?? "Gemini request failed";
+      (json as { error?: { message?: string } }).error?.message ?? "Options AI request failed";
     throw new Error(message);
   }
   return extractGeminiResponse(json);
@@ -651,7 +808,7 @@ async function callGeminiEntry(prompt: string) {
 
 async function callGemini(prompt: string) {
   const config = getGeminiConfig();
-  if (!config.apiKey) throw new Error("Gemini API key not configured");
+  if (!config.apiKey) throw new Error("Options AI API key not configured");
 
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.apiKey}`,
@@ -662,12 +819,12 @@ async function callGemini(prompt: string) {
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: 0.3,
-          maxOutputTokens: config.maxOutputTokens,
+          maxOutputTokens: Math.max(config.maxOutputTokens, 8192),
           responseMimeType: "application/json",
           responseSchema: GEMINI_TRADE_SCHEMA,
           thinkingConfig: {
             includeThoughts: true,
-            thinkingBudget: config.thinkingBudget,
+            thinkingBudget: resolveThinkingBudget(config, 6144),
           },
         },
       }),
@@ -677,7 +834,7 @@ async function callGemini(prompt: string) {
   const json: unknown = await res.json();
   if (!res.ok) {
     const message =
-      (json as { error?: { message?: string } }).error?.message ?? "Gemini request failed";
+      (json as { error?: { message?: string } }).error?.message ?? "Options AI request failed";
     throw new Error(message);
   }
   return extractGeminiResponse(json);
@@ -769,6 +926,81 @@ app.get("/api/kite/status", async (req, res) => {
   }
 });
 
+function verifyRelaySecret(req: express.Request): boolean {
+  const secret = getRelaySecret();
+  if (!secret) return false;
+  return req.header("X-Kite-Relay-Secret") === secret;
+}
+
+app.get("/api/kite/relay-egress-ip", async (req, res) => {
+  if (!verifyRelaySecret(req)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  try {
+    const ipRes = await fetch("https://api4.ipify.org", { signal: AbortSignal.timeout(5000) });
+    const ip = (await ipRes.text()).trim();
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+      return res.status(502).json({ error: "Failed to detect egress IP" });
+    }
+    return res.json({ data: { ip } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to detect egress IP";
+    return res.status(502).json({ error: message });
+  }
+});
+
+app.post("/api/kite/egress-relay", async (req, res) => {
+  if (!verifyRelaySecret(req)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const { url, method, headers, body } = req.body as {
+    url?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  };
+
+  if (!url?.startsWith(`${KITE_BASE}/`)) {
+    return res.status(400).json({ error: "Only api.kite.trade URLs are allowed" });
+  }
+
+  try {
+    const upstream = await fetch(url, {
+      method: method ?? "GET",
+      headers,
+      body: body ?? undefined,
+      signal: AbortSignal.timeout(30000),
+    });
+    const text = await upstream.text();
+    res.status(upstream.status);
+    res.setHeader("Content-Type", upstream.headers.get("content-type") ?? "application/json");
+    return res.send(text);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Relay failed";
+    return res.status(502).json({ error: message });
+  }
+});
+
+app.get("/api/kite/trading-ip", async (req, res) => {
+  const clientIp =
+    (typeof req.headers["x-forwarded-for"] === "string"
+      ? req.headers["x-forwarded-for"].split(",")[0]?.trim()
+      : null) ??
+    req.socket.remoteAddress ??
+    null;
+  const force = req.query.refresh === "1";
+
+  try {
+    const data = await buildTradingIpInfo(clientIp, force);
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to resolve trading IP";
+    return res.status(502).json({ error: message });
+  }
+});
+
 app.get("/api/kite/callback", async (req, res) => {
   const requestToken = req.query.request_token as string | undefined;
   const status = req.query.status as string | undefined;
@@ -782,7 +1014,7 @@ app.get("/api/kite/callback", async (req, res) => {
         .update(`${config.apiKey}${requestToken}${config.apiSecret}`)
         .digest("hex");
 
-      const sessionRes = await fetch(`${KITE_BASE}/session/token`, {
+      const sessionRes = await kiteHttpFetch(`${KITE_BASE}/session/token`, {
         method: "POST",
         headers: {
           "X-Kite-Version": "3",
@@ -805,7 +1037,8 @@ app.get("/api/kite/callback", async (req, res) => {
 
       return res.redirect(`${base}/dashboard?kite=connected`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Authentication failed";
+      const raw = error instanceof Error ? error.message : "Authentication failed";
+      const message = await enrichKiteIpOrderError(raw);
       return res.redirect(`${base}/dashboard/settings?kite=error&message=${encodeURIComponent(message)}`);
     }
   }
@@ -890,7 +1123,13 @@ app.get("/api/kite/quote-stream", async (req, res) => {
       change?: number;
       change_percent?: number;
       volume?: number;
+      buy_quantity?: number;
+      sell_quantity?: number;
       ohlc?: { open?: number; high?: number; low?: number; close?: number };
+      depth?: {
+        buy?: { price: number; quantity: number; orders?: number }[];
+        sell?: { price: number; quantity: number; orders?: number }[];
+      };
     }>>(`/quote?i=${encodeURIComponent(instrument)}`, accessToken);
     const quote = quotes[instrument];
 
@@ -903,6 +1142,10 @@ app.get("/api/kite/quote-stream", async (req, res) => {
           change: quote?.change ?? 0,
           change_percent: quote?.change_percent ?? 0,
           volume: quote?.volume ?? 0,
+          cumulativeVolume: quote?.volume ?? 0,
+          buy_quantity: quote?.buy_quantity,
+          sell_quantity: quote?.sell_quantity,
+          depth: quote?.depth,
           ohlc: quote?.ohlc,
         },
         updatedAt: new Date().toISOString(),
@@ -1003,6 +1246,24 @@ async function loadInstrumentSessionPayload(accessToken: string, instrument: str
   };
 }
 
+app.get("/api/kite/nearest-future", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  const underlying = ((req.query.underlying as string | undefined)?.trim() || "NIFTY").toUpperCase();
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  try {
+    const instruments = await getCachedInstruments("NFO");
+    const resolved = resolveNearestFutureKey(underlying, instruments);
+    if (!resolved) {
+      return res.status(404).json({ error: `No ${underlying} future found on NFO` });
+    }
+    return res.json({ data: resolved });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to resolve future";
+    return res.status(400).json({ error: message });
+  }
+});
+
 app.get("/api/kite/instrument-session", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   const instrument = (req.query.instrument as string | undefined)?.trim();
@@ -1087,7 +1348,7 @@ app.post("/api/gemini/trade-suggestion", async (req, res) => {
 
   const gemini = getGeminiConfig();
   if (!gemini.configured) {
-    return res.status(503).json({ error: "Gemini API key not configured on server" });
+    return res.status(503).json({ error: "Options AI API key not configured on server" });
   }
 
   const now = Date.now();
@@ -1112,8 +1373,8 @@ app.post("/api/gemini/trade-suggestion", async (req, res) => {
     const prompt = buildGeminiTradePrompt(input, marketContext);
 
     const { text, thinking } = await callGemini(prompt);
-    const parsed = parseGeminiJson(text);
-    const suggestion = normalizeGeminiSuggestion(parsed);
+    const parsed = parseGeminiJsonLenient(text);
+    const suggestion = applyRsiDirectionBias(normalizeGeminiSuggestion(parsed), input);
     const payload = {
       suggestion,
       thinking: thinking || undefined,
@@ -1149,7 +1410,7 @@ app.post("/api/gemini/trade-suggestion", async (req, res) => {
       });
     }
 
-    const message = error instanceof Error ? error.message : "Gemini suggestion failed";
+    const message = error instanceof Error ? error.message : "Options AI suggestion failed";
     return res.status(502).json({ error: message });
   }
 });
@@ -1160,7 +1421,7 @@ app.post("/api/gemini/entry-timing", async (req, res) => {
 
   const gemini = getGeminiConfig();
   if (!gemini.configured) {
-    return res.status(503).json({ error: "Gemini API key not configured on server" });
+    return res.status(503).json({ error: "Options AI API key not configured on server" });
   }
 
   const now = Date.now();
@@ -1187,30 +1448,82 @@ app.post("/api/gemini/entry-timing", async (req, res) => {
       return res.json({ data: payload });
     }
 
-    const prompt = `You are executing a planned Nifty 50 options trade on NSE F&O.
+    const prompt = `You are executing a planned NSE F&O options trade using live streaming data.
 Decide if NOW is the right second to ENTER or keep WAITing.
 
 Clock (IST): ${marketContext.currentDateTimeIST}
 Session: ${marketContext.sessionStatus}, ${marketContext.minutesToClose} min to close
 
+Exit rule: position auto-exits at +₹${Number(input.exitTargetProfitInr ?? 150)} premium P&L (app handles exit — do not estimate profit).
+Entry is always a BUY (CE_BUY or PE_BUY plan only) — never sell to open.
+
+Use streamingSnapshot.liveNow (spot, volume, RSI, EMA, VWAP every second), streamingSnapshot.recentSeconds, technicals, spot, recent1s, sessionContext, and allMarkets.
+- ENTER when timing aligns with the planned direction and indicators support a quick scalp to the auto-exit.
+- WAIT when timing is not ideal yet.
+- ABORT when this setup is invalidated.
+
+RSI rules for the planned leg:
+- RSI > ${RSI_PUT_BIAS_THRESHOLD}: only PE_BUY plans may ENTER; ABORT a CE_BUY plan.
+- RSI < ${RSI_CALL_BIAS_THRESHOLD}: only CE_BUY plans may ENTER; ABORT a PE_BUY plan.
+- RSI between ${RSI_CALL_BIAS_THRESHOLD} and ${RSI_PUT_BIAS_THRESHOLD}: follow the plan if indicators agree.
+
 Return JSON only:
-- ENTER when entry conditions from the plan are met NOW (momentum, premium, spot vs strike). If the setup is still valid and premium is tradeable, prefer ENTER over prolonged WAIT.
-- WAIT only when timing is genuinely not ideal yet (max ~1-2 checks), not indefinitely.
-- ABORT when invalidation/risk plan is breached — do not enter.
+- signal: ENTER | WAIT | ABORT
+- reason: short explanation
+- limitPrice: optional limit entry price
 
-Planned trade snapshot:
-${JSON.stringify({ marketContext, ...input })}`;
+Planned trade + live streaming snapshot:
+${JSON.stringify({
+  marketContext,
+  plannedAction: input.plannedAction,
+  strike: input.strike,
+  leg: input.leg,
+  product: input.product,
+  summary: input.summary,
+  entryPlan: input.entryPlan,
+  riskPlan: input.riskPlan,
+  invalidation: input.invalidation,
+  spot: input.spot,
+  optionLtp: input.optionLtp,
+  quantity: input.quantity,
+  streamingSnapshot: compactStreamingSnapshotForEntry(
+    input.streamingSnapshot as Record<string, unknown> | undefined,
+  ),
+})}`;
 
-    const { text } = await callGeminiEntry(prompt);
-    const parsed = parseGeminiJson(text);
+    let parsed: Record<string, unknown>;
+    try {
+      const { text, finishReason } = await callGeminiEntry(prompt);
+      parsed = parseGeminiJsonLenient(text, finishReason);
+    } catch (parseError) {
+      const message = parseError instanceof Error ? parseError.message : "Entry timing parse failed";
+      const payload = {
+        signal: "WAIT",
+        reason: message,
+        limitPrice: null,
+        model: gemini.model,
+        updatedAt: new Date().toISOString(),
+        cached: false,
+      };
+      geminiEntryCache = payload;
+      geminiEntryCacheKey = cacheKey;
+      geminiEntryCacheExpiry = now + gemini.entryCacheMs;
+      return res.json({ data: payload });
+    }
     const signal = ["ENTER", "WAIT", "ABORT"].includes(String(parsed.signal))
       ? String(parsed.signal)
       : "WAIT";
 
-    const payload = {
+    const guarded = applyRsiEntryGuard(input, {
       signal,
       reason: String(parsed.reason ?? "Waiting for better timing"),
       limitPrice: typeof parsed.limitPrice === "number" ? parsed.limitPrice : null,
+    });
+
+    const payload = {
+      signal: guarded.signal,
+      reason: guarded.reason,
+      limitPrice: guarded.limitPrice,
       model: gemini.model,
       updatedAt: new Date().toISOString(),
       cached: false,
@@ -1502,6 +1815,58 @@ app.get("/api/kite/orders", async (req, res) => {
   }
 });
 
+/** All closed trades — merges today's Kite orders with persisted history (Kite API is day-only). */
+app.get("/api/kite/portfolio/trades", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+  try {
+    const rawOrders = await kiteGet<unknown>("/orders", accessToken);
+    const list = Array.isArray(rawOrders) ? rawOrders : [];
+    const store = await syncTodayOrdersIntoHistory(list);
+    return res.json({
+      data: store.trades,
+      meta: {
+        ...store.meta,
+        count: store.trades.length,
+        note: "Zerodha Kite API returns today's orders only. Older trades are kept from daily sync and CSV import.",
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load trade history";
+    return res.status(400).json({ error: message });
+  }
+});
+
+app.post("/api/kite/portfolio/trades/import", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const csv =
+    typeof req.body === "string"
+      ? req.body
+      : typeof req.body?.csv === "string"
+        ? req.body.csv
+        : "";
+  if (!csv.trim()) {
+    return res.status(400).json({ error: "CSV body required (Console → Reports → Tradebook)" });
+  }
+
+  try {
+    const store = await importTradebookCsvIntoHistory(csv);
+    return res.json({
+      data: store.trades,
+      meta: {
+        ...store.meta,
+        count: store.trades.length,
+        importedRows: store.trades.length,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to import tradebook";
+    return res.status(400).json({ error: message });
+  }
+});
+
 app.post("/api/kite/order-margin", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
@@ -1519,13 +1884,257 @@ app.post("/api/kite/order-margin", async (req, res) => {
 app.post("/api/kite/orders", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
   try {
+    await assertKiteEgressReady();
     const marketProtection = resolveMarketProtection(process.env.KITE_MARKET_PROTECTION);
     const body = normalizeKiteOrderBody(req.body as Record<string, string | number>, marketProtection);
-    const data = await kitePost<{ order_id: string }>("/orders/regular", accessToken, body);
+    const kitePath = body.variety === "bo" ? "/orders/bo" : body.variety === "co" ? "/orders/co" : "/orders/regular";
+    const data = await kitePost<{ order_id: string }>(kitePath, accessToken, body);
     return res.json({ data });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to place order";
+    return res.status(400).json({ error: message });
+  }
+});
+
+function getPredictionDeps(): PredictionDeps {
+  return {
+    fetchCandles: fetchHistoricalCandles,
+    resolveFuture: async (underlying) => {
+      const instruments = await getCachedInstruments("NFO");
+      const resolved = resolveNearestFutureKey(underlying, instruments);
+      return resolved?.kiteKey ?? null;
+    },
+    getHistoricalDateRange,
+  };
+}
+
+app.get("/api/prediction/status", async (req, res) => {
+  try {
+    const interval = (req.query.interval as string | undefined) ?? "minute";
+    const data = await getPredictionStatus(interval);
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load prediction status";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.post("/api/prediction/train", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const interval = (req.body?.interval as string | undefined) ?? "minute";
+  const days = Math.min(Math.max(Number(req.body?.days ?? 60), 30), 180);
+
+  try {
+    const status = await getPredictionStatus(interval);
+    if (!status.pythonAvailable) {
+      return res.status(503).json({
+        error: "Python 3 not found. Run: pip install -r trading-ai/requirements.txt",
+      });
+    }
+    if (!status.xgboostAvailable) {
+      return res.status(503).json({
+        error: "XGBoost not available. On macOS run: brew install libomp; pip install -r trading-ai/requirements.txt",
+      });
+    }
+
+    const { metrics, dataset } = await trainPredictionModel(getPredictionDeps(), accessToken, interval, days);
+    return res.json({
+      data: {
+        metrics,
+        primaryBars: dataset.instruments.find((i) => i.id === "nifty_fut")?.barCount ?? 0,
+        interval,
+        days,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Training failed";
+    return res.status(400).json({ error: message });
+  }
+});
+
+app.get("/api/prediction/live", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const interval = (req.query.interval as string | undefined) ?? "minute";
+
+  try {
+    const status = await getPredictionStatus(interval);
+    if (!status.pythonAvailable) {
+      return res.status(503).json({ error: "Python 3 not available" });
+    }
+    if (!status.modelTrained) {
+      return res.status(404).json({ error: `Model not trained yet for ${interval}` });
+    }
+    if (!status.schemaCurrent) {
+      return res.status(409).json({
+        error: `Model outdated for ${interval} — click Train model to upgrade the feature schema.`,
+      });
+    }
+
+    const config = getKiteConfig();
+    if (!config.configured || !config.apiKey) {
+      return res.status(503).json({ error: "Kite not configured" });
+    }
+
+    const data = await livePrediction(getPredictionDeps(), accessToken, config.apiKey, interval, 5);
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Prediction failed";
+    return res.status(400).json({ error: message });
+  }
+});
+
+app.get("/api/prediction/atm-scenarios", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const asOf = (req.query.asOf as string | undefined)?.trim();
+  const interval = (req.query.interval as string | undefined) ?? "minute";
+  const probUp = Number(req.query.probUp ?? 0);
+  const probDown = Number(req.query.probDown ?? 0);
+  const threshold = Number(req.query.threshold ?? 0.75);
+  if (!asOf) return res.status(400).json({ error: "asOf query param required" });
+
+  const intervalMinutes =
+    interval === "minute"
+      ? 1
+      : interval === "3minute"
+        ? 3
+        : interval === "5minute"
+          ? 5
+          : interval === "15minute"
+            ? 15
+            : 1;
+
+  try {
+    const config = getKiteConfig();
+    if (!config.configured || !config.apiKey) {
+      return res.status(503).json({ error: "Kite not configured" });
+    }
+
+    const data = await fetchLiveAtmScenarios(
+      accessToken,
+      config.apiKey,
+      asOf,
+      intervalMinutes,
+      probUp,
+      probDown,
+      threshold,
+    );
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load ATM scenarios";
+    return res.status(400).json({ error: message });
+  }
+});
+
+app.get("/api/prediction/backtest", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const date = (req.query.date as string | undefined)?.trim();
+  const interval = (req.query.interval as string | undefined) ?? "minute";
+  if (!date) return res.status(400).json({ error: "date query param required (YYYY-MM-DD)" });
+
+  try {
+    const status = await getPredictionStatus(interval);
+    if (!status.pythonAvailable) {
+      return res.status(503).json({ error: "Python 3 not available" });
+    }
+    if (!status.modelTrained) {
+      return res.status(404).json({ error: `Model not trained yet for ${interval}` });
+    }
+    if (!status.schemaCurrent) {
+      return res.status(409).json({
+        error: `Model outdated for ${interval} — train first before checking historical days.`,
+      });
+    }
+
+    const config = getKiteConfig();
+    if (!config.configured || !config.apiKey) {
+      return res.status(503).json({ error: "Kite not configured" });
+    }
+
+    const data = await backtestPredictionDay(
+      getPredictionDeps(),
+      accessToken,
+      date,
+      interval,
+      config.apiKey,
+    );
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Backtest failed";
+    return res.status(400).json({ error: message });
+  }
+});
+
+function getMlTradingDeps() {
+  return {
+    fetchCandles: fetchHistoricalCandles,
+    getHistoricalDateRange,
+  };
+}
+
+app.get("/api/ml-trading/status", async (_req, res) => {
+  try {
+    const data = await getMlTradingStatus();
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load ML trading status";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.post("/api/ml-trading/sync", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  try {
+    const status = await getMlTradingStatus();
+    if (!status.pythonAvailable) {
+      return res.status(503).json({
+        error: "Python 3 not found. Run: pip install -r trading-ai/requirements.txt",
+      });
+    }
+
+    const data = await syncMlTradingData(getMlTradingDeps(), accessToken);
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to sync hourly data";
+    return res.status(400).json({ error: message });
+  }
+});
+
+app.get("/api/ml-trading/match", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const topK = Math.min(Math.max(Number(req.query.top ?? 8), 3), 20);
+
+  try {
+    const status = await getMlTradingStatus();
+    if (!status.pythonAvailable) {
+      return res.status(503).json({ error: "Python 3 not available" });
+    }
+    if (!status.libraryBuilt) {
+      return res.status(404).json({ error: "Pattern library not built — sync hourly data first" });
+    }
+
+    const config = getKiteConfig();
+    if (!config.configured || !config.apiKey) {
+      return res.status(503).json({ error: "Kite API not configured" });
+    }
+
+    const data = await matchMlTradingPattern(getMlTradingDeps(), accessToken, config.apiKey, topK);
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Pattern match failed";
     return res.status(400).json({ error: message });
   }
 });

@@ -14,7 +14,9 @@ export function appendSecondCandle(
   const secondTs = Math.floor(Date.now() / 1000) * 1000;
   let volumeDelta =
     quoteVolume > previousQuoteVolume ? quoteVolume - previousQuoteVolume : 0;
-  if (volumeDelta <= 0) volumeDelta = 1;
+  if (volumeDelta <= 0 && quoteVolume > 0 && previousQuoteVolume <= 0) {
+    volumeDelta = quoteVolume;
+  }
 
   const last = candles[candles.length - 1];
   if (last?.timestamp === secondTs) {

@@ -27,8 +27,8 @@ export interface KiteQuote {
   oi_day_low?: number;
   greeks?: OptionGreeks;
   depth?: {
-    buy: { price: number; quantity: number }[];
-    sell: { price: number; quantity: number }[];
+    buy: { price: number; quantity: number; orders?: number }[];
+    sell: { price: number; quantity: number; orders?: number }[];
   };
 }
 
@@ -105,7 +105,6 @@ export const POPULAR_UNDERLYINGS = [
   { symbol: "RELIANCE", exchange: "NFO", label: "Reliance" },
   { symbol: "TCS", exchange: "NFO", label: "TCS" },
   { symbol: "INFY", exchange: "NFO", label: "Infosys" },
-  { symbol: "HDFCBANK", exchange: "NFO", label: "HDFC Bank" },
 ] as const;
 
 export { WATCHLIST_DEFAULT, WATCHLIST_ITEMS } from "../lib/watchlist";

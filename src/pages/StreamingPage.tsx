@@ -1,54 +1,98 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { Activity, Brain, LineChart, Maximize2, Minimize2, Sparkles } from "lucide-react";
+import { Activity, LineChart, Maximize2, Minimize2 } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { StreamingChart } from "@/components/streaming/StreamingChart";
 import { FormulaOrchestrator } from "@/components/trade/FormulaOrchestrator";
+import { Formula4ManualRunner } from "@/components/trade/Formula4ManualRunner";
 import { useConfirm } from "@/contexts/confirm-context";
 import { useKite } from "@/contexts/kite-context";
-import { buildAutoTradePlan, saveAutoTradePlan } from "@/lib/auto-trade";
 import type { ParsedCandle } from "@/lib/candles";
 import { appendSecondCandle } from "@/lib/second-candles";
 import {
   buildRsiSeries,
   buildTechnicalSnapshot,
-  calculateFibonacciRetracement,
 } from "@/lib/technical-indicators";
 import { aggregateSecondCandlesToMinutes, mergeMinuteCandles } from "@/lib/minute-candles";
-import { compactRecent1s } from "@/lib/session-context";
+import { emptyInstrumentRecord, quotesToStreamsByInstrument } from "@/lib/market-stream-utils";
+import { enrichQuoteMetrics, type RawKiteQuote } from "@/lib/quote-depth";
 import {
   DEFAULT_STREAM_INSTRUMENT_ID,
   getStreamInstrument,
+  isStreamInstrumentId,
   STREAM_INSTRUMENTS,
 } from "@/lib/stream-instruments";
-import type { OptionChainResponse } from "@/types/kite";
-import type { GeminiSuggestionResponse, NiftySessionResponse, NiftyStreamResponse } from "@/types/streaming";
-import { cn, formatNumber, getChangeClass } from "@/lib/utils";
+import type { NiftySessionResponse, NiftyStreamResponse } from "@/types/streaming";
+import { cn, formatCurrency, formatNumber, getChangeClass } from "@/lib/utils";
 import { formatIndianDateTime } from "@/lib/market-time";
 import {
+  FORMULA_RULES,
   FORMULA_VARIANTS,
   formulaCallEntryLabel,
+  formulaDisplayName,
+  formulaCallEmaFilters,
+  formulaPutEmaFilters,
+  formulaIsManual,
   formulaPutEntryLabel,
+  formulaUsesEma,
+  formulaUsesVwap,
   isPastFormulaHardExit,
   type FormulaVariantId,
+  FORMULA_4_TARGET_PROFIT_INR,
 } from "@/lib/formula-trade";
 
 const REFRESH_MS = 1000;
 const SESSION_REFRESH_MS = 60000;
-const STREAMING_AI_KEY = "optionflow_streaming_ai";
 const STREAMING_LIVE_KEY = "optionflow_streaming_live";
 const STREAMING_FORMULA_VARIANT_KEY = "optionflow_formula_variant";
 const STREAMING_INSTRUMENT_KEY = "optionflow_stream_instrument";
 const CHART_HEIGHT = 480;
 const CHART_HEIGHT_FULLSCREEN = 560;
 
+function parseStoredFormulaVariant(): FormulaVariantId {
+  try {
+    const saved = sessionStorage.getItem(STREAMING_FORMULA_VARIANT_KEY);
+    if (saved === "2") return 2;
+    if (saved === "3") return 3;
+    if (saved === "4") return 4;
+  } catch {
+    /* ignore */
+  }
+  return 1;
+}
+
 function FormulaTradingConfirmBody({ variant }: { variant: FormulaVariantId }) {
   const variantRule = FORMULA_VARIANTS[variant];
+
+  if (formulaIsManual(variant)) {
+    return (
+      <>
+        <p className="confirm-note mb-3">
+          {variantRule.displayName} · {variantRule.shortLabel}
+        </p>
+        <div className="confirm-section">
+          <p className="confirm-section-title">Entry</p>
+          <ul className="confirm-list">
+            <li>You pick <strong>Call Buy</strong> or <strong>Put Buy</strong> manually</li>
+            <li>Uses the chart symbol ({STREAM_INSTRUMENTS.map((i) => i.label).join(", ")}) · ATM · 1 lot</li>
+            <li>One open trade at a time</li>
+          </ul>
+        </div>
+        <div className="confirm-section">
+          <p className="confirm-section-title">Exit</p>
+          <ul className="confirm-list">
+            <li>Auto market sell at <strong>+{formatCurrency(FORMULA_4_TARGET_PROFIT_INR)}</strong> premium P&L</li>
+            <li>No RSI / VWAP / EMA rules</li>
+          </ul>
+        </div>
+        <p className="confirm-note">REAL Zerodha orders — no Options AI.</p>
+      </>
+    );
+  }
 
   return (
     <>
       <p className="confirm-note mb-3">
-        {variantRule.name} · {variantRule.shortLabel}
+        {variantRule.displayName} · {variantRule.shortLabel}
         {isPastFormulaHardExit() && (
           <>
             {" "}
@@ -59,7 +103,7 @@ function FormulaTradingConfirmBody({ variant }: { variant: FormulaVariantId }) {
       <div className="confirm-section">
         <p className="confirm-section-title">Entry</p>
         <ul className="confirm-list">
-          <li>Scans Nifty 50, Sensex, Dixon, HDFC Bank · ATM CE/PE</li>
+          <li>Scans {STREAM_INSTRUMENTS.map((i) => i.label).join(", ")} · ATM CE/PE</li>
           <li>Call: {formulaCallEntryLabel(variant)}</li>
           <li>Put: {formulaPutEntryLabel(variant)}</li>
           <li>One open trade globally · first signal wins</li>
@@ -80,28 +124,9 @@ function FormulaTradingConfirmBody({ variant }: { variant: FormulaVariantId }) {
           <li>Next valid Call or Put after each exit (no forced alternation)</li>
         </ul>
       </div>
-      <p className="confirm-note">REAL Zerodha orders — no Gemini.</p>
+      <p className="confirm-note">REAL Zerodha orders — no Options AI.</p>
     </>
   );
-}
-
-function legToUrl(action: string, strike: number | null, auto = false) {
-  if (!strike || action === "WAIT") return null;
-  const leg = action.toLowerCase().replace(/_/g, "-");
-  return `/dashboard/trade?strike=${strike}&leg=${leg}${auto ? "&auto=1" : ""}`;
-}
-
-function optionLtpForAction(
-  chain: OptionChainResponse | null,
-  action: string,
-  strike: number | null
-): number {
-  if (!chain || !strike) return 0;
-  const row = chain.chain.find((r) => r.strike === strike);
-  if (!row) return 0;
-  if (action.startsWith("CE")) return row.ce?.quote?.last_price ?? 0;
-  if (action.startsWith("PE")) return row.pe?.quote?.last_price ?? 0;
-  return 0;
 }
 
 function parseSymbolScan(line?: string) {
@@ -126,15 +151,76 @@ function MetricCell({
   label,
   value,
   valueClass,
+  title,
 }: {
   label: string;
   value: string;
   valueClass?: string;
+  title?: string;
 }) {
   return (
-    <div className="stream-metric-cell">
+    <div className="stream-metric-cell" title={title}>
       <p className="stream-metric-label">{label}</p>
       <p className={cn("stream-metric-value", valueClass)}>{value}</p>
+    </div>
+  );
+}
+
+type EmaFilterPass = boolean | null;
+
+function EmaFilterBadge({
+  label,
+  pass,
+  size = "md",
+}: {
+  label: string;
+  pass: EmaFilterPass;
+  size?: "sm" | "md";
+}) {
+  if (pass == null) {
+    return <span className={cn("stream-ema-compare", "is-neutral", size === "sm" && "is-sm")}>—</span>;
+  }
+  return (
+    <span
+      className={cn(
+        "stream-ema-compare",
+        pass ? "is-up" : "is-down",
+        size === "sm" && "is-sm"
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
+function EmaFormulaFiltersPanel({
+  spot,
+  ema20,
+  ema50,
+  compact = false,
+}: {
+  spot: number;
+  ema20: number | null;
+  ema50: number | null;
+  compact?: boolean;
+}) {
+  const ctx = { spot, ema20, ema50 };
+  const call = formulaCallEmaFilters(ctx);
+  const put = formulaPutEmaFilters(ctx);
+  const size = compact ? "sm" : "md";
+
+  return (
+    <div className={cn("stream-ema-filters", compact && "is-compact")}>
+      <div className="stream-ema-filter-row">
+        <span className="stream-ema-filter-side is-call">Call</span>
+        <EmaFilterBadge label="Spot > EMA 20" pass={call.spotAboveEma20} size={size} />
+        <EmaFilterBadge label="EMA 20 > EMA 50" pass={call.ema20AboveEma50} size={size} />
+      </div>
+      <div className="stream-ema-filter-row">
+        <span className="stream-ema-filter-side is-put">Put</span>
+        <EmaFilterBadge label="Spot < EMA 20" pass={put.spotBelowEma20} size={size} />
+        <EmaFilterBadge label="EMA 20 < EMA 50" pass={put.ema20BelowEma50} size={size} />
+      </div>
     </div>
   );
 }
@@ -142,33 +228,20 @@ function MetricCell({
 export default function StreamingPage() {
   const { connected, loginUrl } = useKite();
   const { confirm } = useConfirm();
-  const navigate = useNavigate();
   const [stream, setStream] = useState<NiftyStreamResponse | null>(null);
-  const [secondCandles, setSecondCandles] = useState<ParsedCandle[]>([]);
-  const [chain, setChain] = useState<OptionChainResponse | null>(null);
-  const [gemini, setGemini] = useState<GeminiSuggestionResponse | null>(null);
-  const [geminiError, setGeminiError] = useState("");
-  const [geminiWarning, setGeminiWarning] = useState("");
-  const [sessionData, setSessionData] = useState<NiftySessionResponse | null>(null);
+  const [candlesByInstrument, setCandlesByInstrument] = useState<Record<string, ParsedCandle[]>>(() =>
+    emptyInstrumentRecord([])
+  );
+  const [streamsByInstrument, setStreamsByInstrument] = useState<Record<string, NiftyStreamResponse>>({});
+  const [sessionsByInstrument, setSessionsByInstrument] = useState<
+    Record<string, NiftySessionResponse>
+  >({});
   const [pageFullscreen, setPageFullscreen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [formulaTrading, setFormulaTrading] = useState(false);
   const [formulaWatchStatus, setFormulaWatchStatus] = useState<Record<string, string>>({});
-  const [formulaVariant, setFormulaVariant] = useState<FormulaVariantId>(() => {
-    try {
-      return sessionStorage.getItem(STREAMING_FORMULA_VARIANT_KEY) === "2" ? 2 : 1;
-    } catch {
-      return 1;
-    }
-  });
-  const [aiStreaming, setAiStreaming] = useState(() => {
-    try {
-      return sessionStorage.getItem(STREAMING_AI_KEY) !== "off";
-    } catch {
-      return true;
-    }
-  });
+  const [formulaVariant, setFormulaVariant] = useState<FormulaVariantId>(() => parseStoredFormulaVariant());
   const [marketStreaming, setMarketStreaming] = useState(() => {
     try {
       return sessionStorage.getItem(STREAMING_LIVE_KEY) !== "off";
@@ -179,7 +252,7 @@ export default function StreamingPage() {
   const [streamInstrumentId, setStreamInstrumentId] = useState(() => {
     try {
       const saved = sessionStorage.getItem(STREAMING_INSTRUMENT_KEY);
-      return saved && getStreamInstrument(saved) ? saved : DEFAULT_STREAM_INSTRUMENT_ID;
+      return saved && isStreamInstrumentId(saved) ? saved : DEFAULT_STREAM_INSTRUMENT_ID;
     } catch {
       return DEFAULT_STREAM_INSTRUMENT_ID;
     }
@@ -188,11 +261,98 @@ export default function StreamingPage() {
     () => getStreamInstrument(streamInstrumentId),
     [streamInstrumentId]
   );
-  const geminiInflight = useRef(false);
-  const lastQuoteVolumeRef = useRef(0);
-  const sessionContextRef = useRef<NiftySessionResponse["session"]>(null);
-  const recent1sRef = useRef<string[]>([]);
-  const secondCandlesRef = useRef<ParsedCandle[]>([]);
+  const lastVolumeByInstrumentRef = useRef<Record<string, number>>(emptyInstrumentRecord(0));
+  const lastActivityVolumeRef = useRef(0);
+  const activityKiteKeyRef = useRef<string | null>(null);
+  const [activitySource, setActivitySource] = useState<string | null>(null);
+  const [activityMetrics, setActivityMetrics] = useState<ReturnType<typeof enrichQuoteMetrics> | null>(
+    null
+  );
+
+  const secondCandles = candlesByInstrument[streamInstrumentId] ?? [];
+  const sessionData = sessionsByInstrument[streamInstrumentId] ?? null;
+
+  useEffect(() => {
+    setStream(streamsByInstrument[streamInstrumentId] ?? null);
+  }, [streamInstrumentId, streamsByInstrument]);
+
+  useEffect(() => {
+    if (!connected || !selectedInstrument.activityUnderlying) {
+      activityKiteKeyRef.current = null;
+      setActivitySource(null);
+      setActivityMetrics(null);
+      lastActivityVolumeRef.current = 0;
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await fetch(
+          `/api/kite/nearest-future?underlying=${encodeURIComponent(selectedInstrument.activityUnderlying!)}`,
+          { credentials: "include" }
+        );
+        const json = await res.json();
+        if (!res.ok) return;
+        const data = json.data as { kiteKey: string; tradingsymbol: string };
+        activityKiteKeyRef.current = data.kiteKey;
+        setActivitySource(data.tradingsymbol);
+        lastActivityVolumeRef.current = 0;
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, [connected, selectedInstrument]);
+
+  const streamStatusByInstrument = useMemo(() => {
+    const status: Record<string, string> = {};
+    for (const inst of STREAM_INSTRUMENTS) {
+      if (!marketStreaming) {
+        status[inst.id] = "stream off";
+        continue;
+      }
+      const candles = candlesByInstrument[inst.id] ?? [];
+      if (candles.length === 0) {
+        status[inst.id] = "starting…";
+        continue;
+      }
+      const streamMinutes = aggregateSecondCandlesToMinutes(candles);
+      const minutes = mergeMinuteCandles(sessionsByInstrument[inst.id]?.candles ?? [], streamMinutes);
+      const tech = buildTechnicalSnapshot(minutes);
+      const rsiLabel = tech.rsi14 != null ? formatNumber(tech.rsi14, 1) : "—";
+      status[inst.id] = `RSI ${rsiLabel} · ${candles.length} × 1s`;
+    }
+    return status;
+  }, [candlesByInstrument, sessionsByInstrument, marketStreaming]);
+
+  const technicalsByInstrument = useMemo(() => {
+    const out: Record<
+      string,
+      {
+        rsi14: number | null;
+        vwap: number | null;
+        ema20: number | null;
+        ema50: number | null;
+        spot: number;
+      }
+    > = {};
+    for (const inst of STREAM_INSTRUMENTS) {
+      const candles = candlesByInstrument[inst.id] ?? [];
+      const streamMinutes = aggregateSecondCandlesToMinutes(candles);
+      const minutes = mergeMinuteCandles(sessionsByInstrument[inst.id]?.candles ?? [], streamMinutes);
+      const tech = buildTechnicalSnapshot(minutes);
+      const spot =
+        candles[candles.length - 1]?.close ??
+        streamsByInstrument[inst.id]?.quote.last_price ??
+        0;
+      out[inst.id] = {
+        rsi14: tech.rsi14,
+        vwap: tech.vwap,
+        ema20: tech.ema20,
+        ema50: tech.ema50,
+        spot,
+      };
+    }
+    return out;
+  }, [candlesByInstrument, sessionsByInstrument, streamsByInstrument]);
 
   const streamMinuteCandles = useMemo(
     () => aggregateSecondCandlesToMinutes(secondCandles),
@@ -204,171 +364,137 @@ export default function StreamingPage() {
   );
   const technicals = useMemo(() => buildTechnicalSnapshot(minuteCandles), [minuteCandles]);
   const rsiSeries = useMemo(() => buildRsiSeries(minuteCandles, 14), [minuteCandles]);
+  const chartSpot = stream?.quote.last_price ?? minuteCandles[minuteCandles.length - 1]?.close ?? 0;
 
   const liveMetrics = useMemo(() => {
+    const lastSecond = secondCandles[secondCandles.length - 1];
     const last = minuteCandles[minuteCandles.length - 1];
+    const book = stream?.quote;
+    const activity = activityMetrics?.orderBook;
+    const useFutureActivity = Boolean(activitySource && activityMetrics);
+    const base = useFutureActivity
+      ? {
+          volumePerSecond: activityMetrics!.volumePerSecond,
+          cumulativeVolume: activityMetrics!.cumulativeVolume,
+          buyBookOrders: activity!.buyOrders,
+          sellBookOrders: activity!.sellOrders,
+          totalBookOrders: activity!.totalOrders,
+          buyBookQuantity: activity!.buyQuantity,
+          sellBookQuantity: activity!.sellQuantity,
+        }
+      : {
+          volumePerSecond: lastSecond?.volume ?? book?.volumePerSecond ?? 0,
+          cumulativeVolume: book?.cumulativeVolume ?? book?.volume ?? 0,
+          buyBookOrders: book?.buyOrders ?? 0,
+          sellBookOrders: book?.sellOrders ?? 0,
+          totalBookOrders: book?.totalBookOrders ?? 0,
+          buyBookQuantity: book?.buyBookQuantity ?? 0,
+          sellBookQuantity: book?.sellBookQuantity ?? 0,
+        };
     if (!last) {
-      return { volumePerMinute: 0, priceMove: 0, sessionHigh: 0, sessionLow: 0 };
+      return {
+        ...base,
+        volumePerMinute: 0,
+        priceMove: 0,
+        sessionHigh: 0,
+        sessionLow: 0,
+      };
     }
     return {
+      ...base,
       volumePerMinute: last.volume,
       priceMove: last.close - last.open,
       sessionHigh: Math.max(...minuteCandles.map((c) => c.high)),
       sessionLow: Math.min(...minuteCandles.map((c) => c.low)),
     };
-  }, [minuteCandles]);
+  }, [minuteCandles, secondCandles, stream?.quote, activityMetrics, activitySource]);
 
-  const sessionFibLevels = useMemo(() => {
-    if (liveMetrics.sessionHigh <= liveMetrics.sessionLow) return [];
-    return calculateFibonacciRetracement(liveMetrics.sessionHigh, liveMetrics.sessionLow);
-  }, [liveMetrics.sessionHigh, liveMetrics.sessionLow]);
+  const loadAllSessions = useCallback(async () => {
+    if (!connected) return;
+    await Promise.all(
+      STREAM_INSTRUMENTS.map(async (inst) => {
+        try {
+          const res = await fetch(
+            `/api/kite/instrument-session?instrument=${encodeURIComponent(inst.kiteKey)}`,
+            { credentials: "include" }
+          );
+          const json = await res.json();
+          if (!res.ok) return;
+          setSessionsByInstrument((prev) => ({
+            ...prev,
+            [inst.id]: json.data as NiftySessionResponse,
+          }));
+        } catch {
+          /* keep prior session */
+        }
+      })
+    );
+  }, [connected]);
 
-  useEffect(() => {
-    secondCandlesRef.current = secondCandles;
-    recent1sRef.current = compactRecent1s(secondCandles);
-  }, [secondCandles]);
-
-  useEffect(() => {
-    sessionContextRef.current = sessionData?.session ?? null;
-  }, [sessionData]);
-
-  const loadStream = useCallback(async () => {
+  const pollAllMarkets = useCallback(async () => {
     if (!connected || !marketStreaming) return;
-    const instrument = selectedInstrument.kiteKey;
+    const quoteKeys = [
+      ...STREAM_INSTRUMENTS.map((item) => item.kiteKey),
+      ...(activityKiteKeyRef.current ? [activityKiteKeyRef.current] : []),
+    ];
+    const keys = [...new Set(quoteKeys)].join(",");
     try {
       const res = await fetch(
-        `/api/kite/quote-stream?instrument=${encodeURIComponent(instrument)}`,
+        `/api/kite/quotes?instruments=${encodeURIComponent(keys)}`,
         { credentials: "include" }
       );
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "Failed to load stream");
-      setStream(json.data as NiftyStreamResponse);
+      if (!res.ok) throw new Error(json.error ?? "Failed to load quotes");
+
+      const prevVolumes = { ...lastVolumeByInstrumentRef.current };
+      const prevActivityVol = lastActivityVolumeRef.current;
+      const activityKey = activityKiteKeyRef.current;
+      const activityQuote = activityKey
+        ? (json.data?.[activityKey] as RawKiteQuote | undefined)
+        : undefined;
+
+      if (activityQuote) {
+        setActivityMetrics(enrichQuoteMetrics(activityQuote, prevActivityVol));
+        lastActivityVolumeRef.current = activityQuote.volume ?? 0;
+      }
+
+      setCandlesByInstrument((prev) => {
+        const next = { ...prev };
+        for (const inst of STREAM_INSTRUMENTS) {
+          const quote = json.data?.[inst.kiteKey] as RawKiteQuote | undefined;
+          if (!quote?.last_price) continue;
+          const spotVol = quote.volume ?? 0;
+          const useFutureVol = Boolean(inst.activityUnderlying && spotVol <= 0 && activityQuote);
+          const candleVol = useFutureVol ? (activityQuote!.volume ?? 0) : spotVol;
+          const candlePrevVol = useFutureVol
+            ? prevActivityVol
+            : (lastVolumeByInstrumentRef.current[inst.id] ?? 0);
+          next[inst.id] = appendSecondCandle(
+            prev[inst.id] ?? [],
+            quote.last_price,
+            candleVol,
+            candlePrevVol
+          );
+          if (!useFutureVol) {
+            lastVolumeByInstrumentRef.current[inst.id] = spotVol;
+          }
+        }
+        return next;
+      });
+
+      setStreamsByInstrument((prev) => ({
+        ...prev,
+        ...quotesToStreamsByInstrument(json.data ?? {}, prevVolumes),
+      }));
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Stream unavailable");
     }
-  }, [connected, marketStreaming, selectedInstrument.kiteKey]);
-
-  const loadSession = useCallback(async () => {
-    if (!connected) return;
-    const instrument = selectedInstrument.kiteKey;
-    try {
-      const res = await fetch(
-        `/api/kite/instrument-session?instrument=${encodeURIComponent(instrument)}`,
-        { credentials: "include" }
-      );
-      const json = await res.json();
-      if (!res.ok) return;
-      setSessionData(json.data as NiftySessionResponse);
-    } catch {
-      /* keep last session snapshot */
-    }
-  }, [connected, selectedInstrument.kiteKey]);
-
-  useEffect(() => {
-    if (!marketStreaming || !stream?.quote.last_price) return;
-    const vol = stream.quote.volume ?? 0;
-    setSecondCandles((prev) =>
-      appendSecondCandle(prev, stream.quote.last_price, vol, lastQuoteVolumeRef.current)
-    );
-    lastQuoteVolumeRef.current = vol;
-  }, [stream, marketStreaming]);
-
-  useEffect(() => {
-    if (!connected) {
-      setSecondCandles([]);
-      lastQuoteVolumeRef.current = 0;
-    }
-  }, [connected]);
-
-  const loadChain = useCallback(async () => {
-    if (!connected) return;
-    try {
-      const res = await fetch(
-        `/api/kite/option-chain?underlying=${encodeURIComponent(streamInstrumentId)}`,
-        { credentials: "include" }
-      );
-      const json = await res.json();
-      if (!res.ok) return;
-      setChain(json.data as OptionChainResponse);
-    } catch {
-      setChain(null);
-    }
-  }, [connected, streamInstrumentId]);
-
-  const loadGemini = useCallback(async () => {
-    if (
-      !connected ||
-      !marketStreaming ||
-      !aiStreaming ||
-      geminiInflight.current ||
-      !stream ||
-      secondCandlesRef.current.length === 0
-    ) {
-      return;
-    }
-    geminiInflight.current = true;
-    try {
-      const atmRow = chain?.chain.find((row) => row.isAtm);
-      const res = await fetch("/api/gemini/trade-suggestion", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          underlyingId: streamInstrumentId,
-          instrumentLabel: selectedInstrument.label,
-          chainSymbol: selectedInstrument.chainSymbol,
-          chainExchange: selectedInstrument.chainExchange,
-          spot: stream.quote.last_price,
-          change: stream.quote.change,
-          changePercent: stream.quote.change_percent,
-          rsi: technicals.rsi14,
-          trend: technicals.trend,
-          emaCross: technicals.emaCross,
-          macdHistogram: technicals.macd?.histogram ?? null,
-          vwap: technicals.vwap,
-          volumePerSecond: liveMetrics.volumePerMinute,
-          sessionHigh: liveMetrics.sessionHigh,
-          sessionLow: liveMetrics.sessionLow,
-          fibLevels: sessionFibLevels.map((f) => ({ label: f.label, price: f.price })),
-          atmStrike: chain?.atmStrike ?? null,
-          expiry: chain?.expiry ?? null,
-          atmCeLtp: atmRow?.ce?.quote?.last_price ?? null,
-          atmPeLtp: atmRow?.pe?.quote?.last_price ?? null,
-          sessionContext: sessionContextRef.current,
-          recent1s: recent1sRef.current,
-          lastCandle: secondCandlesRef.current[secondCandlesRef.current.length - 1] ?? null,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "Gemini unavailable");
-      const data = json.data as GeminiSuggestionResponse;
-      setGemini(data);
-      setGeminiError("");
-      setGeminiWarning(data.stale ? (data.warning ?? "Showing last AI suggestion") : (data.warning ?? ""));
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Gemini unavailable";
-      if (gemini) {
-        setGeminiWarning(message);
-        setGeminiError("");
-      } else {
-        setGeminiError(message);
-      }
-    } finally {
-      geminiInflight.current = false;
-    }
-  }, [connected, marketStreaming, aiStreaming, streamInstrumentId, selectedInstrument, stream, chain, technicals, liveMetrics, sessionFibLevels, gemini]);
+  }, [connected, marketStreaming]);
 
   const selectStreamInstrument = (id: string) => {
     if (id === streamInstrumentId) return;
     setStreamInstrumentId(id);
-    setSecondCandles([]);
-    lastQuoteVolumeRef.current = 0;
-    setStream(null);
-    setSessionData(null);
-    setGemini(null);
-    setGeminiError("");
-    setGeminiWarning("");
     try {
       sessionStorage.setItem(STREAMING_INSTRUMENT_KEY, id);
     } catch {
@@ -377,16 +503,18 @@ export default function StreamingPage() {
   };
 
   useEffect(() => {
-    if (!connected || !marketStreaming || !aiStreaming) return;
-    const interval = window.setInterval(loadGemini, REFRESH_MS);
-    loadGemini();
-    return () => window.clearInterval(interval);
-  }, [connected, marketStreaming, aiStreaming, streamInstrumentId, loadGemini]);
-
-  useEffect(() => {
-    if (!connected || !marketStreaming) return;
-    void loadChain();
-  }, [connected, marketStreaming, streamInstrumentId, loadChain]);
+    if (!connected) {
+      setCandlesByInstrument(emptyInstrumentRecord([]));
+      setStreamsByInstrument({});
+      setSessionsByInstrument({});
+      lastVolumeByInstrumentRef.current = emptyInstrumentRecord(0);
+      lastActivityVolumeRef.current = 0;
+      activityKiteKeyRef.current = null;
+      setActivitySource(null);
+      setActivityMetrics(null);
+      setStream(null);
+    }
+  }, [connected]);
 
   const toggleMarketStreaming = () => {
     setMarketStreaming((prev) => {
@@ -403,35 +531,24 @@ export default function StreamingPage() {
     });
   };
 
-  const toggleAiStreaming = () => {
-    setAiStreaming((prev) => {
-      const next = !prev;
-      try {
-        sessionStorage.setItem(STREAMING_AI_KEY, next ? "on" : "off");
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  };
-
   useEffect(() => {
     if (!connected || !marketStreaming) return;
     setLoading(true);
-    Promise.all([loadStream(), loadChain(), loadSession()]).finally(() => setLoading(false));
-  }, [connected, marketStreaming, loadStream, loadChain, loadSession]);
+    Promise.all([pollAllMarkets(), loadAllSessions()]).finally(() => setLoading(false));
+  }, [connected, marketStreaming, pollAllMarkets, loadAllSessions]);
 
   useEffect(() => {
     if (!connected || !marketStreaming) return;
-    const interval = window.setInterval(loadSession, SESSION_REFRESH_MS);
+    const interval = window.setInterval(loadAllSessions, SESSION_REFRESH_MS);
     return () => window.clearInterval(interval);
-  }, [connected, marketStreaming, loadSession]);
+  }, [connected, marketStreaming, loadAllSessions]);
 
   useEffect(() => {
     if (!connected || !marketStreaming) return;
-    const interval = window.setInterval(loadStream, REFRESH_MS);
+    const interval = window.setInterval(pollAllMarkets, REFRESH_MS);
+    void pollAllMarkets();
     return () => window.clearInterval(interval);
-  }, [connected, marketStreaming, loadStream]);
+  }, [connected, marketStreaming, pollAllMarkets]);
 
   useEffect(() => {
     if (!pageFullscreen) return;
@@ -445,7 +562,7 @@ export default function StreamingPage() {
   const handleStartFormulaTrading = async () => {
     if (!connected || !marketStreaming) return;
     const ok = await confirm({
-      title: `Start ${FORMULA_VARIANTS[formulaVariant].name}?`,
+      title: `Start ${formulaDisplayName(formulaVariant)}?`,
       body: <FormulaTradingConfirmBody variant={formulaVariant} />,
       confirmLabel: "Start trading",
       tone: "danger",
@@ -472,175 +589,34 @@ export default function StreamingPage() {
     }
   };
 
-  const tradeUrl = gemini?.suggestion
-    ? legToUrl(gemini.suggestion.action, gemini.suggestion.strike)
-    : null;
-  const autoTradeUrl = gemini?.suggestion
-    ? legToUrl(gemini.suggestion.action, gemini.suggestion.strike, true)
-    : null;
-
-  const handleStartAutoTrade = async () => {
-    if (!gemini?.suggestion || !autoTradeUrl) return;
-    const { action, strike } = gemini.suggestion;
-    if (action === "WAIT" || !strike) return;
-    const optionLtp = optionLtpForAction(chain, action, strike);
-    const ok = await confirm({
-      title: "Start AI auto-trade?",
-      body: (
-        <>
-          <p>
-            {action.replace(/_/g, " ")} @ strike {formatNumber(strike)}
-            {optionLtp > 0 ? ` · LTP ${formatNumber(optionLtp)}` : ""}
-          </p>
-          <p>
-            AI will wait for the right entry, place a REAL Zerodha order, and exit at target/stop.
-          </p>
-          <p className="confirm-note">REAL Zerodha orders — real money.</p>
-        </>
-      ),
-      confirmLabel: "Start auto-trade",
-      tone: "danger",
-    });
-    if (!ok) return;
-    saveAutoTradePlan(buildAutoTradePlan(gemini.suggestion, optionLtp));
-    navigate(autoTradeUrl);
-  };
-
-  const renderGeminiPanel = () => (
-    <div className="stream-ai-panel-inner">
-      <div className="stream-ai-head">
-        <div className="stream-ai-brand">
-          <div className="stream-ai-icon-wrap">
-            <Brain size={18} />
-          </div>
-          <div>
-            <p className="stream-ai-title">Gemini AI</p>
-            <p className="stream-ai-subtitle">{selectedInstrument.label} options · 3.5 Flash</p>
-          </div>
-        </div>
-        <label className="stream-ai-toggle" title={aiStreaming ? "Pause AI" : "Resume AI"}>
-          <span className="stream-ai-toggle-label">{aiStreaming ? "On" : "Off"}</span>
-          <input
-            type="checkbox"
-            checked={aiStreaming}
-            onChange={toggleAiStreaming}
-            disabled={!marketStreaming}
-            aria-label="Toggle Gemini AI"
-          />
-          <span className="stream-ai-toggle-track" aria-hidden />
-        </label>
-      </div>
-
-      {!marketStreaming && (
-        <div className="stream-ai-notice stream-ai-notice-warning">
-          Stream is paused. Turn on live data to refresh AI context.
-        </div>
-      )}
-
-      {!aiStreaming && (
-        <div className="stream-ai-notice stream-ai-notice-warning">
-          AI paused — no API calls. Toggle <strong>On</strong> to resume.
-        </div>
-      )}
-
-      {geminiError && aiStreaming && (
-        <div className="stream-ai-notice stream-ai-notice-error">{geminiError}</div>
-      )}
-      {geminiWarning && !geminiError && aiStreaming && (
-        <div className="stream-ai-notice stream-ai-notice-warning">{geminiWarning}</div>
-      )}
-
-      {!aiStreaming && gemini?.suggestion ? (
-        <div className="stream-ai-content">
-          <span className="stream-ai-tag">Last suggestion</span>
-          <p className="stream-ai-summary">{gemini.suggestion.summary}</p>
-          <p className="text-muted" style={{ fontSize: "0.8125rem" }}>
-            {gemini.suggestion.action.replace(/_/g, " ")}
-            {gemini.suggestion.strike ? ` · ${formatNumber(gemini.suggestion.strike, 0)}` : ""}
-          </p>
-        </div>
-      ) : gemini?.suggestion ? (
-        <div className="stream-ai-content">
-          <div className="stream-ai-tags">
-            <span
-              className={cn(
-                "stream-ai-tag",
-                gemini.suggestion.bias === "bullish" && "stream-ai-tag-bull",
-                gemini.suggestion.bias === "bearish" && "stream-ai-tag-bear"
-              )}
-            >
-              {gemini.suggestion.bias}
-            </span>
-            <span className="stream-ai-tag">{gemini.suggestion.confidence}</span>
-            <span className="stream-ai-tag">{gemini.suggestion.action.replace(/_/g, " ")}</span>
-            {gemini.cached && <span className="stream-ai-tag">Cached</span>}
-          </div>
-
-          <p className="stream-ai-summary">{gemini.suggestion.summary}</p>
-
-          {gemini.thinking && (
-            <div className="stream-ai-block">
-              <p className="stream-ai-block-title">Reasoning</p>
-              <p className="text-muted stream-ai-thinking-text">{gemini.thinking}</p>
-            </div>
-          )}
-
-          <div className="stream-ai-block">
-            <p className="stream-ai-block-title">Entry</p>
-            <p className="text-muted" style={{ fontSize: "0.8125rem" }}>{gemini.suggestion.entryPlan}</p>
-          </div>
-          <div className="stream-ai-block">
-            <p className="stream-ai-block-title">Risk</p>
-            <p className="text-muted" style={{ fontSize: "0.8125rem" }}>{gemini.suggestion.riskPlan}</p>
-          </div>
-
-          {autoTradeUrl && gemini.suggestion.action !== "WAIT" && (
-            <button type="button" className="btn btn-primary btn-full" onClick={handleStartAutoTrade}>
-              Start AI Auto Trade
-            </button>
-          )}
-          {tradeUrl && (
-            <Link to={tradeUrl} className="btn btn-secondary btn-full mt-2">
-              Manual Trade Ticket
-            </Link>
-          )}
-
-          <p className="text-muted mt-3" style={{ fontSize: "0.6875rem" }}>
-            {gemini.model}
-            {gemini.updatedAt ? ` · ${formatIndianDateTime(new Date(gemini.updatedAt))}` : ""}
-          </p>
-        </div>
-      ) : aiStreaming ? (
-        <div className="stream-ai-empty">
-          <Sparkles size={28} className="stream-chart-empty-icon" />
-          <p>Analyzing {selectedInstrument.label}…</p>
-        </div>
-      ) : (
-        <div className="stream-ai-empty">
-          <Brain size={28} className="stream-chart-empty-icon" />
-          <p>Enable AI for live {selectedInstrument.label} trade suggestions.</p>
-        </div>
-      )}
-    </div>
-  );
-
   const renderSymbolStrip = () => (
     <section className="stream-symbols-section">
       <div className="stream-symbols-heading">
         <p className="stream-symbols-title">
-          {formulaTrading ? "Live formula scan · all symbols" : "Markets"}
+          {formulaTrading
+            ? formulaIsManual(formulaVariant)
+              ? `${formulaDisplayName(formulaVariant)} · pick Call or Put`
+              : "Live formula scan · all symbols"
+            : marketStreaming
+              ? "All markets streaming · tap to chart"
+              : "Markets"}
         </p>
-        {formulaTrading && (
+        {(formulaTrading || marketStreaming) && (
           <span className="stream-live-pill">
             <span className="stream-live-dot" />
-            {FORMULA_VARIANTS[formulaVariant].name} active
+            {formulaTrading ? `${formulaDisplayName(formulaVariant)} active` : `${STREAM_INSTRUMENTS.length} × live`}
           </span>
         )}
       </div>
       <div className="stream-symbols-grid">
         {STREAM_INSTRUMENTS.map((item) => {
-          const scan = parseSymbolScan(formulaWatchStatus[item.id]);
+          const statusLine = formulaTrading
+            ? formulaWatchStatus[item.id]
+            : streamStatusByInstrument[item.id];
+          const scan = parseSymbolScan(statusLine);
           const rsiNum = scan.rsi ? Number(scan.rsi) : null;
+          const instTech = technicalsByInstrument[item.id];
+          const showLiveMeta = formulaTrading || marketStreaming;
           return (
             <button
               key={item.id}
@@ -653,7 +629,7 @@ export default function StreamingPage() {
               onClick={() => selectStreamInstrument(item.id)}
             >
               <span className="stream-symbol-name">{item.label}</span>
-              {formulaTrading ? (
+              {showLiveMeta ? (
                 <>
                   {scan.signal && <span className="stream-symbol-badge">Signal</span>}
                   {scan.rsi && (
@@ -671,6 +647,19 @@ export default function StreamingPage() {
                   {!scan.rsi && scan.hint && (
                     <span className="stream-symbol-meta">{scan.hint}</span>
                   )}
+                  {formulaUsesEma(formulaVariant) && instTech && (
+                    <EmaFormulaFiltersPanel
+                      spot={instTech.spot}
+                      ema20={instTech.ema20}
+                      ema50={instTech.ema50}
+                      compact
+                    />
+                  )}
+                  {formulaUsesVwap(formulaVariant) && instTech?.vwap != null && instTech.spot > 0 && (
+                    <span className="stream-symbol-meta">
+                      Spot {instTech.spot > instTech.vwap ? ">" : "<"} VWAP {formatNumber(instTech.vwap)}
+                    </span>
+                  )}
                 </>
               ) : (
                 <span className="stream-symbol-meta">{item.chainExchange} · tap to chart</span>
@@ -686,7 +675,7 @@ export default function StreamingPage() {
     <header className="stream-hero">
       <div className="stream-hero-text">
         <h1>Market Streaming</h1>
-        <p>Real-time 1-second charts · multi-symbol formula · AI on every market</p>
+        <p>Real-time 1-second charts · multi-symbol formula trading</p>
       </div>
       {connected && (
         <div className="stream-toolbar">
@@ -703,6 +692,16 @@ export default function StreamingPage() {
                 {formatNumber(stream.quote.change_percent)}%
               </span>
             )}
+            {marketStreaming && stream && (
+              <>
+                <span className="stream-activity-chip" title="Volume traded in the last second">
+                  Vol/s {formatNumber(liveMetrics.volumePerSecond, 0)}
+                </span>
+                <span className="stream-activity-chip is-book" title="Open orders in the book (buy + sell)">
+                  Book {formatNumber(liveMetrics.totalBookOrders, 0)}
+                </span>
+              </>
+            )}
             <label className="stream-ai-toggle" title="Toggle live quotes">
               <span className="stream-ai-toggle-label">Stream</span>
               <input
@@ -713,17 +712,6 @@ export default function StreamingPage() {
               />
               <span className="stream-ai-toggle-track" aria-hidden />
             </label>
-            <label className="stream-ai-toggle stream-ai-toggle-accent" title="Gemini AI assistant">
-              <span className="stream-ai-toggle-label">AI</span>
-              <input
-                type="checkbox"
-                checked={aiStreaming}
-                onChange={toggleAiStreaming}
-                disabled={!marketStreaming}
-                aria-label="Toggle Gemini AI"
-              />
-              <span className="stream-ai-toggle-track" aria-hidden />
-            </label>
           </div>
 
           <div className="stream-toolbar-divider" aria-hidden />
@@ -731,18 +719,22 @@ export default function StreamingPage() {
           <div className="stream-toolbar-group">
             <span className="stream-toolbar-label">Formula</span>
             <div className="stream-segment">
-              {([1, 2] as const).map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  className={cn("stream-segment-btn", formulaVariant === id && "is-active")}
-                  onClick={() => selectFormulaVariant(id)}
-                  disabled={formulaTrading}
-                  title={FORMULA_VARIANTS[id].shortLabel}
-                >
-                  {FORMULA_VARIANTS[id].name}
-                </button>
-              ))}
+              {([1, 2, 3, 4] as const).map((id) => {
+                const variant = FORMULA_VARIANTS[id];
+                return (
+                  <button
+                    key={variant.id}
+                    type="button"
+                    className={cn("stream-segment-btn", formulaVariant === variant.id && "is-active")}
+                    onClick={() => selectFormulaVariant(variant.id)}
+                    disabled={formulaTrading}
+                    title={variant.shortLabel}
+                  >
+                    <span className="stream-segment-name">{variant.name}</span>
+                    <span className="stream-segment-risk">({variant.riskTag})</span>
+                  </button>
+                );
+              })}
             </div>
             <button
               type="button"
@@ -750,7 +742,7 @@ export default function StreamingPage() {
               onClick={handleStartFormulaTrading}
               disabled={formulaTrading || !marketStreaming}
             >
-              {formulaTrading ? "Running…" : `Start ${FORMULA_VARIANTS[formulaVariant].name}`}
+              {formulaTrading ? "Running…" : `Start ${formulaDisplayName(formulaVariant)}`}
             </button>
           </div>
 
@@ -773,7 +765,7 @@ export default function StreamingPage() {
     if (!connected) {
       return (
         <div className="card">
-          <p className="text-muted">Connect Zerodha to stream Nifty 50 candles and AI suggestions.</p>
+          <p className="text-muted">Connect Zerodha to stream live charts and run formula trading.</p>
           {loginUrl && (
             <a href={loginUrl} className="mt-4" style={{ display: "inline-block" }}>
               <button className="btn btn-primary">Connect Kite</button>
@@ -783,7 +775,7 @@ export default function StreamingPage() {
       );
     }
 
-    if (loading && !stream) {
+    if (loading && secondCandles.length === 0 && !stream) {
       return (
         <div className="spinner-center" style={{ minHeight: "16rem" }}>
           <div className="spinner spinner-sm" />
@@ -792,21 +784,30 @@ export default function StreamingPage() {
     }
 
     return (
-      <div className="stream-layout">
+      <div className="stream-layout stream-layout-single">
         <div className="stream-main">
           {error && <div className="alert alert-error">{error}</div>}
 
           {renderSymbolStrip()}
 
-          {formulaTrading && (
-            <FormulaOrchestrator
-              formulaVariant={formulaVariant}
-              marketStreaming={marketStreaming}
-              connected={connected}
-              onStop={handleStopFormula}
-              onWatchUpdate={setFormulaWatchStatus}
-            />
-          )}
+          {formulaTrading &&
+            (formulaIsManual(formulaVariant) ? (
+              <Formula4ManualRunner
+                streamInstrumentId={streamInstrumentId}
+                spot={chartSpot}
+                marketStreaming={marketStreaming}
+                connected={connected}
+                onStop={handleStopFormula}
+              />
+            ) : (
+              <FormulaOrchestrator
+                formulaVariant={formulaVariant}
+                marketStreaming={marketStreaming}
+                connected={connected}
+                onStop={handleStopFormula}
+                onWatchUpdate={setFormulaWatchStatus}
+              />
+            ))}
 
           <article className="stream-chart-card">
             <div className="stream-chart-head">
@@ -833,6 +834,59 @@ export default function StreamingPage() {
               )}
             </div>
 
+            {marketStreaming && (
+              <section className="stream-activity-panel" aria-label="Live volume and order book">
+                <div className="stream-activity-head">
+                  <Activity size={15} aria-hidden />
+                  <span className="stream-activity-title">Live activity</span>
+                  <span className="stream-activity-hint">
+                    {activitySource
+                      ? `Volume & book from ${activitySource} · spot chart = index`
+                      : "Kite quote · 1s refresh"}
+                  </span>
+                </div>
+                <div className="stream-activity-grid">
+                  <div className="stream-activity-stat is-highlight">
+                    <span className="stream-activity-label">Volume / sec</span>
+                    <span className="stream-activity-value">{formatNumber(liveMetrics.volumePerSecond, 0)}</span>
+                    <span className="stream-activity-sub">
+                      Δ from session volume · 1m bar {formatNumber(liveMetrics.volumePerMinute, 0)}
+                    </span>
+                  </div>
+                  <div className="stream-activity-stat">
+                    <span className="stream-activity-label">Session volume</span>
+                    <span className="stream-activity-value">{formatNumber(liveMetrics.cumulativeVolume, 0)}</span>
+                    <span className="stream-activity-sub">Cumulative today</span>
+                  </div>
+                  <div className="stream-activity-stat is-buy">
+                    <span className="stream-activity-label">Buy book</span>
+                    <span className="stream-activity-value">{formatNumber(liveMetrics.buyBookOrders, 0)} orders</span>
+                    <span className="stream-activity-sub">
+                      Qty {formatNumber(liveMetrics.buyBookQuantity, 0)}
+                    </span>
+                  </div>
+                  <div className="stream-activity-stat is-sell">
+                    <span className="stream-activity-label">Sell book</span>
+                    <span className="stream-activity-value">{formatNumber(liveMetrics.sellBookOrders, 0)} orders</span>
+                    <span className="stream-activity-sub">
+                      Qty {formatNumber(liveMetrics.sellBookQuantity, 0)}
+                    </span>
+                  </div>
+                  <div className="stream-activity-stat">
+                    <span className="stream-activity-label">Total book orders</span>
+                    <span className="stream-activity-value">{formatNumber(liveMetrics.totalBookOrders, 0)}</span>
+                    <span className="stream-activity-sub">
+                      {activitySource
+                        ? `Nearest Nifty future · top 5 book levels`
+                        : liveMetrics.totalBookOrders === 0
+                          ? "No depth on this symbol"
+                          : "Top 5 levels each side"}
+                    </span>
+                  </div>
+                </div>
+              </section>
+            )}
+
             <div className="stream-chart-body">
               {secondCandles.length > 0 ? (
                 <StreamingChart
@@ -854,8 +908,29 @@ export default function StreamingPage() {
               )}
             </div>
 
+            {formulaUsesEma(formulaVariant) && (
+              <div className="stream-ema-compare-bar">
+                <span className="stream-ema-compare-bar-label">Formula 3 EMA filters</span>
+                <EmaFormulaFiltersPanel spot={chartSpot} ema20={technicals.ema20} ema50={technicals.ema50} />
+              </div>
+            )}
+
             <div className="stream-metrics-ribbon">
+              <MetricCell label="Vol / Sec" value={formatNumber(liveMetrics.volumePerSecond, 0)} />
               <MetricCell label="Vol / Min" value={formatNumber(liveMetrics.volumePerMinute, 0)} />
+              <MetricCell
+                label="Book orders"
+                value={formatNumber(liveMetrics.totalBookOrders, 0)}
+                title={`Buy ${formatNumber(liveMetrics.buyBookOrders, 0)} · Sell ${formatNumber(liveMetrics.sellBookOrders, 0)}`}
+              />
+              <MetricCell
+                label="Buy book qty"
+                value={formatNumber(liveMetrics.buyBookQuantity, 0)}
+              />
+              <MetricCell
+                label="Sell book qty"
+                value={formatNumber(liveMetrics.sellBookQuantity, 0)}
+              />
               <MetricCell
                 label="Move / Min"
                 value={`${liveMetrics.priceMove >= 0 ? "+" : ""}${formatNumber(liveMetrics.priceMove, 2)}`}
@@ -874,14 +949,83 @@ export default function StreamingPage() {
                       : undefined
                 }
               />
-              <MetricCell label="SMA 9" value={technicals.sma9 != null ? formatNumber(technicals.sma9) : "—"} />
-              <MetricCell label="EMA 9" value={technicals.ema9 != null ? formatNumber(technicals.ema9) : "—"} />
-              <MetricCell label="VWAP" value={technicals.vwap != null ? formatNumber(technicals.vwap) : "—"} />
+              {formulaUsesEma(formulaVariant) && (
+                <>
+                  <MetricCell
+                    label={`EMA ${FORMULA_RULES.emaFastPeriod}`}
+                    value={technicals.ema20 != null ? formatNumber(technicals.ema20) : "—"}
+                  />
+                  <MetricCell
+                    label={`EMA ${FORMULA_RULES.emaSlowPeriod}`}
+                    value={technicals.ema50 != null ? formatNumber(technicals.ema50) : "—"}
+                  />
+                  {(() => {
+                    const call = formulaCallEmaFilters({
+                      spot: chartSpot,
+                      ema20: technicals.ema20,
+                      ema50: technicals.ema50,
+                    });
+                    const put = formulaPutEmaFilters({
+                      spot: chartSpot,
+                      ema20: technicals.ema20,
+                      ema50: technicals.ema50,
+                    });
+                    return (
+                      <>
+                        <MetricCell
+                          label="Call · Spot > EMA 20"
+                          value={call.spotAboveEma20 == null ? "—" : call.spotAboveEma20 ? "Pass" : "Fail"}
+                          valueClass={call.spotAboveEma20 == null ? undefined : call.spotAboveEma20 ? "text-up" : "text-down"}
+                        />
+                        <MetricCell
+                          label="Call · EMA 20 > EMA 50"
+                          value={call.ema20AboveEma50 == null ? "—" : call.ema20AboveEma50 ? "Pass" : "Fail"}
+                          valueClass={call.ema20AboveEma50 == null ? undefined : call.ema20AboveEma50 ? "text-up" : "text-down"}
+                        />
+                        <MetricCell
+                          label="Put · Spot < EMA 20"
+                          value={put.spotBelowEma20 == null ? "—" : put.spotBelowEma20 ? "Pass" : "Fail"}
+                          valueClass={put.spotBelowEma20 == null ? undefined : put.spotBelowEma20 ? "text-up" : "text-down"}
+                        />
+                        <MetricCell
+                          label="Put · EMA 20 < EMA 50"
+                          value={put.ema20BelowEma50 == null ? "—" : put.ema20BelowEma50 ? "Pass" : "Fail"}
+                          valueClass={put.ema20BelowEma50 == null ? undefined : put.ema20BelowEma50 ? "text-up" : "text-down"}
+                        />
+                      </>
+                    );
+                  })()}
+                </>
+              )}
+              {formulaUsesVwap(formulaVariant) && (
+                <>
+                  <MetricCell label="VWAP" value={technicals.vwap != null ? formatNumber(technicals.vwap) : "—"} />
+                  <MetricCell
+                    label="Spot vs VWAP"
+                    value={
+                      chartSpot > 0 && technicals.vwap != null
+                        ? `${chartSpot > technicals.vwap ? ">" : "<"} ${formatNumber(technicals.vwap)}`
+                        : "—"
+                    }
+                    valueClass={
+                      chartSpot > 0 && technicals.vwap != null
+                        ? chartSpot > technicals.vwap
+                          ? "text-up"
+                          : "text-down"
+                        : undefined
+                    }
+                  />
+                </>
+              )}
+              {!formulaUsesEma(formulaVariant) && !formulaUsesVwap(formulaVariant) && (
+                <MetricCell
+                  label="Filter"
+                  value={FORMULA_VARIANTS[formulaVariant].shortLabel}
+                />
+              )}
             </div>
           </article>
         </div>
-
-        <aside className="stream-ai-panel">{renderGeminiPanel()}</aside>
       </div>
     );
   };

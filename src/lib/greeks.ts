@@ -56,6 +56,38 @@ function blackScholes(
   return { price, delta, gamma, theta, vega };
 }
 
+export function blackScholesPrice(
+  spot: number,
+  strike: number,
+  timeToExpiryYears: number,
+  volatility: number,
+  type: "CE" | "PE",
+): number {
+  const { price } = blackScholes(spot, strike, timeToExpiryYears, volatility, type);
+  return Math.max(0, price);
+}
+
+export function timeToExpiryYearsFrom(dateIso: string, timeHm: string, expiry: string): number {
+  const entryMs = new Date(`${dateIso}T${timeHm}:00+05:30`).getTime();
+  const expMs = new Date(`${expiry}T15:30:00+05:30`).getTime();
+  const ms = Math.max(expMs - entryMs, 60_000);
+  return ms / (365.25 * 24 * 60 * 60 * 1000);
+}
+
+/** Model premium when historical option quotes are unavailable. */
+export function estimateOptionPremium(
+  spot: number,
+  strike: number,
+  dateIso: string,
+  timeHm: string,
+  expiry: string,
+  type: "CE" | "PE",
+  iv = 0.16,
+): number {
+  const tte = timeToExpiryYearsFrom(dateIso, timeHm, expiry);
+  return Number(blackScholesPrice(spot, strike, tte, iv, type).toFixed(2));
+}
+
 function impliedVolatility(
   marketPrice: number,
   spot: number,

@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AI_AUTO_TARGET_PROFIT_INR,
+  AI_LOOP_POLL_MS,
   calcPremiumPnl,
   defaultProduct,
   exitTransactionType,
+  placeKiteOrder,
+  shouldExitForProfitInr,
+  shouldExitPosition,
   type AutoTradeLogEntry,
   type AutoTradePhase,
   type AutoTradePlan,
-  placeKiteOrder,
-  shouldExitPosition,
 } from "@/lib/auto-trade";
+import type { StreamingGeminiPayload } from "@/lib/streaming-snapshot";
 import { useConfirm } from "@/contexts/confirm-context";
 import { buildProtectedMarketOrder } from "@/lib/kite-orders";
 import { legLabel, parseTradeLeg, productForExchange, type TradeLeg } from "@/lib/trade-calculations";
@@ -16,7 +20,6 @@ import type { EntryTimingApiResponse } from "@/types/auto-trade";
 import { cn, formatCurrency, formatNumber } from "@/lib/utils";
 
 const LTP_REFRESH_MS = 2000;
-const ENTRY_CHECK_MS = 15000;
 const EXIT_CHECK_MS = 1000;
 
 interface AutoTradeRunnerProps {
@@ -28,6 +31,9 @@ interface AutoTradeRunnerProps {
   lots: number;
   spotPrice: number;
   autoStart?: boolean;
+  loop?: boolean;
+  targetProfitInr?: number;
+  getStreamingSnapshot?: () => StreamingGeminiPayload | null;
   onCancel?: () => void;
 }
 
@@ -40,6 +46,9 @@ export function AutoTradeRunner({
   lots,
   spotPrice,
   autoStart = false,
+  loop = false,
+  targetProfitInr = AI_AUTO_TARGET_PROFIT_INR,
+  getStreamingSnapshot,
   onCancel,
 }: AutoTradeRunnerProps) {
   const { confirm } = useConfirm();
@@ -115,6 +124,8 @@ export function AutoTradeRunner({
           optionLtp: ltpRef.current,
           targetPremium: plan.targetPremium,
           stopPremium: plan.stopPremium,
+          streamingSnapshot: getStreamingSnapshot?.() ?? undefined,
+          exitTargetProfitInr: loop ? targetProfitInr : undefined,
         }),
       });
       const json = await res.json();
@@ -128,6 +139,11 @@ export function AutoTradeRunner({
       );
 
       if (data.signal === "ABORT") {
+        if (loop && runningRef.current) {
+          pushLog("Setup skipped — waiting for next AI entry", "warning");
+          setPhase("waiting");
+          return;
+        }
         setPhase("cancelled");
         pushLog("Trade aborted by AI — invalidation met", "warning");
         runningRef.current = false;
@@ -168,7 +184,7 @@ export function AutoTradeRunner({
       const msg = err instanceof Error ? err.message : "Entry check failed";
       pushLog(msg, "error");
     }
-  }, [plan, strike, leg, tradingsymbol, transactionType, product, quantity, pushLog]);
+  }, [plan, strike, leg, tradingsymbol, transactionType, product, quantity, pushLog, getStreamingSnapshot]);
 
   const squareOff = useCallback(
     async (reason: string) => {
@@ -190,6 +206,16 @@ export function AutoTradeRunner({
         );
         setExitOrderId(result.order_id);
         const pnl = calcPremiumPnl(leg, entryPremium, liveLtp > 0 ? liveLtp : ltp, quantity);
+        if (loop && runningRef.current) {
+          setPhase("waiting");
+          setEntryPremium(0);
+          setEntryOrderId("");
+          pushLog(
+            `Exit order ${result.order_id} · P&L ${formatCurrency(pnl)} · waiting for next trade`,
+            pnl >= 0 ? "success" : "error"
+          );
+          return;
+        }
         setPhase("completed");
         pushLog(
           `Exit order ${result.order_id} · P&L ${formatCurrency(pnl)}`,
@@ -204,15 +230,22 @@ export function AutoTradeRunner({
         runningRef.current = false;
       }
     },
-    [leg, entryPremium, ltp, tradingsymbol, product, quantity, pushLog, refreshLtp]
+    [leg, entryPremium, ltp, tradingsymbol, product, quantity, pushLog, refreshLtp, loop]
   );
 
   const checkExit = useCallback(async () => {
     if (phaseRef.current !== "in_position" || ltp <= 0 || entryPremium <= 0) return;
+    if (loop) {
+      const pnl = calcPremiumPnl(leg, entryPremium, ltp, quantity);
+      if (shouldExitForProfitInr(pnl, targetProfitInr)) {
+        await squareOff(`Target ${formatCurrency(targetProfitInr)} reached (${formatCurrency(pnl)})`);
+      }
+      return;
+    }
     const exitCheck = shouldExitPosition(leg, entryPremium, ltp, plan.targetPremium, plan.stopPremium);
     if (!exitCheck.exit) return;
     await squareOff(exitCheck.reason);
-  }, [leg, entryPremium, ltp, plan.targetPremium, plan.stopPremium, squareOff]);
+  }, [leg, entryPremium, ltp, plan.targetPremium, plan.stopPremium, squareOff, loop, targetProfitInr, quantity]);
 
   const start = useCallback(async (skipConfirm = false) => {
     if (plan.action === "WAIT") {
@@ -298,7 +331,7 @@ export function AutoTradeRunner({
   useEffect(() => {
     if (phase !== "waiting") return;
     checkEntry();
-    const timer = window.setInterval(checkEntry, ENTRY_CHECK_MS);
+    const timer = window.setInterval(checkEntry, AI_LOOP_POLL_MS);
     return () => window.clearInterval(timer);
   }, [phase, checkEntry]);
 

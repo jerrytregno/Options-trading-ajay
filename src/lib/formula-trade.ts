@@ -6,8 +6,10 @@ import type { OptionChainResponse } from "@/types/kite";
 
 export type FormulaOptionId = 1 | 2;
 
-/** Strategy variant: Formula 1 uses VWAP filter; Formula 2 is RSI-only. */
-export type FormulaVariantId = 1 | 2;
+/** Strategy variant: Formula 1 uses VWAP; Formula 2 is RSI-only; Formula 3 uses EMA trend; Formula 4 is manual CE/PE. */
+export type FormulaVariantId = 1 | 2 | 3 | 4;
+
+export type FormulaFilterType = "vwap" | "none" | "ema";
 
 export type FormulaPhase =
   | "idle"
@@ -37,12 +39,22 @@ export const FORMULA_RULES = {
   riskPerTradePct: 1,
   maxConsecutiveLosses: 2,
   cooldownCandles: 5,
+  emaFastPeriod: 20,
+  emaSlowPeriod: 50,
+  /** Formula 4: exit when net premium P&L reaches this (INR). */
+  manualTargetProfitInr: 50,
 } as const;
+
+export const FORMULA_4_TARGET_PROFIT_INR = FORMULA_RULES.manualTargetProfitInr;
 
 export interface FormulaVariantRule {
   id: FormulaVariantId;
   name: string;
+  displayName: string;
+  riskTag: string;
   shortLabel: string;
+  filterType: FormulaFilterType;
+  /** @deprecated use filterType === "vwap" */
   usesVwap: boolean;
 }
 
@@ -50,21 +62,51 @@ export const FORMULA_VARIANTS: Record<FormulaVariantId, FormulaVariantRule> = {
   1: {
     id: 1,
     name: "Formula 1",
+    displayName: "Formula 1 (Safest)",
+    riskTag: "Safest",
     shortLabel: "RSI + VWAP",
+    filterType: "vwap",
     usesVwap: true,
   },
   2: {
     id: 2,
     name: "Formula 2",
+    displayName: "Formula 2 (Risk)",
+    riskTag: "Risk",
     shortLabel: "RSI only",
+    filterType: "none",
+    usesVwap: false,
+  },
+  3: {
+    id: 3,
+    name: "Formula 3",
+    displayName: "Formula 3 (Safest EMI)",
+    riskTag: "Safest EMI",
+    shortLabel: "RSI + EMA trend",
+    filterType: "ema",
+    usesVwap: false,
+  },
+  4: {
+    id: 4,
+    name: "Formula 4",
+    displayName: "Formula 4 (Manual)",
+    riskTag: "Manual",
+    shortLabel: "Manual · +₹50",
+    filterType: "none",
     usesVwap: false,
   },
 };
+
+export function formulaDisplayName(variant: FormulaVariantId) {
+  return FORMULA_VARIANTS[variant].displayName;
+}
 
 /** Per-variant Call RSI thresholds (Put RSI shared via FORMULA_RULES.putRsiAbove). */
 export const FORMULA_VARIANT_RSI: Record<FormulaVariantId, { callRsiBelow: number }> = {
   1: { callRsiBelow: 30 },
   2: { callRsiBelow: 25 },
+  3: { callRsiBelow: 30 },
+  4: { callRsiBelow: 30 },
 };
 
 export interface FormulaOptionRule {
@@ -96,10 +138,24 @@ export interface FormulaEntryContext {
   recentRsi: number[];
   spot: number;
   vwap: number | null;
+  ema20: number | null;
+  ema50: number | null;
+}
+
+export function formulaFilterType(variant: FormulaVariantId): FormulaFilterType {
+  return FORMULA_VARIANTS[variant].filterType;
 }
 
 export function formulaUsesVwap(variant: FormulaVariantId) {
-  return FORMULA_VARIANTS[variant].usesVwap;
+  return FORMULA_VARIANTS[variant].filterType === "vwap";
+}
+
+export function formulaUsesEma(variant: FormulaVariantId) {
+  return FORMULA_VARIANTS[variant].filterType === "ema";
+}
+
+export function formulaIsManual(variant: FormulaVariantId) {
+  return variant === 4;
 }
 
 export function formulaCallRsiBelow(variant: FormulaVariantId) {
@@ -107,15 +163,61 @@ export function formulaCallRsiBelow(variant: FormulaVariantId) {
 }
 
 export function formulaCallEntryLabel(variant: FormulaVariantId) {
-  const usesVwap = formulaUsesVwap(variant);
   const rsi = `RSI < ${formulaCallRsiBelow(variant)} (1m · 1 bar) · ATM CE`;
-  return usesVwap ? `${rsi} · spot > VWAP` : rsi;
+  if (formulaUsesEma(variant)) {
+    return `${rsi} · spot > EMA ${FORMULA_RULES.emaFastPeriod} · EMA ${FORMULA_RULES.emaFastPeriod} > EMA ${FORMULA_RULES.emaSlowPeriod}`;
+  }
+  if (formulaUsesVwap(variant)) return `${rsi} · spot > VWAP`;
+  return rsi;
 }
 
 export function formulaPutEntryLabel(variant: FormulaVariantId) {
-  const usesVwap = formulaUsesVwap(variant);
   const rsi = `RSI > ${FORMULA_RULES.putRsiAbove} (1m · 1 bar) · ATM PE`;
-  return usesVwap ? `${rsi} · spot < VWAP` : rsi;
+  if (formulaUsesEma(variant)) {
+    return `${rsi} · spot < EMA ${FORMULA_RULES.emaFastPeriod} · EMA ${FORMULA_RULES.emaFastPeriod} < EMA ${FORMULA_RULES.emaSlowPeriod}`;
+  }
+  if (formulaUsesVwap(variant)) return `${rsi} · spot < VWAP`;
+  return rsi;
+}
+
+export function emaFilterMet(left: number, right: number, op: "gt" | "lt"): boolean | null {
+  if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0 || right <= 0) return null;
+  return op === "gt" ? left > right : left < right;
+}
+
+export function formulaCallEmaFilters(ctx: Pick<FormulaEntryContext, "spot" | "ema20" | "ema50">) {
+  const { spot, ema20, ema50 } = ctx;
+  return {
+    spotAboveEma20: ema20 != null ? emaFilterMet(spot, ema20, "gt") : null,
+    ema20AboveEma50: ema20 != null && ema50 != null ? emaFilterMet(ema20, ema50, "gt") : null,
+  };
+}
+
+export function formulaPutEmaFilters(ctx: Pick<FormulaEntryContext, "spot" | "ema20" | "ema50">) {
+  const { spot, ema20, ema50 } = ctx;
+  return {
+    spotBelowEma20: ema20 != null ? emaFilterMet(spot, ema20, "lt") : null,
+    ema20BelowEma50: ema20 != null && ema50 != null ? emaFilterMet(ema20, ema50, "lt") : null,
+  };
+}
+
+export function formulaCallTrendOk(ctx: Pick<FormulaEntryContext, "spot" | "ema20" | "ema50">) {
+  const { spotAboveEma20, ema20AboveEma50 } = formulaCallEmaFilters(ctx);
+  return spotAboveEma20 === true && ema20AboveEma50 === true;
+}
+
+export function formulaPutTrendOk(ctx: Pick<FormulaEntryContext, "spot" | "ema20" | "ema50">) {
+  const { spotBelowEma20, ema20BelowEma50 } = formulaPutEmaFilters(ctx);
+  return spotBelowEma20 === true && ema20BelowEma50 === true;
+}
+
+export function formulaEmaTrendLabel(
+  { spot, ema20, ema50 }: Pick<FormulaEntryContext, "spot" | "ema20" | "ema50">
+): "bull" | "bear" | "mixed" | "—" {
+  if (spot <= 0 || ema20 == null || ema50 == null) return "—";
+  if (formulaCallTrendOk({ spot, ema20, ema50 })) return "bull";
+  if (formulaPutTrendOk({ spot, ema20, ema50 })) return "bear";
+  return "mixed";
 }
 
 export function premiumProfitPct(entryPremium: number, currentPremium: number) {
@@ -132,7 +234,7 @@ export function rsiHeldForCandles(recentRsi: number[], count: number, compare: "
 }
 
 export function callEntrySignal(
-  { recentRsi, spot, vwap }: FormulaEntryContext,
+  { recentRsi, spot, vwap, ema20, ema50 }: FormulaEntryContext,
   variant: FormulaVariantId = 1
 ) {
   if (spot <= 0) return false;
@@ -143,13 +245,16 @@ export function callEntrySignal(
     formulaCallRsiBelow(variant)
   );
   if (!rsiOk) return false;
-  if (!formulaUsesVwap(variant)) return true;
-  if (vwap == null) return false;
-  return spot > vwap;
+  if (formulaUsesEma(variant)) return formulaCallTrendOk({ spot, ema20, ema50 });
+  if (formulaUsesVwap(variant)) {
+    if (vwap == null) return false;
+    return spot > vwap;
+  }
+  return true;
 }
 
 export function putEntrySignal(
-  { recentRsi, spot, vwap }: FormulaEntryContext,
+  { recentRsi, spot, vwap, ema20, ema50 }: FormulaEntryContext,
   variant: FormulaVariantId = 1
 ) {
   if (spot <= 0) return false;
@@ -160,9 +265,12 @@ export function putEntrySignal(
     FORMULA_RULES.putRsiAbove
   );
   if (!rsiOk) return false;
-  if (!formulaUsesVwap(variant)) return true;
-  if (vwap == null) return false;
-  return spot < vwap;
+  if (formulaUsesEma(variant)) return formulaPutTrendOk({ spot, ema20, ema50 });
+  if (formulaUsesVwap(variant)) {
+    if (vwap == null) return false;
+    return spot < vwap;
+  }
+  return true;
 }
 
 export function checkFormulaEntry(option: FormulaOptionId, ctx: FormulaEntryContext, variant: FormulaVariantId = 1) {
@@ -171,9 +279,14 @@ export function checkFormulaEntry(option: FormulaOptionId, ctx: FormulaEntryCont
 
 /** One position at a time — enter whichever option signals next (Call wins if both). */
 export function pickFormulaEntryOption(ctx: FormulaEntryContext, variant: FormulaVariantId = 1): FormulaOptionId | null {
+  if (formulaIsManual(variant)) return null;
   if (callEntrySignal(ctx, variant)) return 1;
   if (putEntrySignal(ctx, variant)) return 2;
   return null;
+}
+
+export function checkFormula4Exit(pnlInr: number) {
+  return pnlInr >= FORMULA_4_TARGET_PROFIT_INR;
 }
 
 export function getFormulaIstMinutes(date = new Date()) {

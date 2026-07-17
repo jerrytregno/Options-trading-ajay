@@ -3,6 +3,15 @@ export interface NiftyStreamQuote {
   change: number;
   change_percent: number;
   volume?: number;
+  /** Session cumulative volume from Kite. */
+  cumulativeVolume?: number;
+  /** Delta vs previous quote poll (~1s). */
+  volumePerSecond?: number;
+  buyOrders?: number;
+  sellOrders?: number;
+  totalBookOrders?: number;
+  buyBookQuantity?: number;
+  sellBookQuantity?: number;
   ohlc?: {
     open?: number;
     high?: number;
