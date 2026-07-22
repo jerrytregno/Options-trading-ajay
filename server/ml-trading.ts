@@ -4,7 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import { checkPython } from "./prediction.js";
-import { enrichMlTradingWithOptionTrades } from "./ml-trading-options.js";
+import { enrichBatchBacktestWithOptionTargets, enrichMlTradingWithOptionTrades } from "./ml-trading-options.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TRADING_AI_DIR = path.join(__dirname, "../trading-ai");
@@ -15,6 +15,38 @@ const META_PATH = path.join(ML_DATA_DIR, "meta.json");
 export const ML_TRADING_INTERVAL = "60minute";
 export const ML_TRADING_DAYS = 365;
 export const NIFTY_SPOT_KEY = "NSE:NIFTY 50";
+
+function formatKiteDateTime(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+export function getMlBatchBacktestCandleRange(tradingDays: number): { from: string; to: string } {
+  const to = new Date();
+  to.setHours(15, 29, 59, 0);
+  const from = new Date(to);
+  // N sessions + 365d lookback for earliest target + weekends/holidays buffer
+  from.setDate(from.getDate() - tradingDays - 400);
+  from.setHours(9, 15, 0, 0);
+  return { from: formatKiteDateTime(from), to: formatKiteDateTime(to) };
+}
+
+export function getMlBacktestDateRange(targetDate: string): { from: string; to: string } {
+  const target = new Date(`${targetDate}T12:00:00+05:30`);
+  if (Number.isNaN(target.getTime())) {
+    throw new Error("Invalid target date — use YYYY-MM-DD");
+  }
+  const start = new Date(target);
+  start.setDate(start.getDate() - 365);
+  start.setHours(9, 15, 0, 0);
+  const end = new Date(target);
+  end.setHours(15, 29, 59, 0);
+  return { from: formatKiteDateTime(start), to: formatKiteDateTime(end) };
+}
+
+function isValidIsoDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(new Date(`${value}T12:00:00+05:30`).getTime());
+}
 
 export type CandleFetcher = (
   accessToken: string,
@@ -195,6 +227,7 @@ export async function matchMlTradingPattern(
   accessToken: string,
   apiKey: string,
   topK = 8,
+  targetProfitInr?: number,
 ): Promise<Record<string, unknown>> {
   let candles: unknown[] = [];
   const range = deps.getHistoricalDateRange(10);
@@ -227,5 +260,101 @@ export async function matchMlTradingPattern(
   }
 
   const base = (json.data as Record<string, unknown>) ?? {};
-  return enrichMlTradingWithOptionTrades(accessToken, apiKey, base);
+  return enrichMlTradingWithOptionTrades(accessToken, apiKey, base, targetProfitInr);
+}
+
+export async function backtestMlTrading(
+  deps: MlTradingDeps,
+  accessToken: string,
+  targetDate: string,
+  topK = 8,
+  simulationBars = 1,
+): Promise<Record<string, unknown>> {
+  if (!isValidIsoDate(targetDate)) {
+    throw new Error("Invalid date — use YYYY-MM-DD");
+  }
+
+  const range = getMlBacktestDateRange(targetDate);
+  const { candles } = await deps.fetchCandles(
+    accessToken,
+    NIFTY_SPOT_KEY,
+    ML_TRADING_INTERVAL,
+    range.from,
+    range.to,
+  );
+
+  if (!Array.isArray(candles) || candles.length < 100) {
+    throw new Error(
+      `Not enough hourly candles for backtest (${candles?.length ?? 0}). Need Zerodha historical access for ${range.from} → ${range.to}.`,
+    );
+  }
+
+  const { code, stdout, stderr } = await runMlTradingPython({
+    action: "backtest",
+    candles,
+    targetDate,
+    topK,
+    simulationBars,
+  });
+  const json = parsePythonJson(stdout);
+  if (code !== 0 || !json.ok) {
+    throw new Error(String(json.error ?? stderr ?? "ML trading backtest failed"));
+  }
+
+  return (json.data as Record<string, unknown>) ?? {};
+}
+
+export async function backtestMlTradingBatch(
+  deps: MlTradingDeps,
+  accessToken: string,
+  apiKey: string,
+  days = 30,
+  topK = 8,
+  simulationBars = 1,
+  targetProfitInr?: number,
+): Promise<Record<string, unknown>> {
+  const safeDays = Math.min(Math.max(days, 5), 60);
+  const range = getMlBatchBacktestCandleRange(safeDays);
+
+  let candles: unknown[] = [];
+  try {
+    const fetched = await deps.fetchCandles(
+      accessToken,
+      NIFTY_SPOT_KEY,
+      ML_TRADING_INTERVAL,
+      range.from,
+      range.to,
+    );
+    candles = fetched.candles ?? [];
+  } catch {
+    // fall through to cache
+  }
+
+  if (candles.length < 500 && fs.existsSync(RAW_CANDLES_PATH)) {
+    const cached = JSON.parse(fs.readFileSync(RAW_CANDLES_PATH, "utf-8")) as { candles?: unknown[] };
+    if ((cached.candles?.length ?? 0) > candles.length) {
+      candles = cached.candles ?? [];
+    }
+  }
+
+  if (!Array.isArray(candles) || candles.length < 500) {
+    throw new Error(
+      `Not enough hourly candles for ${safeDays}-day batch backtest (${candles?.length ?? 0}). Sync ML data or connect Kite historical access.`,
+    );
+  }
+
+  const { code, stdout, stderr } = await runMlTradingPython({
+    action: "backtest-batch",
+    candles,
+    days: safeDays,
+    topK,
+    simulationBars,
+  });
+  const json = parsePythonJson(stdout);
+  if (code !== 0 || !json.ok) {
+    throw new Error(String(json.error ?? stderr ?? "ML batch backtest failed"));
+  }
+
+  const base = (json.data as Record<string, unknown>) ?? {};
+  return enrichBatchBacktestWithOptionTargets(accessToken, apiKey, base, targetProfitInr);
 }

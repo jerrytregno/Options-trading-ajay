@@ -205,3 +205,36 @@ export interface PredictionStatus {
   note: string;
   trainingDateRange?: { min: string; max: string } | null;
 }
+
+export interface ThresholdSweepRow {
+  threshold: number;
+  thresholdPct: number;
+  calls: number;
+  hits: number;
+  misses: number;
+  hitPct: number | null;
+  avgCallsPerDay: number;
+}
+
+export interface ThresholdProbStats {
+  bars: number;
+  maxSideMedian: number;
+  maxSideP90: number;
+  maxSideMax: number;
+  pctAtOrAbove60: number;
+  pctAtOrAbove65: number;
+  pctAtOrAbove70: number;
+  pctAtOrAbove75: number;
+}
+
+export interface ThresholdSweepResult {
+  interval: string;
+  days: number;
+  dateRange: { from: string; to: string } | null;
+  probStats: ThresholdProbStats;
+  sweep: ThresholdSweepRow[];
+  recommended: ThresholdSweepRow | null;
+  targetHitPct: number;
+  minCalls: number;
+  cachedAt?: string;
+}

@@ -19,7 +19,7 @@ Copy from `.env.local` into **Production** (and Preview if you use preview URLs)
 | `KITE_API_KEY` | From Kite Connect |
 | `KITE_API_SECRET` | From Kite Connect |
 | `KITE_RELAY_SECRET` | Random string — **same** value in local `.env.local` |
-| `KITE_WHITELIST_IPS` | `175.184.252.162,119.226.255.113` (update after checking egress) |
+| `KITE_WHITELIST_IPS` | `175.184.252.162,122.186.158.142` |
 | `KITE_MARKET_PROTECTION` | `-1` |
 | `VITE_FIREBASE_*` | All Firebase client keys |
 | `GEMINI_API_KEY` | Optional — AI trading |

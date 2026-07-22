@@ -1,12 +1,17 @@
 export interface MlTradingOptionTrade {
   date: string;
   entryTime: "09:15";
-  exitTime: "15:15";
+  exitTime: string;
+  exitReason: "target" | "eod";
+  targetProfitInr: number;
+  targetProfitRupees: number;
+  targetHit: boolean;
   side: "CE" | "PE";
   action: "Buy Call" | "Buy Put";
   atmStrike: number;
   expiry: string;
   lotSize: number;
+  lots: number;
   symbol: string | null;
   entrySpot: number;
   exitSpot: number;
@@ -25,9 +30,12 @@ export interface MlTradingOptionTrade {
 
 export interface MlTradingOptionTradeMeta {
   entryTime: string;
-  exitTime: string;
+  exitRule: string;
+  sessionEnd: string;
+  lots: number;
   lotSize: number;
   expiry: string;
+  targetProfitInr: number;
   note: string;
 }
 
@@ -157,4 +165,112 @@ export interface MlTradingStatus {
   interval: string;
   days: number;
   note: string;
+}
+
+export interface MlTradingBacktestComparisonRow {
+  hourLabel: string;
+  hourIndex: number;
+  status: "actual" | "predicted" | "pending";
+  predOpen: number | null;
+  predHigh: number | null;
+  predLow: number | null;
+  predClose: number | null;
+  actualOpen: number;
+  actualHigh: number;
+  actualLow: number;
+  actualClose: number;
+  closeErrorPct: number | null;
+  predBias: "bullish" | "bearish" | "neutral";
+  actualBias: "bullish" | "bearish" | "neutral";
+  biasCorrect: boolean | null;
+  confidence: number;
+}
+
+export interface MlTradingBacktestAccuracy {
+  directionCorrect: boolean;
+  predictedOutcome: "bullish" | "bearish" | "neutral";
+  actualOutcome: "bullish" | "bearish" | "neutral";
+  predictedDayReturnPct: number;
+  actualDayReturnPct: number;
+  dayReturnErrorPct: number;
+  predictedClose: number | null;
+  actualClose: number;
+  closeErrorPct: number | null;
+  hourCloseMaePct: number | null;
+  predictedHourCount: number;
+  hourBiasAccuracyPct: number | null;
+}
+
+export interface MlTradingBacktestMeta {
+  targetDate: string;
+  libraryStart: string;
+  libraryEnd: string;
+  libraryDays: number;
+  candleWindowDays: number;
+  simulationBars: number;
+  simulationThrough: string;
+  actual: {
+    dayOpen: number;
+    dayClose: number;
+    dayHigh: number;
+    dayLow: number;
+    dayReturnPct: number;
+    outcome: "bullish" | "bearish" | "neutral";
+    barCount: number;
+    slots: MlTradingHourSlot[];
+  };
+  comparison: MlTradingBacktestComparisonRow[];
+  accuracy: MlTradingBacktestAccuracy;
+}
+
+export type MlTradingBacktestResult = MlTradingMatchResult & {
+  backtest: MlTradingBacktestMeta;
+};
+
+export interface MlTradingBatchDayRow {
+  date: string;
+  directionCorrect: boolean;
+  predictedOutcome: "bullish" | "bearish" | "neutral";
+  actualOutcome: "bullish" | "bearish" | "neutral";
+  predictedDayReturnPct: number;
+  actualDayReturnPct: number;
+  dayReturnErrorPct: number;
+  profitTargetHit?: boolean;
+  success?: boolean;
+  optionSide?: "CE" | "PE" | null;
+  optionNetPnlRupees?: number | null;
+  optionExitTime?: string | null;
+  optionExitReason?: "target" | "eod" | null;
+  targetProfitInr?: number;
+}
+
+export interface MlTradingBatchOutcomeStats {
+  count: number;
+  correct: number;
+}
+
+export interface MlTradingBatchBacktestResult {
+  daysRequested: number;
+  daysTested: number;
+  daysSkipped: number;
+  daysCorrect: number;
+  daysWrong: number;
+  directionAccuracyPct: number;
+  profitTargetAccuracyPct?: number;
+  targetProfitInr?: number;
+  successMetric?: "profit_target" | "direction";
+  avgDayReturnErrorPct: number | null;
+  dateRange: { first: string | null; last: string | null };
+  byPredictedOutcome: {
+    bullish: MlTradingBatchOutcomeStats;
+    bearish: MlTradingBatchOutcomeStats;
+    neutral: MlTradingBatchOutcomeStats;
+  };
+  byActualOutcome?: {
+    bullish: MlTradingBatchOutcomeStats;
+    bearish: MlTradingBatchOutcomeStats;
+    neutral: MlTradingBatchOutcomeStats;
+  };
+  days: MlTradingBatchDayRow[];
+  optionTradesError?: string;
 }

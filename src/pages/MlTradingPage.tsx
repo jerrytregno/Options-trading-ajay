@@ -5,6 +5,7 @@ import {
   ArrowUpRight,
   BrainCircuit,
   Calendar,
+  History,
   Minus,
   RefreshCw,
   Search,
@@ -12,6 +13,9 @@ import {
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useKite } from "@/contexts/kite-context";
 import type {
+  MlTradingBacktestComparisonRow,
+  MlTradingBacktestResult,
+  MlTradingBatchBacktestResult,
   MlTradingHourPrediction,
   MlTradingHourSlot,
   MlTradingMatch,
@@ -22,6 +26,66 @@ import type {
 } from "@/types/ml-trading";
 import { cn, formatNumber } from "@/lib/utils";
 import "@/styles/ml-trading-page.css";
+
+const ML_PROFIT_TARGET_STORAGE_KEY = "ml-trading-profit-target-inr";
+const DEFAULT_PROFIT_TARGET_INR = 500;
+
+function readStoredProfitTarget(): number {
+  try {
+    const raw = localStorage.getItem(ML_PROFIT_TARGET_STORAGE_KEY);
+    const n = raw ? Number(raw) : DEFAULT_PROFIT_TARGET_INR;
+    return Number.isFinite(n) && n >= 1 ? Math.round(n) : DEFAULT_PROFIT_TARGET_INR;
+  } catch {
+    return DEFAULT_PROFIT_TARGET_INR;
+  }
+}
+
+function parseProfitTargetDraft(draft: string): number | null {
+  const trimmed = draft.trim();
+  if (!trimmed) return null;
+  const n = Math.round(Number(trimmed));
+  if (!Number.isFinite(n) || n < 1) return null;
+  return n;
+}
+
+function ProfitTargetField({
+  id,
+  draft,
+  onDraftChange,
+  onApply,
+  hint,
+}: {
+  id: string;
+  draft: string;
+  onDraftChange: (value: string) => void;
+  onApply: () => void;
+  hint?: string;
+}) {
+  return (
+    <label className="ml-trading-backtest-date ml-trading-trade-settings-target" htmlFor={id}>
+      <span className="text-muted text-sm">Profit target — ₹ net (after ₹50 brokerage)</span>
+      <div className="ml-trading-profit-target-row">
+        <span className="ml-trading-profit-target-prefix" aria-hidden>
+          ₹
+        </span>
+        <input
+          id={id}
+          type="number"
+          min={1}
+          step={1}
+          inputMode="numeric"
+          placeholder="500"
+          value={draft}
+          onChange={(e) => onDraftChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onApply();
+          }}
+        />
+      </div>
+      {hint && <span className="text-muted text-xs">{hint}</span>}
+    </label>
+  );
+}
 
 function outcomeIcon(outcome: string) {
   if (outcome === "bullish") return <ArrowUpRight size={16} className="text-up" />;
@@ -161,12 +225,16 @@ function OptionTradePanel({ trade, title }: { trade: MlTradingOptionTrade | null
   if (!trade) {
     return (
       <div className="ml-trading-option-trade ml-trading-option-trade--empty">
-        <p className="text-muted text-sm">9:15 → 3:15 option data not available for this day.</p>
+        <p className="text-muted text-sm">9:15 entry option data not available for this day.</p>
       </div>
     );
   }
 
   const profitClass = trade.netPnlRupees >= 0 ? "text-up" : "text-down";
+  const exitLabel =
+    trade.exitReason === "target"
+      ? `Exit ${trade.exitTime} · ₹${trade.targetProfitInr} target hit`
+      : `Exit ${trade.exitTime} (EOD)${trade.isProjection ? " · proj." : ""}`;
 
   return (
     <div className="ml-trading-option-trade">
@@ -182,15 +250,21 @@ function OptionTradePanel({ trade, title }: { trade: MlTradingOptionTrade | null
           <dd>NIFTY {formatNumber(trade.entrySpot, 2)} · premium {formatNumber(trade.entryPremium, 2)}</dd>
         </div>
         <div>
-          <dt>Exit 3:15{trade.isProjection ? " (proj.)" : ""}</dt>
+          <dt>{exitLabel}</dt>
           <dd>NIFTY {formatNumber(trade.exitSpot, 2)} · premium {formatNumber(trade.exitPremium, 2)}</dd>
+        </div>
+        <div>
+          <dt>Profit target</dt>
+          <dd className={trade.targetHit ? "text-up" : "text-muted"}>
+            {formatInr(trade.targetProfitRupees)} net · {trade.targetHit ? "hit" : "not hit"}
+          </dd>
         </div>
         <div>
           <dt>Spot move</dt>
           <dd className={trade.spotMovePct >= 0 ? "text-up" : "text-down"}>{formatPct(trade.spotMovePct)}</dd>
         </div>
         <div>
-          <dt>Cost (1 lot × {trade.lotSize})</dt>
+          <dt>Cost ({trade.lots} lot × {trade.lotSize} qty)</dt>
           <dd>{formatInr(trade.costRupees)}</dd>
         </div>
         <div>
@@ -206,6 +280,186 @@ function OptionTradePanel({ trade, title }: { trade: MlTradingOptionTrade | null
         Expiry {trade.expiry} · {trade.dataSource === "kite" ? "Zerodha 1m option prices" : "Black-Scholes estimate"}
         {trade.note ? ` · ${trade.note}` : ""}
       </p>
+    </div>
+  );
+}
+
+function BacktestComparisonTable({ rows }: { rows: MlTradingBacktestComparisonRow[] }) {
+  return (
+    <div className="ml-trading-hour-table-wrap">
+      <table className="ml-trading-hour-table ml-trading-backtest-table">
+        <thead>
+          <tr>
+            <th>Hour</th>
+            <th>Type</th>
+            <th>Pred close</th>
+            <th>Actual close</th>
+            <th>Close err</th>
+            <th>Pred O/H/L</th>
+            <th>Actual O/H/L</th>
+            <th>Hour bias</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const isPredicted = row.status === "predicted";
+            return (
+              <tr
+                key={row.hourLabel}
+                className={cn(
+                  !isPredicted && "ml-trading-hour-row--matched",
+                  isPredicted && "ml-trading-hour-row--predicted",
+                )}
+              >
+                <td>{row.hourLabel}</td>
+                <td className="capitalize">{isPredicted ? "predicted" : "known at open"}</td>
+                <td>{row.predClose != null ? formatNumber(row.predClose, 2) : "—"}</td>
+                <td>{formatNumber(row.actualClose, 2)}</td>
+                <td className={cn(
+                  row.closeErrorPct != null && row.closeErrorPct >= 0 ? "text-up" : "text-down",
+                )}
+                >
+                  {row.closeErrorPct != null ? formatPct(row.closeErrorPct) : "—"}
+                </td>
+                <td className="text-sm">
+                  {row.predOpen != null
+                    ? `${formatNumber(row.predOpen, 2)} / ${formatNumber(row.predHigh ?? 0, 2)} / ${formatNumber(row.predLow ?? 0, 2)}`
+                    : "—"}
+                </td>
+                <td className="text-sm">
+                  {formatNumber(row.actualOpen, 2)} / {formatNumber(row.actualHigh, 2)} / {formatNumber(row.actualLow, 2)}
+                </td>
+                <td>
+                  {isPredicted ? (
+                    <>
+                      <span className={cn("capitalize", row.predBias === "bullish" ? "text-up" : row.predBias === "bearish" ? "text-down" : "")}>
+                        {row.predBias}
+                      </span>
+                      {" → "}
+                      <span className={cn("capitalize", row.actualBias === "bullish" ? "text-up" : row.actualBias === "bearish" ? "text-down" : "")}>
+                        {row.actualBias}
+                      </span>
+                      {row.biasCorrect != null && (
+                        <span className={row.biasCorrect ? " text-up" : " text-down"}>
+                          {row.biasCorrect ? " ✓" : " ✗"}
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-muted">—</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function BatchBacktestSummary({ batch }: { batch: MlTradingBatchBacktestResult }) {
+  const useProfitTarget = batch.successMetric === "profit_target" || batch.profitTargetAccuracyPct != null;
+  const accuracyPct = useProfitTarget
+    ? (batch.profitTargetAccuracyPct ?? 0)
+    : batch.directionAccuracyPct;
+  const accClass = accuracyPct >= 50 ? "text-up" : "text-down";
+  const targetInr = batch.targetProfitInr ?? 500;
+
+  return (
+    <div className="ml-trading-batch-summary">
+      <div className="ml-trading-batch-score">
+        <strong className={accClass}>
+          {batch.daysCorrect} / {batch.daysTested}{" "}
+          {useProfitTarget ? `hit ₹${targetInr} profit target` : "correct"}
+        </strong>
+        <span className="text-muted text-sm">
+          ({formatNumber(accuracyPct, 1)}% success rate
+          {useProfitTarget ? ` · direction was ${formatNumber(batch.directionAccuracyPct, 1)}%` : ""})
+        </span>
+      </div>
+      {batch.optionTradesError && (
+        <p className="text-muted text-sm mb-3">{batch.optionTradesError}</p>
+      )}
+      <dl className="ml-trading-stats mb-4">
+        <div>
+          <dt>Period</dt>
+          <dd>
+            {batch.dateRange.first && batch.dateRange.last
+              ? `${formatDateLabel(batch.dateRange.first)} → ${formatDateLabel(batch.dateRange.last)}`
+              : "—"}
+          </dd>
+        </div>
+        <div>
+          <dt>Missed target</dt>
+          <dd>{batch.daysWrong}</dd>
+        </div>
+        <div>
+          <dt>Avg return error</dt>
+          <dd>{batch.avgDayReturnErrorPct != null ? formatPct(batch.avgDayReturnErrorPct, false) : "—"}</dd>
+        </div>
+        <div>
+          <dt>Direction (bullish pred.)</dt>
+          <dd>
+            {batch.byPredictedOutcome.bullish.correct}/{batch.byPredictedOutcome.bullish.count} correct
+          </dd>
+        </div>
+        <div>
+          <dt>Direction (bearish pred.)</dt>
+          <dd>
+            {batch.byPredictedOutcome.bearish.correct}/{batch.byPredictedOutcome.bearish.count} correct
+          </dd>
+        </div>
+      </dl>
+      <div className="ml-trading-hour-table-wrap">
+        <table className="ml-trading-hour-table ml-trading-backtest-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Result</th>
+              <th>Option</th>
+              <th>Net P/L</th>
+              <th>Exit</th>
+              <th>Predicted</th>
+              <th>Actual</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...batch.days].reverse().map((row) => {
+              const success = row.success ?? row.profitTargetHit ?? row.directionCorrect;
+              return (
+              <tr
+                key={row.date}
+                className={success ? "ml-trading-batch-row--ok" : "ml-trading-batch-row--miss"}
+              >
+                <td>{formatDateLabel(row.date)}</td>
+                <td className={success ? "text-up" : "text-down"}>
+                  {useProfitTarget
+                    ? (row.profitTargetHit ? "Target hit" : "Missed")
+                    : (row.directionCorrect ? "Correct" : "Wrong")}
+                </td>
+                <td>{row.optionSide ?? "—"}</td>
+                <td className={
+                  row.optionNetPnlRupees != null
+                    ? (row.optionNetPnlRupees >= 0 ? "text-up" : "text-down")
+                    : undefined
+                }
+                >
+                  {row.optionNetPnlRupees != null ? formatInr(row.optionNetPnlRupees, true) : "—"}
+                </td>
+                <td className="text-sm">
+                  {row.optionExitTime
+                    ? `${row.optionExitTime}${row.optionExitReason === "target" ? " ✓" : ""}`
+                    : "—"}
+                </td>
+                <td className="capitalize">{row.predictedOutcome}</td>
+                <td className="capitalize">{row.actualOutcome}</td>
+              </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -254,7 +508,7 @@ function WeekMatchCard({
           <p className="font-medium text-sm">{match.weekDaysMatched.join(", ")}</p>
         </div>
       </div>
-      <OptionTradePanel trade={optionTrade} title={`9:15 → 3:15 on ${formatDateLabel(match.todayAnalogDate)}`} />
+      <OptionTradePanel trade={optionTrade} title={`9:15 entry · exit at ₹${optionTrade?.targetProfitInr ?? 500} profit on ${formatDateLabel(match.todayAnalogDate)}`} />
     </article>
   );
 }
@@ -316,7 +570,7 @@ function MatchCard({
         Full day — {fullSlots.length} hourly bars · all {matchedCount} session bars used for pattern match
       </p>
       <HourTable slots={fullSlots} matchedBars={matchedCount} />
-      <OptionTradePanel trade={optionTrade} title={`9:15 → 3:15 on ${formatDateLabel(match.date)}`} />
+      <OptionTradePanel trade={optionTrade} title={`9:15 entry · exit at ₹${optionTrade?.targetProfitInr ?? 500} profit on ${formatDateLabel(match.date)}`} />
     </article>
   );
 }
@@ -328,7 +582,31 @@ export default function MlTradingPage() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [matching, setMatching] = useState(false);
+  const [backtestDate, setBacktestDate] = useState("");
+  const [backtest, setBacktest] = useState<MlTradingBacktestResult | null>(null);
+  const [backtesting, setBacktesting] = useState(false);
+  const [batchBacktest, setBatchBacktest] = useState<MlTradingBatchBacktestResult | null>(null);
+  const [batchBacktesting, setBatchBacktesting] = useState(false);
+  const [profitTargetInr, setProfitTargetInr] = useState(readStoredProfitTarget);
+  const [profitTargetDraft, setProfitTargetDraft] = useState(() => String(readStoredProfitTarget()));
   const [error, setError] = useState<string | null>(null);
+
+  const commitProfitTarget = useCallback((): number | null => {
+    const parsed = parseProfitTargetDraft(profitTargetDraft);
+    if (parsed == null) {
+      setProfitTargetDraft(String(profitTargetInr));
+      setError("Profit target must be at least ₹1");
+      return null;
+    }
+    setProfitTargetInr(parsed);
+    setProfitTargetDraft(String(parsed));
+    try {
+      localStorage.setItem(ML_PROFIT_TARGET_STORAGE_KEY, String(parsed));
+    } catch {
+      // ignore storage errors
+    }
+    return parsed;
+  }, [profitTargetDraft, profitTargetInr]);
 
   const loadStatus = useCallback(async () => {
     setLoading(true);
@@ -345,12 +623,15 @@ export default function MlTradingPage() {
     }
   }, []);
 
-  const runMatch = useCallback(async () => {
+  const runMatch = useCallback(async (targetInr = profitTargetInr) => {
     if (!connected) return;
     setMatching(true);
     setError(null);
     try {
-      const res = await fetch("/api/ml-trading/match", { credentials: "include" });
+      const res = await fetch(
+        `/api/ml-trading/match?targetInr=${encodeURIComponent(String(targetInr))}`,
+        { credentials: "include" },
+      );
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Pattern match failed");
       setMatch(json.data as MlTradingMatchResult);
@@ -359,7 +640,59 @@ export default function MlTradingPage() {
     } finally {
       setMatching(false);
     }
-  }, [connected]);
+  }, [connected, profitTargetInr]);
+
+  const runBacktest = useCallback(async () => {
+    if (!connected || !backtestDate) return;
+    setBacktesting(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/ml-trading/backtest?date=${encodeURIComponent(backtestDate)}`,
+        { credentials: "include" },
+      );
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Backtest failed");
+      setBacktest(json.data as MlTradingBacktestResult);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Backtest failed");
+    } finally {
+      setBacktesting(false);
+    }
+  }, [connected, backtestDate]);
+
+  const runBatchBacktest = useCallback(async (targetInr = profitTargetInr) => {
+    if (!connected) return;
+    setBatchBacktesting(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/ml-trading/backtest/batch?days=30&targetInr=${encodeURIComponent(String(targetInr))}`,
+        { credentials: "include" },
+      );
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "30-day backtest failed");
+      setBatchBacktest(json.data as MlTradingBatchBacktestResult);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "30-day backtest failed");
+    } finally {
+      setBatchBacktesting(false);
+    }
+  }, [connected, profitTargetInr]);
+
+  const applyProfitTarget = useCallback(async () => {
+    const target = commitProfitTarget();
+    if (target == null || !connected || !status?.libraryBuilt) return;
+    setError(null);
+    await Promise.all([runMatch(target), runBatchBacktest(target)]);
+  }, [commitProfitTarget, connected, status?.libraryBuilt, runMatch, runBatchBacktest]);
+
+  const refreshBatchWithTarget = useCallback(async () => {
+    const target = commitProfitTarget();
+    if (target == null || !connected) return;
+    setError(null);
+    await runBatchBacktest(target);
+  }, [commitProfitTarget, connected, runBatchBacktest]);
 
   const syncData = useCallback(async () => {
     if (!connected) return;
@@ -390,8 +723,14 @@ export default function MlTradingPage() {
   useEffect(() => {
     if (connected && status?.libraryBuilt) {
       void runMatch();
+      void runBatchBacktest();
     }
-  }, [connected, status?.libraryBuilt, runMatch]);
+  }, [connected, status?.libraryBuilt, runMatch, runBatchBacktest]);
+
+  useEffect(() => {
+    if (backtestDate || !status?.lastDate) return;
+    setBacktestDate(status.lastDate);
+  }, [status?.lastDate, backtestDate]);
 
   const predictionClass =
     match?.prediction === "bullish" ? "ml-trading-prediction--bull" : match?.prediction === "bearish" ? "ml-trading-prediction--bear" : "ml-trading-prediction--neutral";
@@ -427,6 +766,39 @@ export default function MlTradingPage() {
               {formatNumber((match.bestSimilarity ?? 0) * 100, 1)}% similarity).
             </div>
           )}
+
+          <section className="card mb-6 ml-trading-panel ml-trading-trade-settings">
+            <h2 className="ml-trading-panel-title">Option trade setup</h2>
+            <p className="text-muted text-sm mb-4">
+              Enter at <strong>9:15</strong> on the recommended <strong>ATM strike</strong>, always{" "}
+              <strong>1 lot</strong> (NIFTY lot size from Kite, e.g. 75 qty). Exit when{" "}
+              <strong>net profit</strong> hits your target (after ₹50 round-trip brokerage), else at session end.
+            </p>
+            <div className="ml-trading-backtest-controls">
+              <ProfitTargetField
+                id="ml-trade-setup-profit-target"
+                draft={profitTargetDraft}
+                onDraftChange={setProfitTargetDraft}
+                onApply={() => void applyProfitTarget()}
+                hint="1 lot · ATM strike · Call or Put from model"
+              />
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={!status?.libraryBuilt || matching || batchBacktesting}
+                onClick={() => void applyProfitTarget()}
+              >
+                <RefreshCw size={16} className={matching || batchBacktesting ? "spin" : undefined} />
+                Apply &amp; refresh all
+              </button>
+            </div>
+            {match?.optionTradeMeta && (
+              <p className="text-muted text-xs mt-3">
+                Active: ₹{match.optionTradeMeta.targetProfitInr} target · {match.optionTradeMeta.lots} lot ×{" "}
+                {match.optionTradeMeta.lotSize} qty · expiry {match.optionTradeMeta.expiry}
+              </p>
+            )}
+          </section>
 
           <div className="ml-trading-grid mb-6">
             <section className="card ml-trading-panel">
@@ -509,7 +881,7 @@ export default function MlTradingPage() {
                     <div className="mt-4">
                       <OptionTradePanel
                         trade={match.todayOptionTrade}
-                        title={`Today's trade · enter 9:15 · exit 3:15${match.todayOptionTrade.isProjection ? " (projected)" : ""}`}
+                        title={`Today's trade · 9:15 · 1 lot ATM · exit at ₹${match.todayOptionTrade.targetProfitInr} net${match.todayOptionTrade.isProjection ? " (projected)" : ""}`}
                       />
                       {match.avgHistoricalNetPnl != null && (
                         <p className="text-muted text-sm mt-2">
@@ -535,6 +907,134 @@ export default function MlTradingPage() {
               )}
             </section>
           </div>
+
+          <section className="card mb-6 ml-trading-panel">
+            <h2 className="ml-trading-panel-title">
+              <History size={18} />
+              30-day backtest summary
+            </h2>
+            <p className="text-muted text-sm mb-4">
+              Last <strong>30 trading sessions</strong>, <strong>1 lot ATM</strong> each day. A day counts as{" "}
+              <strong>success</strong> when net profit hits your target before session end.
+            </p>
+            <div className="ml-trading-backtest-controls mb-4 ml-trading-batch-target-bar">
+              <ProfitTargetField
+                id="ml-batch-profit-target"
+                draft={profitTargetDraft}
+                onDraftChange={setProfitTargetDraft}
+                onApply={() => void refreshBatchWithTarget()}
+                hint="Change amount, then refresh — same target applies to today’s trade above"
+              />
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={batchBacktesting || !status?.pythonAvailable}
+                onClick={() => void refreshBatchWithTarget()}
+              >
+                <RefreshCw size={16} className={batchBacktesting ? "spin" : undefined} />
+                {batchBacktesting ? "Running 30-day backtest…" : "Refresh 30-day backtest"}
+              </button>
+            </div>
+            {batchBacktesting && !batchBacktest && (
+              <p className="text-muted text-sm mb-4">This may take 10–30 seconds…</p>
+            )}
+            {batchBacktest && <BatchBacktestSummary batch={batchBacktest} />}
+          </section>
+
+          <section className="card mb-6 ml-trading-panel">
+            <h2 className="ml-trading-panel-title">
+              <History size={18} />
+              Single-day backtest
+            </h2>
+            <p className="text-muted text-sm mb-4">
+              Pick a past session date. We load exactly <strong>1 year of hourly data before that date</strong>,
+              run the week-pattern model using only the first hour (9:15), then compare predicted vs actual for every hour.
+            </p>
+            <div className="ml-trading-backtest-controls">
+              <label className="ml-trading-backtest-date">
+                <span className="text-muted text-sm">Session date</span>
+                <input
+                  type="date"
+                  value={backtestDate}
+                  max={status?.lastDate ?? undefined}
+                  min={status?.firstDate ?? undefined}
+                  onChange={(event) => setBacktestDate(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={backtesting || !backtestDate || !status?.pythonAvailable}
+                onClick={() => void runBacktest()}
+              >
+                <RefreshCw size={16} className={backtesting ? "spin" : undefined} />
+                {backtesting ? "Running backtest…" : "Run backtest"}
+              </button>
+            </div>
+
+            {backtest?.backtest && (
+              <div className="mt-6">
+                <dl className="ml-trading-stats mb-4">
+                  <div>
+                    <dt>Library window</dt>
+                    <dd>
+                      {backtest.backtest.libraryStart} → {backtest.backtest.libraryEnd} ({backtest.backtest.libraryDays} days)
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Simulated at</dt>
+                    <dd>{backtest.backtest.simulationThrough} ({backtest.backtest.simulationBars} bar known)</dd>
+                  </div>
+                  <div>
+                    <dt>Direction</dt>
+                    <dd>
+                      Pred <span className="capitalize">{backtest.backtest.accuracy.predictedOutcome}</span>
+                      {" · "}
+                      Actual <span className="capitalize">{backtest.backtest.accuracy.actualOutcome}</span>
+                      {" · "}
+                      <span className={backtest.backtest.accuracy.directionCorrect ? "text-up" : "text-down"}>
+                        {backtest.backtest.accuracy.directionCorrect ? "Correct" : "Wrong"}
+                      </span>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Day return</dt>
+                    <dd>
+                      Pred {formatPct(backtest.backtest.accuracy.predictedDayReturnPct)} · Actual{" "}
+                      <span className={backtest.backtest.accuracy.actualDayReturnPct >= 0 ? "text-up" : "text-down"}>
+                        {formatPct(backtest.backtest.accuracy.actualDayReturnPct)}
+                      </span>
+                      {" · err "}
+                      {formatPct(backtest.backtest.accuracy.dayReturnErrorPct, false)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Close @ 3:15</dt>
+                    <dd>
+                      Pred {backtest.backtest.accuracy.predictedClose != null ? formatNumber(backtest.backtest.accuracy.predictedClose, 2) : "—"}
+                      {" · Actual "}
+                      {formatNumber(backtest.backtest.accuracy.actualClose, 2)}
+                      {backtest.backtest.accuracy.closeErrorPct != null && (
+                        <> · err {formatPct(backtest.backtest.accuracy.closeErrorPct)}</>
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Hour accuracy</dt>
+                    <dd>
+                      {backtest.backtest.accuracy.hourBiasAccuracyPct != null
+                        ? `${formatNumber(backtest.backtest.accuracy.hourBiasAccuracyPct, 1)}% hour bias`
+                        : "—"}
+                      {backtest.backtest.accuracy.hourCloseMaePct != null && (
+                        <> · MAE {formatPct(backtest.backtest.accuracy.hourCloseMaePct, false)} close</>
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+                <BacktestComparisonTable rows={backtest.backtest.comparison} />
+              </div>
+            )}
+          </section>
 
           {match && (
             <>

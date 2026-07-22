@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { PredictionAtmLivePanel } from "@/components/prediction/PredictionAtmLivePanel";
+import { PredictionKiteEgressPanel } from "@/components/prediction/PredictionKiteEgressPanel";
+import { PredictionThresholdSweepPanel } from "@/components/prediction/PredictionThresholdSweepPanel";
 import { PredictionNiftyStreamChart } from "@/components/streaming/PredictionNiftyStreamChart";
 import { PredictionAutoTrader } from "@/components/trade/PredictionAutoTrader";
 import { useKite } from "@/contexts/kite-context";
@@ -21,6 +23,7 @@ import type {
   PredictionBacktestResult,
   PredictionLiveResult,
   PredictionStatus,
+  ThresholdSweepResult,
 } from "@/types/prediction";
 import {
   autoRefreshMs,
@@ -38,7 +41,8 @@ import {
 import {
   computeConfidenceStats,
   BACKTEST_CONFIDENCE_THRESHOLD,
-  DISPLAY_CONFIDENCE_THRESHOLD,
+  confidenceCalibrationNote,
+  displayConfidenceThreshold,
   displaySignalForPrediction,
   formatPointsPnl,
   getBacktestDisplayPrediction,
@@ -66,6 +70,7 @@ export default function PredictionModelPage() {
   const [backtest, setBacktest] = useState<PredictionBacktestResult | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [niftySpot, setNiftySpot] = useState<number | null>(null);
+  const [thresholdSweep, setThresholdSweep] = useState<ThresholdSweepResult | null>(null);
   const dashboardRef = useRef<HTMLDivElement>(null);
 
   const minBacktestDate = status?.trainingDateRange?.min ?? (() => {
@@ -288,7 +293,9 @@ export default function PredictionModelPage() {
   const metrics = status?.metrics;
   const probs = live?.probabilities;
   const intervalLabel = horizonLabel(interval);
-  const liveDisplayPred = probs ? getDisplayPrediction(probs) : null;
+  const tradeThreshold = displayConfidenceThreshold(interval);
+  const calibrationNote = confidenceCalibrationNote(interval, metrics, thresholdSweep);
+  const liveDisplayPred = probs ? getDisplayPrediction(probs, interval) : null;
   const livePredictionWindow =
     live?.asOf != null ? formatLivePredictionWindow(live.asOf, interval) : null;
 
@@ -348,6 +355,8 @@ export default function PredictionModelPage() {
             </button>
           ))}
         </div>
+
+        <PredictionKiteEgressPanel connected={connected} />
 
         {!connected && (
           <div className="card prediction-banner">
@@ -476,6 +485,9 @@ export default function PredictionModelPage() {
               <p className="text-muted">Train the model first to see live predictions.</p>
             ) : (
               <>
+                {calibrationNote && (
+                  <p className="prediction-calibration-note text-muted">{calibrationNote}</p>
+                )}
                 <button
                   className="btn btn-secondary btn-sm"
                   onClick={() => void runLive()}
@@ -504,7 +516,7 @@ export default function PredictionModelPage() {
                         {livePredictionWindow?.summary ?? `Next ${intervalLabel} candle`} · P(up){" "}
                         {formatNumber((probs.up ?? 0) * 100, 1)}% · P(down){" "}
                         {formatNumber((probs.down ?? 0) * 100, 1)}% · trade if ≥
-                        {formatNumber(DISPLAY_CONFIDENCE_THRESHOLD * 100, 0)}%
+                        {formatNumber(tradeThreshold * 100, 0)}%
                       </small>
                     </div>
 
@@ -554,16 +566,18 @@ export default function PredictionModelPage() {
 
         <PredictionAutoTrader
           connected={connected}
-          modelReady={Boolean(status?.schemaCurrent && status?.modelTrained && interval === "minute")}
+          modelReady={Boolean(status?.schemaCurrent && status?.modelTrained)}
           interval={interval}
-          liveSnapshot={interval === "minute" ? live : null}
+          liveSnapshot={live}
           dashboardRef={dashboardRef}
         />
-        {interval !== "minute" && (
-          <p className="text-muted prediction-note" style={{ marginTop: "-0.5rem", marginBottom: "1rem" }}>
-            Automated trading uses the <strong>1 min</strong> model only — switch to the 1 min tab to enable.
-          </p>
-        )}
+
+        <PredictionThresholdSweepPanel
+          connected={connected}
+          modelReady={Boolean(status?.schemaCurrent && status?.modelTrained)}
+          interval={interval}
+          onLoaded={setThresholdSweep}
+        />
 
         <PredictionNiftyStreamChart connected={connected} loginUrl={loginUrl} />
 
@@ -597,7 +611,7 @@ export default function PredictionModelPage() {
             <strong>Flat</strong> is prediction-only; actual shows <strong>Up</strong> or{" "}
             <strong>Down</strong>. Check model stats use{" "}
             <strong>≥{formatNumber(BACKTEST_CONFIDENCE_THRESHOLD * 100, 0)}%</strong>; automated trading
-            enters at <strong>≥{formatNumber(DISPLAY_CONFIDENCE_THRESHOLD * 100, 0)}%</strong>.
+            enters at <strong>≥{formatNumber(tradeThreshold * 100, 0)}%</strong>.
           </p>
           <div className="prediction-backtest-controls">
             <label className="prediction-label">

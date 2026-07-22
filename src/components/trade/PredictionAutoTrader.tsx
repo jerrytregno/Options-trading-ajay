@@ -29,8 +29,7 @@ import {
   netPremiumPnl,
   nextMinuteWatchLabel,
   pickPositionToManage,
-  PREDICTION_AUTO_BROKERAGE_INR,
-  PREDICTION_AUTO_CONFIDENCE_THRESHOLD,
+  autoConfidenceThreshold,
   PREDICTION_AUTO_POSITION_VERIFY_MS,
   PREDICTION_AUTO_QUOTE_MS,
   PREDICTION_AUTO_STOP_LOSS_NET_INR,
@@ -45,7 +44,7 @@ import {
   type PredictionTradeStatus,
 } from "@/lib/prediction-auto-trade";
 import { legLabel, parseTradeLeg, type TradeLeg } from "@/lib/trade-calculations";
-import type { PredictionInterval } from "@/lib/prediction-intervals";
+import { horizonLabel, type PredictionInterval } from "@/lib/prediction-intervals";
 import type { PredictionLiveResult } from "@/types/prediction";
 import { cn, formatCurrency, formatNumber, getChangeClass } from "@/lib/utils";
 import {
@@ -91,8 +90,6 @@ export function PredictionAutoTrader({
   const [quantity, setQuantity] = useState(0);
   const [entryPremium, setEntryPremium] = useState(0);
   const [ltp, setLtp] = useState(0);
-  const [liveGrossPnl, setLiveGrossPnl] = useState(0);
-  const [cycleExitGross, setCycleExitGross] = useState(0);
   const [lastLive, setLastLive] = useState<PredictionLiveResult | null>(null);
   const [lastClosedPnl, setLastClosedPnl] = useState<number | null>(null);
   const [watchNote, setWatchNote] = useState("");
@@ -151,7 +148,6 @@ export function PredictionAutoTrader({
       ltpRef.current = mark;
       setLtp(mark);
     }
-    setLiveGrossPnl(displayGross);
     liveGrossPnlRef.current = displayGross;
     const exitGross = calcBotCycleGrossPnl(
       zerodhaPositionGrossPnl(pos),
@@ -160,7 +156,6 @@ export function PredictionAutoTrader({
       pos.quantity,
     );
     cycleExitGrossRef.current = exitGross;
-    setCycleExitGross(exitGross);
     setKitePositions((prev) => {
       const idx = prev.findIndex(
         (row) => row.tradingsymbol === pos.tradingsymbol && row.product === pos.product,
@@ -221,6 +216,11 @@ export function PredictionAutoTrader({
       if (entryPx > 0) {
         entryPremiumRef.current = entryPx;
         setEntryPremium(entryPx);
+      }
+
+      // Baseline open P/L at fill so live P/L starts near ₹0 for this bot cycle.
+      if (phaseRef.current === "entering") {
+        positionPnlAtEntryRef.current = zerodhaPositionGrossPnl(pos);
       }
 
       syncFromZerodhaPosition(pos);
@@ -329,8 +329,6 @@ export function PredictionAutoTrader({
     setQuantity(0);
     setEntryPremium(0);
     setLtp(0);
-    setLiveGrossPnl(0);
-    setCycleExitGross(0);
     liveGrossPnlRef.current = 0;
     cycleExitGrossRef.current = 0;
     tradingsymbolRef.current = "";
@@ -378,7 +376,7 @@ export function PredictionAutoTrader({
           pushLog(`${remaining.length} position(s) still open — managing next`, "info");
         } else {
           pushLog(
-            `Flat · scanning for ≥${formatNumber(PREDICTION_AUTO_CONFIDENCE_THRESHOLD * 100, 0)}% signals`,
+            `Flat · scanning for ≥${formatNumber(autoConfidenceThreshold(interval) * 100, 0)}% signals`,
             "info",
           );
           setPhaseSync("scanning");
@@ -507,8 +505,10 @@ export function PredictionAutoTrader({
         }
 
         const preEntryPos = await fetchKiteNetPosition(resolved.tradingsymbol, product);
-        positionPnlAtEntryRef.current = preEntryPos ? zerodhaPositionGrossPnl(preEntryPos) : 0;
         positionBaselineQtyRef.current = baselineQty;
+        if (preEntryPos && baselineQty > 0) {
+          positionPnlAtEntryRef.current = zerodhaPositionGrossPnl(preEntryPos);
+        }
 
         const { transactionType } = parseTradeLeg(nextLeg);
         const qty = resolved.lotSize;
@@ -571,8 +571,10 @@ export function PredictionAutoTrader({
         setTradingsymbol(resolved.tradingsymbol);
         setQuantity(botQty);
         if (filledPos) {
+          positionPnlAtEntryRef.current = zerodhaPositionGrossPnl(filledPos);
           syncFromZerodhaPosition(filledPos);
         } else {
+          positionPnlAtEntryRef.current = 0;
           setLtp(fillLtp);
           ltpRef.current = fillLtp;
         }
@@ -665,27 +667,18 @@ export function PredictionAutoTrader({
   processSnapshotRef.current = processSnapshot;
 
   const fetchAndProcess = useCallback(async () => {
-    const live = await fetchPredictionLive();
+    const live = await fetchPredictionLive(interval);
     if (live) await processSnapshot(live);
-  }, [processSnapshot]);
+  }, [interval, processSnapshot]);
 
   useEffect(() => {
     if (!running || !liveSnapshot?.asOf) return;
+    lastLiveRef.current = liveSnapshot;
     setLastLive(liveSnapshot);
-  }, [liveSnapshot?.asOf, running, liveSnapshot]);
-
-  useEffect(() => {
-    if (interval !== "minute" && running) {
-      runningRef.current = false;
-      setRunning(false);
-      if (phaseRef.current === "in_position") {
-        void squareOff("Switched away from 1m — stopping and exiting");
-      } else {
-        setPhaseSync("idle");
-        pushLog("Automated trading stopped (1m interval required)", "warning");
-      }
+    if (phaseRef.current === "scanning") {
+      void processSnapshotRef.current?.(liveSnapshot);
     }
-  }, [interval, running, pushLog, setPhaseSync, squareOff]);
+  }, [liveSnapshot, running]);
 
   useEffect(() => {
     runningRef.current = running;
@@ -697,7 +690,7 @@ export function PredictionAutoTrader({
     consumedSignalsRef.current.clear();
     lastSkipLogRef.current = "";
     pushLog(
-      `Automated trading started · next 1m candle predictions · ≥${formatNumber(PREDICTION_AUTO_CONFIDENCE_THRESHOLD * 100, 0)}% · +₹${PREDICTION_AUTO_TARGET_NET_INR} net · −₹${PREDICTION_AUTO_STOP_LOSS_NET_INR} stop`,
+      `Automated trading started · ${horizonLabel(interval)} model · ≥${formatNumber(autoConfidenceThreshold(interval) * 100, 0)}% on closed candle · +₹${PREDICTION_AUTO_TARGET_NET_INR} net · −₹${PREDICTION_AUTO_STOP_LOSS_NET_INR} stop`,
       "info",
     );
     void (async () => {
@@ -807,21 +800,15 @@ export function PredictionAutoTrader({
 
   const isCall = leg.startsWith("CE");
   const targetGross = grossPnlForNetTarget();
-  const cycleNetEst = netPremiumPnl(cycleExitGross);
-  const progressPct = Math.max(
-    0,
-    Math.min(100, (cycleNetEst / PREDICTION_AUTO_TARGET_NET_INR) * 100),
-  );
   const inTrade = phase === "in_position" || phase === "exiting";
   const pendingEntry = phase === "entering" && Boolean(tradingsymbol);
   const activeKitePosition = tradingsymbol
     ? kitePositions.find((p) => p.tradingsymbol === tradingsymbol)
-    : undefined;
+    : kitePositions[0];
+  const zerodhaLivePnl =
+    activeKitePosition != null ? zerodhaPositionGrossPnl(activeKitePosition) : null;
   const showDashboard =
     inTrade || pendingEntry || kitePositions.length > 0 || lastClosedPnl != null;
-  const zerodhaPnl = activeKitePosition
-    ? calcBotDisplayGrossPnlFromZerodha(activeKitePosition, quantity > 0 ? quantity : activeKitePosition.quantity)
-    : undefined;
 
   return (
     <section className={cn("pat-card card", inTrade && "pat-card--live")}>
@@ -831,8 +818,9 @@ export function PredictionAutoTrader({
           <div>
             <h2 className="pat-title">Automated trading</h2>
             <p className="pat-sub">
-              Next 1m chart · ≥{formatNumber(PREDICTION_AUTO_CONFIDENCE_THRESHOLD * 100, 0)}% on closed candle → enter
-              predicted minute · +₹{PREDICTION_AUTO_TARGET_NET_INR} net · −₹{PREDICTION_AUTO_STOP_LOSS_NET_INR} stop
+              {horizonLabel(interval)} chart · ≥{formatNumber(autoConfidenceThreshold(interval) * 100, 0)}% on
+              closed candle → enter predicted {horizonLabel(interval).toLowerCase()} bar · +₹
+              {PREDICTION_AUTO_TARGET_NET_INR} net · −₹{PREDICTION_AUTO_STOP_LOSS_NET_INR} stop
             </p>
           </div>
         </div>
@@ -882,7 +870,7 @@ export function PredictionAutoTrader({
         )}
         {lastLive && !running && (
           <span className="pat-scan-note">
-            Last scan: {predictionConfidenceLabel(lastLive)} · {lastLive.asOf.slice(11, 19)}
+            Last scan: {predictionConfidenceLabel(lastLive, interval)} · {lastLive.asOf.slice(11, 19)}
           </span>
         )}
         {cycles > 0 && <span className="pat-scan-note">{cycles} completed trade(s)</span>}
@@ -1000,38 +988,33 @@ export function PredictionAutoTrader({
           <div
             className={cn(
               "pat-pnl-block",
-              cycleNetEst >= PREDICTION_AUTO_TARGET_NET_INR
-                ? "is-hit"
-                : cycleNetEst <= -PREDICTION_AUTO_STOP_LOSS_NET_INR
-                  ? "is-stop"
-                  : liveGrossPnl < 0
-                    ? "is-down"
-                    : "is-up",
+              zerodhaLivePnl != null
+                ? zerodhaLivePnl >= PREDICTION_AUTO_TARGET_NET_INR
+                  ? "is-hit"
+                  : zerodhaLivePnl <= -PREDICTION_AUTO_STOP_LOSS_NET_INR
+                    ? "is-stop"
+                    : zerodhaLivePnl < 0
+                      ? "is-down"
+                      : "is-up"
+                : lastClosedPnl != null
+                  ? lastClosedPnl >= 0
+                    ? "is-up"
+                    : "is-down"
+                  : undefined,
             )}
           >
-            <span className="pat-pnl-label">Live P&amp;L (Zerodha positions API)</span>
-            <p className="pat-pnl-value">
-              {inTrade
-                ? `${liveGrossPnl >= 0 ? "+" : ""}${formatCurrency(liveGrossPnl)}`
-                : pendingEntry && zerodhaPnl != null
-                  ? `${zerodhaPnl >= 0 ? "+" : ""}${formatCurrency(zerodhaPnl)} (Zerodha)`
-                  : lastClosedPnl != null
-                    ? `${lastClosedPnl >= 0 ? "+" : ""}${formatCurrency(lastClosedPnl)} (closed net)`
-                    : "—"}
+            <span className="pat-pnl-label">Live P&amp;L (Zerodha)</span>
+            <p className={cn("pat-pnl-value", zerodhaLivePnl != null && getChangeClass(zerodhaLivePnl))}>
+              {zerodhaLivePnl != null
+                ? `${zerodhaLivePnl >= 0 ? "+" : ""}${formatCurrency(zerodhaLivePnl)}`
+                : lastClosedPnl != null
+                  ? `${lastClosedPnl >= 0 ? "+" : ""}${formatCurrency(lastClosedPnl)}`
+                  : "—"}
             </p>
             {inTrade && (
-              <>
-                <div className="pat-pnl-bar" aria-hidden>
-                  <div className="pat-pnl-bar-fill" style={{ width: `${progressPct}%` }} />
-                </div>
-                <span className="pat-pnl-sub">
-                  {cycleNetEst >= PREDICTION_AUTO_TARGET_NET_INR
-                    ? "Target reached — exiting"
-                    : cycleNetEst <= -PREDICTION_AUTO_STOP_LOSS_NET_INR
-                      ? "Stop loss hit — exiting"
-                      : `${formatCurrency(Math.max(0, PREDICTION_AUTO_TARGET_NET_INR - cycleNetEst))} to +₹${PREDICTION_AUTO_TARGET_NET_INR} net on this trade · ${formatCurrency(Math.max(0, PREDICTION_AUTO_STOP_LOSS_NET_INR + cycleNetEst))} to stop · cycle net est. ${formatCurrency(cycleNetEst)} after ₹${PREDICTION_AUTO_BROKERAGE_INR} · Zerodha sync every ${PREDICTION_AUTO_QUOTE_MS}ms`}
-                </span>
-              </>
+              <span className="pat-pnl-sub text-muted">
+                Real-time from Zerodha positions · sync {PREDICTION_AUTO_QUOTE_MS}ms
+              </span>
             )}
             {pendingEntry && !inTrade && (
               <span className="pat-pnl-sub">
@@ -1046,9 +1029,9 @@ export function PredictionAutoTrader({
 
       {!running && (
         <p className="pat-idle-note text-muted">
-          Uses the same next-minute model as Live signal: when candle <strong>11:00</strong> closes,
-          it predicts <strong>11:01</strong> and enters only if Up/Down ≥
-          {formatNumber(PREDICTION_AUTO_CONFIDENCE_THRESHOLD * 100, 0)}% during that predicted minute. Exits at
+          Uses the same {horizonLabel(interval).toLowerCase()} model as Live signal: when a candle closes,
+          it predicts the next {horizonLabel(interval).toLowerCase()} bar and enters only if Up/Down ≥
+          {formatNumber(autoConfidenceThreshold(interval) * 100, 0)}% during that predicted bar. Exits at
           +₹{PREDICTION_AUTO_TARGET_NET_INR} net or −₹{PREDICTION_AUTO_STOP_LOSS_NET_INR} stop on the new order only. If Zerodha already has open positions, the bot manages them first (no new entries) and exits each at the same targets.
         </p>
       )}

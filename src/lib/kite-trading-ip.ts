@@ -1,9 +1,11 @@
 export type TradingIpSource = "rejected" | "env" | "detected" | "none";
 
+export type KiteEgressMode = "direct" | "proxy" | "relay" | "vercel-app" | "blocked";
+
 /** Default IPs registered in Kite Connect (override with KITE_WHITELIST_IPS). */
 export const KITE_WHITELIST_IPS_DEFAULT = [
   "175.184.252.162",
-  "119.226.255.113",
+  "122.186.158.142",
 ] as const;
 
 export interface TradingIpInfo {
@@ -13,6 +15,10 @@ export interface TradingIpInfo {
   allowedIps: string[];
   /** Live public IP of this machine (informational — may not be used for Kite). */
   networkIp?: string | null;
+  /** All IPs seen across probe services (ISP may rotate between them). */
+  networkIps?: string[];
+  /** True when probe services disagree on public IP. */
+  networkIpUnstable?: boolean;
   /** IP Zerodha sees for Kite API (one of allowedIps only). */
   outboundIp: string | null;
   /** Set only when KITE_TRADING_IP is pinned (proxy / fixed egress). */
@@ -32,10 +38,20 @@ export interface TradingIpInfo {
   source: TradingIpSource;
   kiteConsoleUrl: string;
   note: string;
+  /** Active Kite API egress path chosen by the server. */
+  egressMode?: KiteEgressMode;
+  egressLabel?: string;
+  /** True when server auto-switched off direct network to a whitelisted path. */
+  autoRouted?: boolean;
+  networkMatchesWhitelist?: boolean;
+  egressMatchesWhitelist?: boolean;
+  checkedAt?: string;
+  /** True when Wi-Fi was cycled to try to drop a bad public IP. */
+  networkRefreshAttempted?: boolean;
 }
 
 export const KITE_IP_WHITELIST_HELP =
-  "Kite Connect → your app → IP whitelist. Trades use 175.184.252.162 (Vercel) or 119.226.255.113 (this network) only.";
+  "Kite Connect allows 2 IPs only: 122.186.158.142 (localhost) · 175.184.252.162 (production). Off-whitelist IPs auto-route via production.";
 
 const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
 

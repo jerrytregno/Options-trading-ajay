@@ -16,17 +16,26 @@ export default function SettingsPage() {
   const [tradingIpInfo, setTradingIpInfo] = useState<TradingIpInfo | null>(null);
   const [ipCopied, setIpCopied] = useState(false);
 
-  useEffect(() => {
-    void (async () => {
-      try {
-        const res = await fetch("/api/kite/trading-ip?refresh=1", { credentials: "include" });
-        const json = await res.json();
-        if (res.ok) setTradingIpInfo(json.data as TradingIpInfo);
-      } catch {
-        /* ignore */
-      }
-    })();
+  const loadTradingIp = useCallback(async () => {
+    try {
+      const res = await fetch("/api/kite/trading-ip?refresh=1", { credentials: "include" });
+      const json = await res.json();
+      if (res.ok) setTradingIpInfo(json.data as TradingIpInfo);
+    } catch {
+      /* ignore */
+    }
   }, []);
+
+  useEffect(() => {
+    void loadTradingIp();
+  }, [loadTradingIp]);
+
+  useEffect(() => {
+    const ready = Boolean(tradingIpInfo?.egressReady && !tradingIpInfo?.ipMismatch);
+    const pollMs = ready ? 45_000 : 5_000;
+    const id = window.setInterval(() => void loadTradingIp(), pollMs);
+    return () => window.clearInterval(id);
+  }, [loadTradingIp, tradingIpInfo?.egressReady, tradingIpInfo?.ipMismatch]);
 
   const copyWhitelistIp = useCallback(async () => {
     const ip = tradingIpInfo?.outboundIp ?? tradingIpInfo?.whitelistIp;

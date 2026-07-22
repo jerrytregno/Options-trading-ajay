@@ -76,6 +76,57 @@ export function autoRefreshMs(interval: PredictionInterval): number {
   return PREDICTION_INTERVAL_MINUTES[interval] * 60_000;
 }
 
+/** NSE cash/index session first bar (IST). */
+export const NSE_SESSION_OPEN_MINUTES = 9 * 60 + 15;
+
+function getIstClockParts(now = new Date()) {
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+    hour12: false,
+  }).formatToParts(now);
+  const pick = (type: string) => Number(fmt.find((p) => p.type === type)?.value ?? 0);
+  return {
+    hour: pick("hour"),
+    minute: pick("minute"),
+    second: pick("second"),
+  };
+}
+
+/** Ms until shortly after the next {interval} candle close (IST, anchored from 9:15). */
+export function msUntilNextCandlePoll(
+  interval: PredictionInterval,
+  bufferMs = 3500,
+  nowMs = Date.now(),
+): number {
+  const step = PREDICTION_INTERVAL_MINUTES[interval];
+  const { hour, minute, second } = getIstClockParts(new Date(nowMs));
+  const totalMinutes = hour * 60 + minute;
+  const msIntoMinute = second * 1000 + (nowMs % 1000);
+
+  if (step === 1) {
+    return Math.max(500, 60_000 - msIntoMinute + bufferMs);
+  }
+
+  const relMinutes = totalMinutes - NSE_SESSION_OPEN_MINUTES;
+  if (relMinutes < 0) {
+    const waitMinutes = -relMinutes;
+    return waitMinutes * 60_000 + (60_000 - msIntoMinute) + bufferMs;
+  }
+
+  const mod = relMinutes % step;
+  let minutesUntilBoundary: number;
+  if (mod === 0) {
+    minutesUntilBoundary = msIntoMinute <= bufferMs + 2000 ? 0 : step;
+  } else {
+    minutesUntilBoundary = step - mod;
+  }
+
+  return minutesUntilBoundary * 60_000 + (60_000 - msIntoMinute) + bufferMs;
+}
+
 function istTimeLabel(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";

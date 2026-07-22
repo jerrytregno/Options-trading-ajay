@@ -1,0 +1,77 @@
+{
+  "interval": "5minute",
+  "days": 30,
+  "dateRange": {
+    "from": "2026-06-09",
+    "to": "2026-07-21"
+  },
+  "probStats": {
+    "bars": 2186,
+    "maxSideMedian": 0.5284,
+    "maxSideP90": 0.5714,
+    "maxSideMax": 0.6129,
+    "pctAtOrAbove60": 0.3,
+    "pctAtOrAbove65": 0.0,
+    "pctAtOrAbove70": 0.0,
+    "pctAtOrAbove75": 0.0
+  },
+  "sweep": [
+    {
+      "threshold": 0.52,
+      "thresholdPct": 52.0,
+      "calls": 1358,
+      "hits": 819,
+      "misses": 539,
+      "hitPct": 60.31,
+      "avgCallsPerDay": 45.3
+    },
+    {
+      "threshold": 0.55,
+      "thresholdPct": 55.0,
+      "calls": 523,
+      "hits": 365,
+      "misses": 158,
+      "hitPct": 69.79,
+      "avgCallsPerDay": 17.4
+    },
+    {
+      "threshold": 0.58,
+      "thresholdPct": 58.0,
+      "calls": 116,
+      "hits": 93,
+      "misses": 23,
+      "hitPct": 80.17,
+      "avgCallsPerDay": 3.9
+    },
+    {
+      "threshold": 0.6,
+      "thresholdPct": 60.0,
+      "calls": 7,
+      "hits": 6,
+      "misses": 1,
+      "hitPct": 85.71,
+      "avgCallsPerDay": 0.2
+    },
+    {
+      "threshold": 0.62,
+      "thresholdPct": 62.0,
+      "calls": 0,
+      "hits": 0,
+      "misses": 0,
+      "hitPct": null,
+      "avgCallsPerDay": 0.0
+    }
+  ],
+  "recommended": {
+    "threshold": 0.58,
+    "thresholdPct": 58.0,
+    "calls": 116,
+    "hits": 93,
+    "misses": 23,
+    "hitPct": 80.17,
+    "avgCallsPerDay": 3.9
+  },
+  "targetHitPct": 70.0,
+  "minCalls": 20,
+  "cachedAt": "2026-07-21T08:10:47.160Z"
+}

@@ -1,5 +1,5 @@
 import { isIpWhitelistedForKite } from "../src/lib/kite-trading-ip.js";
-import { getEgressRelayUrl, probeDirectIpv4 } from "./kite-http.js";
+import { getEgressRelayUrl, probeDirectIpv4, probeProductionAppEgressIpv4 } from "./kite-http.js";
 
 const TOKEN_COOKIE = "kite_access_token";
 const KITE_API_ORIGIN = "https://api.kite.trade";
@@ -56,12 +56,17 @@ async function fetchProductionApi(
   };
 }
 
-/** Local dev: route Kite API via production Vercel when this network IP is off-whitelist. */
+/** Local dev: route via production only when explicitly configured AND egress is whitelisted. */
 export async function shouldProxyKiteViaVercelApp(force = false): Promise<boolean> {
   if (process.env.VERCEL) return false;
-  if (!getEgressRelayUrl()) return false;
+  const relayBase = getEgressRelayUrl();
+  if (!relayBase) return false;
+
   const direct = await probeDirectIpv4(force);
-  return Boolean(direct && !isIpWhitelistedForKite(direct));
+  if (direct && isIpWhitelistedForKite(direct)) return false;
+
+  const productionEgress = await probeProductionAppEgressIpv4(force);
+  return Boolean(productionEgress && isIpWhitelistedForKite(productionEgress));
 }
 
 /**

@@ -25,8 +25,9 @@ import {
   resolveMarketProtection,
 } from "../src/lib/kite-orders.js";
 import { fetchLiveAtmScenarios } from "./prediction-option-pnl.js";
+import { fetchNineFifteenCandleHistory } from "./nine-fifteen-candles.js";
 import { getKiteInstruments } from "./kite-instruments.js";
-import { getRelaySecret, kiteHttpFetch } from "./kite-http.js";
+import { getRelaySecret, kiteHttpFetch, probeDirectIpv4 } from "./kite-http.js";
 import {
   assertKiteEgressReady,
   buildTradingIpInfo,
@@ -36,6 +37,7 @@ import {
   backtestPredictionDay,
   getPredictionStatus,
   livePrediction,
+  runThresholdSweep,
   trainPredictionModel,
   type PredictionDeps,
 } from "./prediction.js";
@@ -46,8 +48,11 @@ import {
 import {
   getMlTradingStatus,
   matchMlTradingPattern,
+  backtestMlTrading,
+  backtestMlTradingBatch,
   syncMlTradingData,
 } from "./ml-trading.js";
+import { parseMlTargetProfitInr } from "./ml-trading-options.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -932,6 +937,19 @@ function verifyRelaySecret(req: express.Request): boolean {
   return req.header("X-Kite-Relay-Secret") === secret;
 }
 
+app.get("/api/kite/public-egress-ip", async (_req, res) => {
+  try {
+    const ip = await probeDirectIpv4(true);
+    if (!ip) {
+      return res.status(502).json({ error: "Failed to detect egress IP" });
+    }
+    return res.json({ data: { ip } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to detect egress IP";
+    return res.status(502).json({ error: message });
+  }
+});
+
 app.get("/api/kite/relay-egress-ip", async (req, res) => {
   if (!verifyRelaySecret(req)) {
     return res.status(403).json({ error: "Forbidden" });
@@ -1338,6 +1356,22 @@ app.get("/api/kite/nifty-session", async (req, res) => {
       });
     }
     const message = error instanceof Error ? error.message : "Failed to load session context";
+    return res.status(502).json({ error: message });
+  }
+});
+
+app.get("/api/kite/nine-fifteen-candles", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const days = Math.min(Math.max(Number(req.query.days ?? 365), 30), 365);
+  const force = req.query.refresh === "1";
+
+  try {
+    const data = await fetchNineFifteenCandleHistory(accessToken, fetchHistoricalCandles, days, force);
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load 9:15 candles";
     return res.status(502).json({ error: message });
   }
 });
@@ -1921,6 +1955,31 @@ app.get("/api/prediction/status", async (req, res) => {
   }
 });
 
+app.get("/api/prediction/threshold-sweep", async (req, res) => {
+  const interval = (req.query.interval as string | undefined) ?? "5minute";
+  const days = Math.min(Math.max(Number(req.query.days ?? 30), 14), 90);
+  const refresh = req.query.refresh === "1" || req.query.refresh === "true";
+
+  try {
+    const status = await getPredictionStatus(interval);
+    if (!status.pythonAvailable) {
+      return res.status(503).json({ error: "Python 3 not available" });
+    }
+    if (!status.modelTrained) {
+      return res.status(404).json({ error: `Model not trained yet for ${interval}` });
+    }
+    if (!status.schemaCurrent) {
+      return res.status(409).json({ error: "Model outdated — retrain first." });
+    }
+
+    const data = await runThresholdSweep(interval, days, { refresh });
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Threshold sweep failed";
+    return res.status(400).json({ error: message });
+  }
+});
+
 app.post("/api/prediction/train", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
@@ -2116,6 +2175,7 @@ app.get("/api/ml-trading/match", async (req, res) => {
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
 
   const topK = Math.min(Math.max(Number(req.query.top ?? 8), 3), 20);
+  const targetProfitInr = parseMlTargetProfitInr(req.query.targetInr);
 
   try {
     const status = await getMlTradingStatus();
@@ -2131,10 +2191,78 @@ app.get("/api/ml-trading/match", async (req, res) => {
       return res.status(503).json({ error: "Kite API not configured" });
     }
 
-    const data = await matchMlTradingPattern(getMlTradingDeps(), accessToken, config.apiKey, topK);
+    const data = await matchMlTradingPattern(
+      getMlTradingDeps(),
+      accessToken,
+      config.apiKey,
+      topK,
+      targetProfitInr,
+    );
     return res.json({ data });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Pattern match failed";
+    return res.status(400).json({ error: message });
+  }
+});
+
+app.get("/api/ml-trading/backtest", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const targetDate = String(req.query.date ?? "").trim();
+  const topK = Math.min(Math.max(Number(req.query.top ?? 8), 3), 20);
+  const simulationBars = Math.min(Math.max(Number(req.query.bars ?? 1), 1), 6);
+
+  if (!targetDate) {
+    return res.status(400).json({ error: "Query param date is required (YYYY-MM-DD)" });
+  }
+
+  try {
+    const status = await getMlTradingStatus();
+    if (!status.pythonAvailable) {
+      return res.status(503).json({ error: "Python 3 not available" });
+    }
+
+    const data = await backtestMlTrading(getMlTradingDeps(), accessToken, targetDate, topK, simulationBars);
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Backtest failed";
+    return res.status(400).json({ error: message });
+  }
+});
+
+app.get("/api/ml-trading/backtest/batch", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const days = Math.min(Math.max(Number(req.query.days ?? 30), 5), 60);
+  const topK = Math.min(Math.max(Number(req.query.top ?? 8), 3), 20);
+  const simulationBars = Math.min(Math.max(Number(req.query.bars ?? 1), 1), 6);
+  const targetProfitInr = parseMlTargetProfitInr(req.query.targetInr);
+
+  try {
+    const status = await getMlTradingStatus();
+    if (!status.pythonAvailable) {
+      return res.status(503).json({ error: "Python 3 not available" });
+    }
+
+    const config = getKiteConfig();
+    if (!config.configured || !config.apiKey) {
+      return res.status(503).json({ error: "Kite API not configured" });
+    }
+
+    const data = await backtestMlTradingBatch(
+      getMlTradingDeps(),
+      accessToken,
+      config.apiKey,
+      days,
+      topK,
+      simulationBars,
+      targetProfitInr,
+    );
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Batch backtest failed";
     return res.status(400).json({ error: message });
   }
 });

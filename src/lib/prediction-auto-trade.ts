@@ -1,11 +1,13 @@
 import { calcPremiumPnl } from "@/lib/auto-trade";
 import {
+  displayConfidenceThreshold,
   getConfidentDirection,
-  DISPLAY_CONFIDENCE_THRESHOLD,
   type BarProbabilities,
 } from "@/lib/prediction-confidence";
 import {
   formatLivePredictionWindow,
+  horizonLabel,
+  msUntilNextCandlePoll,
   PREDICTION_INTERVAL_MINUTES,
   type PredictionInterval,
 } from "@/lib/prediction-intervals";
@@ -17,7 +19,7 @@ export const PREDICTION_AUTO_TARGET_NET_INR = 200;
 /** Net loss limit per trade (after ₹50 round-trip charges). */
 export const PREDICTION_AUTO_STOP_LOSS_NET_INR = 1000;
 export const PREDICTION_AUTO_BROKERAGE_INR = 50;
-/** Poll shortly after each 1m candle closes (IST). */
+/** Poll shortly after each candle closes (IST). */
 export const PREDICTION_AUTO_MINUTE_POLL_BUFFER_MS = 3500;
 /** Live option quote + P&L refresh while in a trade (ms). */
 export const PREDICTION_AUTO_QUOTE_MS = 250;
@@ -34,8 +36,10 @@ export function legFromOptionSymbol(tradingsymbol: string): TradeLeg | null {
   return null;
 }
 
-/** Minimum P(up)/P(down) to enter a trade from automated trading. */
-export const PREDICTION_AUTO_CONFIDENCE_THRESHOLD = DISPLAY_CONFIDENCE_THRESHOLD;
+/** Minimum P(up)/P(down) to enter a trade — matches display threshold per interval tab. */
+export function autoConfidenceThreshold(interval: PredictionInterval = "minute"): number {
+  return displayConfidenceThreshold(interval);
+}
 
 export const PREDICTION_POSITION_SYNC_MS = 2000;
 /** Zerodha position qty verification while in a trade (less frequent than quotes). */
@@ -189,7 +193,16 @@ export function targetCandleStartMs(
   return base + PREDICTION_INTERVAL_MINUTES[interval] * 60_000;
 }
 
-/** True during the predicted 1m candle — entry aligned to next-minute chart. */
+/** True during the predicted candle entry window (same length as selected interval). */
+export function isWithinNextCandleEntryWindow(
+  asOf: string,
+  interval: PredictionInterval = "minute",
+  nowMs = Date.now(),
+): boolean {
+  return isWithinNextMinuteEntryWindow(asOf, interval, nowMs);
+}
+
+/** @deprecated use isWithinNextCandleEntryWindow */
 export function isWithinNextMinuteEntryWindow(
   asOf: string,
   interval: PredictionInterval = "minute",
@@ -202,22 +215,16 @@ export function isWithinNextMinuteEntryWindow(
 }
 
 export function msUntilNextMinutePoll(bufferMs = PREDICTION_AUTO_MINUTE_POLL_BUFFER_MS): number {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Kolkata",
-    minute: "numeric",
-    second: "numeric",
-    hour12: false,
-  }).formatToParts(new Date());
-  const sec = Number(parts.find((p) => p.type === "second")?.value ?? 0);
-  const msIntoMinute = sec * 1000 + (Date.now() % 1000);
-  const wait = 60_000 - msIntoMinute + bufferMs;
-  return Math.max(500, wait);
+  return msUntilNextCandlePoll("minute", bufferMs);
 }
 
-export function predictionLegFromLive(live: PredictionLiveResult): TradeLeg | null {
+export function predictionLegFromLive(
+  live: PredictionLiveResult,
+  interval: PredictionInterval = "minute",
+): TradeLeg | null {
   const direction = getConfidentDirection(
     live.probabilities as BarProbabilities,
-    PREDICTION_AUTO_CONFIDENCE_THRESHOLD,
+    autoConfidenceThreshold(interval),
     0,
   );
   if (direction === "up") return "CE_BUY";
@@ -242,26 +249,31 @@ export function isActionableNextMinuteSignal(
       reason: `${window.toLabel || "Next"} · waiting for entry window`,
     };
   }
-  const leg = predictionLegFromLive(live);
+  const leg = predictionLegFromLive(live, interval);
   if (!leg) {
     const { down, up } = live.probabilities;
     const best = Math.max(down, up);
+    const threshold = autoConfidenceThreshold(interval);
     const window = formatLivePredictionWindow(live.asOf, interval, nowMs);
     return {
       ok: false,
-      reason: `${window.toLabel || "Next"} · below ${(PREDICTION_AUTO_CONFIDENCE_THRESHOLD * 100).toFixed(0)}% (best ${(best * 100).toFixed(1)}%)`,
+      reason: `${window.toLabel || "Next"} · below ${(threshold * 100).toFixed(0)}% (best ${(best * 100).toFixed(1)}%)`,
     };
   }
   return { ok: true, leg };
 }
 
-export function predictionConfidenceLabel(live: PredictionLiveResult): string {
+export function predictionConfidenceLabel(
+  live: PredictionLiveResult,
+  interval: PredictionInterval = "minute",
+): string {
   const { down, up } = live.probabilities;
-  const direction = getConfidentDirection(live.probabilities, PREDICTION_AUTO_CONFIDENCE_THRESHOLD, 0);
+  const threshold = autoConfidenceThreshold(interval);
+  const direction = getConfidentDirection(live.probabilities, threshold, 0);
   if (direction === "up") return `Up ${(up * 100).toFixed(1)}%`;
   if (direction === "down") return `Down ${(down * 100).toFixed(1)}%`;
   const best = Math.max(down, up);
-  return `Below ${(PREDICTION_AUTO_CONFIDENCE_THRESHOLD * 100).toFixed(0)}% (best ${(best * 100).toFixed(1)}%)`;
+  return `Below ${(threshold * 100).toFixed(0)}% (best ${(best * 100).toFixed(1)}%)`;
 }
 
 export function nextMinuteWatchLabel(
@@ -269,9 +281,10 @@ export function nextMinuteWatchLabel(
   interval: PredictionInterval = "minute",
   nowMs = Date.now(),
 ): string {
-  if (!live?.asOf) return "Waiting for next 1m prediction…";
+  const label = horizonLabel(interval);
+  if (!live?.asOf) return `Waiting for next ${label} prediction…`;
   const window = formatLivePredictionWindow(live.asOf, interval, nowMs);
-  return `${window.summary} · ${predictionConfidenceLabel(live)}`;
+  return `${window.summary} · ${predictionConfidenceLabel(live, interval)}`;
 }
 
 /** Faster polling near / inside the predicted candle entry window. */
@@ -280,17 +293,20 @@ export function msUntilNextAutoTradePoll(
   interval: PredictionInterval = "minute",
   nowMs = Date.now(),
 ): number {
-  if (!live?.asOf || interval !== "minute") {
-    return msUntilNextMinutePoll();
+  const scheduleBase = () =>
+    msUntilNextCandlePoll(interval, PREDICTION_AUTO_MINUTE_POLL_BUFFER_MS, nowMs);
+
+  if (!live?.asOf) {
+    return scheduleBase();
   }
   const targetStart = targetCandleStartMs(live.asOf, interval);
-  if (targetStart == null) return msUntilNextMinutePoll();
+  if (targetStart == null) return scheduleBase();
   const windowMs = PREDICTION_INTERVAL_MINUTES[interval] * 60_000;
   const windowEnd = targetStart + windowMs;
   if (nowMs >= targetStart - 10_000 && nowMs < windowEnd + 3000) {
     return 2000;
   }
-  return msUntilNextMinutePoll();
+  return scheduleBase();
 }
 
 export async function fetchNiftySpotPrice(): Promise<number | null> {
@@ -309,9 +325,14 @@ export async function fetchNiftySpotPrice(): Promise<number | null> {
   }
 }
 
-export async function fetchPredictionLive(): Promise<PredictionLiveResult | null> {
+export async function fetchPredictionLive(
+  interval: PredictionInterval = "minute",
+): Promise<PredictionLiveResult | null> {
   try {
-    const res = await fetch("/api/prediction/live?interval=minute", { credentials: "include" });
+    const res = await fetch(
+      `/api/prediction/live?interval=${encodeURIComponent(interval)}`,
+      { credentials: "include" },
+    );
     const json = await res.json();
     if (!res.ok) return null;
     return json.data as PredictionLiveResult;

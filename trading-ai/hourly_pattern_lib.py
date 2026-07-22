@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -874,4 +875,262 @@ def match_current_day(
         "libraryDays": len(patterns),
         "usedClosestMatch": used_closest,
         "bestSimilarity": round(top_matches[0]["similarity"], 4),
+    }
+
+
+def _truncate_day_pattern(day: DayPattern, bars: int) -> DayPattern:
+    count = min(max(bars, 1), len(day.slots))
+    slots = day.slots[:count]
+    day_open = day.day_open
+    day_close = float(slots[-1].close)
+    day_high = max(s.high for s in slots)
+    day_low = min(s.low for s in slots)
+    day_return_pct = (day_close - day_open) / day_open * 100.0 if day_open > 0 else 0.0
+    return DayPattern(
+        date=day.date,
+        day_open=round(day_open, 2),
+        day_close=round(day_close, 2),
+        day_high=round(day_high, 2),
+        day_low=round(day_low, 2),
+        day_return_pct=round(day_return_pct, 3),
+        outcome=_outcome_from_return(day_return_pct),
+        bar_count=len(slots),
+        slots=slots,
+        vector=_slot_vector(slots).tolist(),
+    )
+
+
+def _build_backtest_comparison(
+    hour_predictions: list[dict[str, Any]],
+    target_full: DayPattern,
+) -> list[dict[str, Any]]:
+    actual_by_label = {slot.hour_label: slot for slot in target_full.slots}
+    rows: list[dict[str, Any]] = []
+
+    for pred in hour_predictions:
+        label = str(pred.get("hourLabel", ""))
+        actual = actual_by_label.get(label)
+        if actual is None:
+            continue
+
+        pred_close = pred.get("predClose")
+        actual_bias = _hour_bias(actual.open, actual.close)
+        close_error_pct: float | None = None
+        if pred.get("status") == "predicted" and pred_close is not None and actual.open > 0:
+            close_error_pct = round((float(pred_close) - actual.close) / actual.open * 100.0, 3)
+
+        rows.append(
+            {
+                "hourLabel": label,
+                "hourIndex": pred.get("hourIndex"),
+                "status": pred.get("status"),
+                "predOpen": pred.get("predOpen"),
+                "predHigh": pred.get("predHigh"),
+                "predLow": pred.get("predLow"),
+                "predClose": pred_close,
+                "actualOpen": round(actual.open, 2),
+                "actualHigh": round(actual.high, 2),
+                "actualLow": round(actual.low, 2),
+                "actualClose": round(actual.close, 2),
+                "closeErrorPct": close_error_pct,
+                "predBias": pred.get("hourBias"),
+                "actualBias": actual_bias,
+                "biasCorrect": pred.get("hourBias") == actual_bias if pred.get("status") == "predicted" else None,
+                "confidence": pred.get("confidence"),
+            }
+        )
+
+    return rows
+
+
+def _backtest_single_from_patterns(
+    all_patterns: list[DayPattern],
+    target_date: str,
+    top_k: int = 8,
+    simulation_bars: int = 1,
+    include_full_match: bool = True,
+) -> dict[str, Any]:
+    target_dt = datetime.strptime(target_date, "%Y-%m-%d")
+    start_date = (target_dt - timedelta(days=365)).strftime("%Y-%m-%d")
+
+    library = [p for p in all_patterns if start_date <= p.date < target_date]
+    target_full = next((p for p in all_patterns if p.date == target_date), None)
+
+    if target_full is None:
+        raise ValueError(f"No hourly session data for {target_date}")
+    if len(library) < 20:
+        raise ValueError(f"Not enough history in 1-year window ({len(library)} days)")
+
+    sim_bars = min(max(simulation_bars, 1), target_full.bar_count)
+    partial_target = _truncate_day_pattern(target_full, sim_bars)
+    patterns_for_match = library + [partial_target]
+
+    match_result = match_all_patterns(patterns_for_match, current_date=target_date, top_k=top_k)
+    comparison = _build_backtest_comparison(match_result.get("hourPredictions") or [], target_full)
+
+    predicted_outcome = str(match_result.get("prediction", "neutral"))
+    actual_outcome = target_full.outcome
+    direction_correct = predicted_outcome == actual_outcome
+
+    predicted_hours = [row for row in comparison if row.get("status") == "predicted"]
+    hour_close_errors = [
+        abs(float(row["closeErrorPct"]))
+        for row in predicted_hours
+        if row.get("closeErrorPct") is not None
+    ]
+    hour_bias_correct = sum(1 for row in predicted_hours if row.get("biasCorrect") is True)
+    predicted_day_return = float(match_result.get("expectedDayReturnPct") or 0)
+    actual_day_return = float(target_full.day_return_pct)
+    day_return_error = abs(predicted_day_return - actual_day_return)
+
+    last_pred_close = predicted_hours[-1]["predClose"] if predicted_hours else partial_target.day_close
+    close_error_pct = (
+        round((float(last_pred_close) - target_full.day_close) / target_full.day_open * 100.0, 3)
+        if target_full.day_open > 0 and last_pred_close is not None
+        else None
+    )
+
+    backtest_meta = {
+        "targetDate": target_date,
+        "libraryStart": start_date,
+        "libraryEnd": library[-1].date,
+        "libraryDays": len(library),
+        "candleWindowDays": 365,
+        "simulationBars": sim_bars,
+        "simulationThrough": partial_target.slots[-1].hour_label if partial_target.slots else None,
+        "actual": {
+            "dayOpen": target_full.day_open,
+            "dayClose": target_full.day_close,
+            "dayHigh": target_full.day_high,
+            "dayLow": target_full.day_low,
+            "dayReturnPct": target_full.day_return_pct,
+            "outcome": actual_outcome,
+            "barCount": target_full.bar_count,
+            "slots": [asdict(s) for s in target_full.slots],
+        },
+        "comparison": comparison,
+        "accuracy": {
+            "directionCorrect": direction_correct,
+            "predictedOutcome": predicted_outcome,
+            "actualOutcome": actual_outcome,
+            "predictedDayReturnPct": round(predicted_day_return, 3),
+            "actualDayReturnPct": round(actual_day_return, 3),
+            "dayReturnErrorPct": round(day_return_error, 3),
+            "predictedClose": round(float(last_pred_close), 2) if last_pred_close is not None else None,
+            "actualClose": target_full.day_close,
+            "closeErrorPct": close_error_pct,
+            "hourCloseMaePct": round(sum(hour_close_errors) / len(hour_close_errors), 3)
+            if hour_close_errors
+            else None,
+            "predictedHourCount": len(predicted_hours),
+            "hourBiasAccuracyPct": round(hour_bias_correct / len(predicted_hours) * 100.0, 1)
+            if predicted_hours
+            else None,
+        },
+    }
+
+    if not include_full_match:
+        return backtest_meta
+
+    return {**match_result, "backtest": backtest_meta}
+
+
+def backtest_ml_trading(
+    candles: list,
+    target_date: str,
+    top_k: int = 8,
+    simulation_bars: int = 1,
+) -> dict[str, Any]:
+    """Walk-forward backtest: 1-year library strictly before target date, predict from first bar."""
+    all_patterns = build_day_patterns(candles)
+    if not all_patterns:
+        raise ValueError("No hourly patterns could be built from candles")
+    return _backtest_single_from_patterns(all_patterns, target_date, top_k, simulation_bars, True)
+
+
+def backtest_ml_trading_batch(
+    candles: list,
+    days: int = 30,
+    top_k: int = 8,
+    simulation_bars: int = 1,
+) -> dict[str, Any]:
+    """Backtest the last N trading sessions; report direction hit-rate."""
+    all_patterns = build_day_patterns(candles)
+    if not all_patterns:
+        raise ValueError("No hourly patterns could be built from candles")
+
+    sorted_dates = sorted({p.date for p in all_patterns})
+    if len(sorted_dates) < days:
+        raise ValueError(f"Need at least {days} trading days in candle data (have {len(sorted_dates)})")
+
+    target_dates = sorted_dates[-days:]
+    day_rows: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for target_date in target_dates:
+        try:
+            meta = _backtest_single_from_patterns(
+                all_patterns,
+                target_date,
+                top_k=top_k,
+                simulation_bars=simulation_bars,
+                include_full_match=False,
+            )
+            acc = meta["accuracy"]
+            actual_slots = (meta.get("actual") or {}).get("slots") or []
+            day_rows.append(
+                {
+                    "date": target_date,
+                    "directionCorrect": acc["directionCorrect"],
+                    "predictedOutcome": acc["predictedOutcome"],
+                    "actualOutcome": acc["actualOutcome"],
+                    "predictedDayReturnPct": acc["predictedDayReturnPct"],
+                    "actualDayReturnPct": acc["actualDayReturnPct"],
+                    "dayReturnErrorPct": acc["dayReturnErrorPct"],
+                    "confidence": None,
+                    "actualSlots": actual_slots,
+                }
+            )
+        except ValueError as exc:
+            skipped.append({"date": target_date, "error": str(exc)})
+
+    tested = len(day_rows)
+    correct = sum(1 for row in day_rows if row["directionCorrect"])
+    wrong = tested - correct
+
+    def count_outcome(key: str, value: str) -> dict[str, int]:
+        subset = [row for row in day_rows if row[key] == value]
+        return {
+            "count": len(subset),
+            "correct": sum(1 for row in subset if row["directionCorrect"]),
+        }
+
+    avg_day_error = (
+        round(sum(float(row["dayReturnErrorPct"]) for row in day_rows) / tested, 3) if tested else None
+    )
+
+    return {
+        "daysRequested": days,
+        "daysTested": tested,
+        "daysSkipped": len(skipped),
+        "daysCorrect": correct,
+        "daysWrong": wrong,
+        "directionAccuracyPct": round(correct / tested * 100.0, 1) if tested else 0.0,
+        "avgDayReturnErrorPct": avg_day_error,
+        "dateRange": {
+            "first": target_dates[0] if target_dates else None,
+            "last": target_dates[-1] if target_dates else None,
+        },
+        "byPredictedOutcome": {
+            "bullish": count_outcome("predictedOutcome", "bullish"),
+            "bearish": count_outcome("predictedOutcome", "bearish"),
+            "neutral": count_outcome("predictedOutcome", "neutral"),
+        },
+        "byActualOutcome": {
+            "bullish": count_outcome("actualOutcome", "bullish"),
+            "bearish": count_outcome("actualOutcome", "bearish"),
+            "neutral": count_outcome("actualOutcome", "neutral"),
+        },
+        "days": day_rows,
+        "skipped": skipped,
     }

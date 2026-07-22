@@ -8,6 +8,7 @@ import StreamingPage from "@/pages/StreamingPage";
 import PortfolioPage from "@/pages/PortfolioPage";
 import PredictionModelPage from "@/pages/PredictionModelPage";
 import MlTradingPage from "@/pages/MlTradingPage";
+import NineFifteenPage from "@/pages/NineFifteenPage";
 import SettingsPage from "@/pages/SettingsPage";
 
 export default function App() {
@@ -20,6 +21,7 @@ export default function App() {
       <Route path="/dashboard/streaming" element={<StreamingPage />} />
       <Route path="/dashboard/prediction" element={<PredictionModelPage />} />
       <Route path="/dashboard/ml-trading" element={<MlTradingPage />} />
+      <Route path="/dashboard/nine-fifteen" element={<NineFifteenPage />} />
       <Route path="/dashboard/gemini" element={<GeminiTradingPage />} />
       <Route path="/dashboard/trade" element={<TradePage />} />
       <Route path="/dashboard/portfolio" element={<PortfolioPage />} />

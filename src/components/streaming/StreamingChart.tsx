@@ -5,10 +5,11 @@ import { useTheme } from "@/contexts/theme-context";
 
 interface StreamingChartProps {
   candles: ParsedCandle[];
-  /** 1-minute RSI series (session + stream) — aligned to chart time axis */
+  /** RSI series aligned to chart time axis */
   rsiSeries: RsiPoint[];
   height?: number;
   symbol?: string;
+  rsiLabel?: string;
 }
 
 const DARK_COLORS = {
@@ -279,6 +280,7 @@ export function StreamingChart({
   rsiSeries,
   height = 480,
   symbol = "Chart",
+  rsiLabel = "RSI (14 · 1m)",
 }: StreamingChartProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -440,7 +442,7 @@ export function StreamingChart({
       ctx.font = "600 9px ui-sans-serif, system-ui";
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
-      ctx.fillText("RSI (14 · 1m)", layout.rsi.left + 8, layout.rsi.top + 5);
+      ctx.fillText(rsiLabel, layout.rsi.left + 8, layout.rsi.top + 5);
 
       const windowStart = candles[layout.startIndex]?.timestamp ?? 0;
       const windowEnd = candles[candles.length - 1]?.timestamp ?? windowStart;
@@ -524,7 +526,7 @@ export function StreamingChart({
     const observer = new ResizeObserver(draw);
     observer.observe(container);
     return () => observer.disconnect();
-  }, [candles, rsiSeries, height, isLight]);
+  }, [candles, rsiSeries, height, isLight, rsiLabel]);
 
   return (
     <div ref={containerRef} className="stream-chart-wrap stream-chart-wrap-modern">

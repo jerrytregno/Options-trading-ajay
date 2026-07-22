@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { IndianRupee, TrendingDown, TrendingUp } from "lucide-react";
-import { DISPLAY_CONFIDENCE_THRESHOLD } from "@/lib/prediction-confidence";
+import { displayConfidenceThreshold } from "@/lib/prediction-confidence";
 import { PREDICTION_AUTO_TARGET_NET_INR } from "@/lib/prediction-auto-trade";
 import type { PredictionInterval } from "@/lib/prediction-intervals";
 import { PREDICTION_INTERVAL_MINUTES } from "@/lib/prediction-intervals";
@@ -83,6 +83,7 @@ function ScenarioCard({
   symbol,
   scenario,
   targetLabel,
+  tradeThresholdPct,
 }: {
   title: string;
   icon: typeof TrendingUp;
@@ -94,6 +95,7 @@ function ScenarioCard({
   symbol: string;
   scenario: LiveAtmScenarios["up"];
   targetLabel: string;
+  tradeThresholdPct: number;
 }) {
   const active = scenario.signalAtThreshold;
   const probPct = formatNumber(scenario.probability * 100, 1);
@@ -136,7 +138,7 @@ function ScenarioCard({
           <ProfitTargetBlock scenario={scenario} />
           <div className="prediction-atm-projection">
           <span className="prediction-atm-projection-label">
-            If ≥{formatNumber(DISPLAY_CONFIDENCE_THRESHOLD * 100, 0)}% — enter now, exit at{" "}
+            If ≥{formatNumber(tradeThresholdPct, 0)}% — enter now, exit at{" "}
             {targetLabel} close
           </span>
           {scenario.candleClosed && scenario.exitPremiumAtClose != null ? (
@@ -195,7 +197,7 @@ function ScenarioCard({
         </>
       ) : (
         <p className="prediction-atm-muted-note text-muted">
-          Needs ≥{formatNumber(DISPLAY_CONFIDENCE_THRESHOLD * 100, 0)}% to show exit-at-close
+          Needs ≥{formatNumber(tradeThresholdPct, 0)}% to show exit-at-close
           profit for this side.
         </p>
       )}
@@ -219,6 +221,8 @@ export function PredictionAtmLivePanel({
 }: Props) {
   const [atm, setAtm] = useState<LiveAtmScenarios | null>(null);
   const [loading, setLoading] = useState(false);
+  const tradeThreshold = displayConfidenceThreshold(interval);
+  const tradeThresholdPct = tradeThreshold * 100;
 
   const loadAtm = useCallback(async () => {
     if (!connected || !modelReady || !live?.asOf) return;
@@ -229,7 +233,7 @@ export function PredictionAtmLivePanel({
         interval,
         probUp: String(live.probabilities.up ?? 0),
         probDown: String(live.probabilities.down ?? 0),
-        threshold: String(DISPLAY_CONFIDENCE_THRESHOLD),
+        threshold: String(tradeThreshold),
       });
       const res = await fetch(`/api/prediction/atm-scenarios?${params}`, {
         credentials: "include",
@@ -242,7 +246,7 @@ export function PredictionAtmLivePanel({
     } finally {
       setLoading(false);
     }
-  }, [connected, modelReady, interval, live?.asOf, live?.probabilities.down, live?.probabilities.up]);
+  }, [connected, modelReady, interval, live?.asOf, live?.probabilities.down, live?.probabilities.up, tradeThreshold]);
 
   useEffect(() => {
     void loadAtm();
@@ -292,6 +296,7 @@ export function PredictionAtmLivePanel({
                 symbol={atm.callSymbol}
                 scenario={atm.up}
                 targetLabel={targetLabel}
+                tradeThresholdPct={tradeThresholdPct}
               />
               <ScenarioCard
                 title="Put Buy"
@@ -304,6 +309,7 @@ export function PredictionAtmLivePanel({
                 symbol={atm.putSymbol}
                 scenario={atm.down}
                 targetLabel={targetLabel}
+                tradeThresholdPct={tradeThresholdPct}
               />
             </div>
           )}

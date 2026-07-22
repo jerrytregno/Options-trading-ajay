@@ -134,11 +134,11 @@ function intervalLabel(interval: PredictionInterval) {
 
 function runPython(
   script: string,
-  options?: { stdin?: string; interval?: PredictionInterval },
+  options?: { stdin?: string; interval?: PredictionInterval; args?: string[] },
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const interval = options?.interval ?? "minute";
   return new Promise((resolve) => {
-    const child = spawn("python3", [path.join(TRADING_AI_DIR, script)], {
+    const child = spawn("python3", [path.join(TRADING_AI_DIR, script), ...(options?.args ?? [])], {
       cwd: TRADING_AI_DIR,
       env: {
         ...process.env,
@@ -783,4 +783,109 @@ export async function backtestPredictionDay(
   }
 
   return data;
+}
+
+export interface ThresholdSweepRow {
+  threshold: number;
+  thresholdPct: number;
+  calls: number;
+  hits: number;
+  misses: number;
+  hitPct: number | null;
+  avgCallsPerDay: number;
+}
+
+export interface ThresholdProbStats {
+  bars: number;
+  maxSideMedian: number;
+  maxSideP90: number;
+  maxSideMax: number;
+  pctAtOrAbove60: number;
+  pctAtOrAbove65: number;
+  pctAtOrAbove70: number;
+  pctAtOrAbove75: number;
+}
+
+export interface ThresholdSweepResult {
+  interval: PredictionInterval;
+  days: number;
+  dateRange: { from: string; to: string } | null;
+  probStats: ThresholdProbStats;
+  sweep: ThresholdSweepRow[];
+  recommended: ThresholdSweepRow | null;
+  targetHitPct: number;
+  minCalls: number;
+  cachedAt?: string;
+}
+
+function thresholdSweepPath(interval: PredictionInterval) {
+  return path.join(intervalModelDir(interval), "threshold_sweep.json");
+}
+
+function readCachedThresholdSweep(interval: PredictionInterval): ThresholdSweepResult | null {
+  const file = thresholdSweepPath(interval);
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8")) as ThresholdSweepResult;
+  } catch {
+    return null;
+  }
+}
+
+/** Walk saved candles and find the lowest threshold with ≥70% directional hit rate. */
+export async function runThresholdSweep(
+  intervalInput = "5minute",
+  days = 30,
+  options?: { refresh?: boolean },
+): Promise<ThresholdSweepResult> {
+  const interval = parsePredictionInterval(intervalInput);
+  const cached = readCachedThresholdSweep(interval);
+  if (cached && !options?.refresh) return cached;
+
+  if (!modelExists(interval)) {
+    throw new Error(`Model not trained yet for ${intervalLabel(interval)}`);
+  }
+  if (!isModelSchemaCurrent(readMetrics(interval), interval)) {
+    throw new Error(`Model outdated for ${intervalLabel(interval)} — retrain first.`);
+  }
+  if (!fs.existsSync(rawPath(interval))) {
+    throw new Error(`No saved candle data for ${intervalLabel(interval)} — train with Kite connected first.`);
+  }
+
+  const result = await runPython("sweep_threshold.py", {
+    interval,
+    args: [interval, String(days)],
+  });
+  const lastLine = result.stdout.trim().split("\n").pop() ?? "";
+  let parsed: { ok?: boolean; error?: string } & ThresholdSweepResult;
+  try {
+    parsed = JSON.parse(lastLine) as typeof parsed;
+  } catch {
+    throw new Error(formatPythonError(result.stderr, result.stdout, interval));
+  }
+
+  if (result.code !== 0 || parsed.error || !parsed.ok) {
+    throw new Error(parsed.error ?? formatPythonError(result.stderr, result.stdout, interval));
+  }
+
+  const payload: ThresholdSweepResult = {
+    interval: parsed.interval ?? interval,
+    days: parsed.days,
+    dateRange: parsed.dateRange ?? null,
+    probStats: parsed.probStats,
+    sweep: parsed.sweep,
+    recommended: parsed.recommended ?? null,
+    targetHitPct: parsed.targetHitPct ?? 70,
+    minCalls: parsed.minCalls ?? 20,
+    cachedAt: new Date().toISOString(),
+  };
+
+  fs.mkdirSync(intervalModelDir(interval), { recursive: true });
+  fs.writeFileSync(thresholdSweepPath(interval), JSON.stringify(payload, null, 2));
+  return payload;
+}
+
+export function recommendedTradeThreshold(interval: PredictionInterval): number | null {
+  const sweep = readCachedThresholdSweep(interval);
+  return sweep?.recommended?.threshold ?? null;
 }

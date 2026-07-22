@@ -6,25 +6,47 @@ import { ZERODHA_ROUND_TRIP_CHARGE_INR } from "./prediction-option-pnl.js";
 const KITE_BASE = "https://api.kite.trade";
 const CHAIN_SYMBOL = "NIFTY";
 const ENTRY_TIME = "09:15";
-const EXIT_TIME = "15:15";
+const SESSION_END_TIME = "15:29";
 const OPTION_INTERVAL = "minute";
 const DEFAULT_IV = 0.16;
+
+/** Exit when net profit reaches this fixed INR amount (after brokerage). Default only — UI/API can override. */
+export const ML_OPTION_TARGET_PROFIT_INR = 500;
+
+/** Always trade exactly one NFO lot (lot size from instrument master, e.g. 75). */
+export const ML_OPTION_LOTS = 1;
+
+const MIN_TARGET_PROFIT_INR = 1;
+const MAX_TARGET_PROFIT_INR = 1_000_000;
+
+export function parseMlTargetProfitInr(raw: unknown, fallback = ML_OPTION_TARGET_PROFIT_INR): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(MAX_TARGET_PROFIT_INR, Math.max(MIN_TARGET_PROFIT_INR, Math.round(n)));
+}
 
 export interface MlTradingHourSlotLike {
   hour_label: string;
   open: number;
+  high: number;
+  low: number;
   close: number;
 }
 
 export interface MlTradingOptionTrade {
   date: string;
   entryTime: typeof ENTRY_TIME;
-  exitTime: typeof EXIT_TIME;
+  exitTime: string;
+  exitReason: "target" | "eod";
+  targetProfitInr: number;
+  targetProfitRupees: number;
+  targetHit: boolean;
   side: "CE" | "PE";
   action: "Buy Call" | "Buy Put";
   atmStrike: number;
   expiry: string;
   lotSize: number;
+  lots: number;
   symbol: string | null;
   entrySpot: number;
   exitSpot: number;
@@ -46,6 +68,16 @@ interface OptionContext {
   strikes: number[];
   lotSize: number;
   expiry: string;
+}
+
+interface TargetExitResult {
+  hit: boolean;
+  exitTime: string;
+  exitPremium: number;
+  exitSpot: number;
+  exitReason: "target" | "eod";
+  grossPnlRupees: number;
+  netPnlRupees: number;
 }
 
 async function kiteGet<T>(path: string, accessToken: string, apiKey: string): Promise<T> {
@@ -120,27 +152,25 @@ function candleMinuteKey(raw: string | number | Date): string {
   return s.slice(0, 16);
 }
 
-function buildCandlePriceMaps(candles: unknown[]): {
-  closeMap: Map<string, number>;
-  openMap: Map<string, number>;
-} {
+function buildMinuteCloseMap(candles: unknown[]): Map<string, number> {
   const closeMap = new Map<string, number>();
-  const openMap = new Map<string, number>();
   for (const candle of candles) {
     if (!Array.isArray(candle) || candle[0] == null) continue;
     const key = candleMinuteKey(String(candle[0]));
-    const open = Number(candle[1]);
     const close = Number(candle[4]);
-    if (Number.isFinite(open)) openMap.set(key, open);
+    const open = Number(candle[1]);
     if (Number.isFinite(close)) closeMap.set(key, close);
+    if (Number.isFinite(open)) closeMap.set(`${key}:open`, open);
   }
-  return { closeMap, openMap };
+  return closeMap;
 }
 
 function lookupPremium(map: Map<string, number>, key: string): number | null {
   if (!key) return null;
   const direct = map.get(key);
   if (direct != null) return direct;
+  const open = map.get(`${key}:open`);
+  if (open != null) return open;
   const [datePart, timePart] = key.split(" ");
   const [hh, mm] = timePart.split(":").map(Number);
   const prev = `${datePart} ${String(hh).padStart(2, "0")}:${String(Math.max(0, mm - 1)).padStart(2, "0")}`;
@@ -148,22 +178,156 @@ function lookupPremium(map: Map<string, number>, key: string): number | null {
   return map.get(prev) ?? map.get(next) ?? null;
 }
 
-function spotAtTime(slots: MlTradingHourSlotLike[], timeLabel: string, field: "open" | "close"): number | null {
+function sortedMinuteKeys(priceMap: Map<string, number>, afterKey: string, untilKey: string): string[] {
+  return [...priceMap.keys()]
+    .filter((key) => !key.endsWith(":open") && key > afterKey && key <= untilKey)
+    .sort();
+}
+
+function exitTimeLabel(exitKey: string): string {
+  return exitKey.split(" ")[1] ?? exitKey;
+}
+
+function targetNetProfitRupees(targetInr = ML_OPTION_TARGET_PROFIT_INR): number {
+  return targetInr;
+}
+
+function spotAtTime(
+  slots: MlTradingHourSlotLike[],
+  timeLabel: string,
+  field: "open" | "close",
+): number | null {
   const slot = slots.find((s) => s.hour_label === timeLabel);
   if (slot) return slot[field];
   if (timeLabel === ENTRY_TIME && slots.length > 0) return slots[0].open;
-  if (timeLabel === EXIT_TIME && slots.length > 0) return slots[slots.length - 1].close;
+  if (slots.length > 0) return slots[slots.length - 1].close;
   return null;
 }
 
-function sideFromOutcome(outcome: string | undefined, entrySpot: number, exitSpot: number): "CE" | "PE" {
-  if (outcome === "bearish") return "PE";
-  if (outcome === "bullish") return "CE";
-  return exitSpot >= entrySpot ? "CE" : "PE";
+function sideFromPrediction(predictedOutcome: string, predictedDayReturnPct = 0): "CE" | "PE" {
+  if (predictedOutcome === "bearish") return "PE";
+  if (predictedOutcome === "bullish") return "CE";
+  return predictedDayReturnPct >= 0 ? "CE" : "PE";
 }
 
 function actionLabel(side: "CE" | "PE"): "Buy Call" | "Buy Put" {
   return side === "CE" ? "Buy Call" : "Buy Put";
+}
+
+function scanTargetProfitExit(
+  closeMap: Map<string, number>,
+  entryKey: string,
+  sessionEndKey: string,
+  entryPremium: number,
+  quantity: number,
+  spotByTime: Map<string, number>,
+  targetInr = ML_OPTION_TARGET_PROFIT_INR,
+): TargetExitResult {
+  const targetNet = targetNetProfitRupees(targetInr);
+  const forwardKeys = sortedMinuteKeys(closeMap, entryKey, sessionEndKey);
+
+  for (const minuteKey of forwardKeys) {
+    const premium = lookupPremium(closeMap, minuteKey);
+    if (premium == null) continue;
+    const gross = (premium - entryPremium) * quantity;
+    const net = gross - ZERODHA_ROUND_TRIP_CHARGE_INR;
+    if (net >= targetNet) {
+      return {
+        hit: true,
+        exitTime: exitTimeLabel(minuteKey),
+        exitPremium: premium,
+        exitSpot: spotByTime.get(minuteKey) ?? spotByTime.get(exitTimeLabel(minuteKey)) ?? 0,
+        exitReason: "target",
+        grossPnlRupees: Number(gross.toFixed(2)),
+        netPnlRupees: Number(net.toFixed(2)),
+      };
+    }
+  }
+
+  const lastKey = forwardKeys[forwardKeys.length - 1] ?? sessionEndKey;
+  const lastPremium = lookupPremium(closeMap, lastKey) ?? entryPremium;
+  const gross = (lastPremium - entryPremium) * quantity;
+  const net = gross - ZERODHA_ROUND_TRIP_CHARGE_INR;
+  return {
+    hit: false,
+    exitTime: exitTimeLabel(lastKey),
+    exitPremium: lastPremium,
+    exitSpot: spotByTime.get(lastKey) ?? spotByTime.get(exitTimeLabel(lastKey)) ?? 0,
+    exitReason: "eod",
+    grossPnlRupees: Number(gross.toFixed(2)),
+    netPnlRupees: Number(net.toFixed(2)),
+  };
+}
+
+function scanTargetProfitExitHourly(
+  date: string,
+  slots: MlTradingHourSlotLike[],
+  ctx: OptionContext,
+  side: "CE" | "PE",
+  strike: number,
+  entryPremium: number,
+  quantity: number,
+  targetInr = ML_OPTION_TARGET_PROFIT_INR,
+): TargetExitResult {
+  const targetNet = targetNetProfitRupees(targetInr);
+  const entryIdx = slots.findIndex((s) => s.hour_label === ENTRY_TIME);
+  const startIdx = entryIdx >= 0 ? entryIdx : 0;
+
+  for (let i = startIdx; i < slots.length; i++) {
+    const slot = slots[i];
+    const premium = estimateOptionPremium(
+      slot.close,
+      strike,
+      date,
+      slot.hour_label,
+      ctx.expiry,
+      side,
+      DEFAULT_IV,
+    );
+    const gross = (premium - entryPremium) * quantity;
+    const net = gross - ZERODHA_ROUND_TRIP_CHARGE_INR;
+    if (net >= targetNet) {
+      return {
+        hit: true,
+        exitTime: slot.hour_label,
+        exitPremium: premium,
+        exitSpot: slot.close,
+        exitReason: "target",
+        grossPnlRupees: Number(gross.toFixed(2)),
+        netPnlRupees: Number(net.toFixed(2)),
+      };
+    }
+  }
+
+  const last = slots[slots.length - 1];
+  const lastPremium = estimateOptionPremium(
+    last.close,
+    strike,
+    date,
+    last.hour_label,
+    ctx.expiry,
+    side,
+    DEFAULT_IV,
+  );
+  const gross = (lastPremium - entryPremium) * quantity;
+  const net = gross - ZERODHA_ROUND_TRIP_CHARGE_INR;
+  return {
+    hit: false,
+    exitTime: last.hour_label,
+    exitPremium: lastPremium,
+    exitSpot: last.close,
+    exitReason: "eod",
+    grossPnlRupees: Number(gross.toFixed(2)),
+    netPnlRupees: Number(net.toFixed(2)),
+  };
+}
+
+function buildSpotByHour(slots: MlTradingHourSlotLike[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const slot of slots) {
+    map.set(slot.hour_label, slot.close);
+  }
+  return map;
 }
 
 function buildTrade(
@@ -171,52 +335,59 @@ function buildTrade(
   side: "CE" | "PE",
   ctx: OptionContext,
   entrySpot: number,
-  exitSpot: number,
+  exit: TargetExitResult,
   entryPremium: number,
-  exitPremium: number,
   dataSource: "kite" | "model",
   isProjection: boolean,
   symbol: string | null,
   note?: string,
+  targetInr = ML_OPTION_TARGET_PROFIT_INR,
 ): MlTradingOptionTrade {
   const lotSize = ctx.lotSize;
-  const quantity = lotSize;
-  const grossPnlRupees = Number(((exitPremium - entryPremium) * quantity).toFixed(2));
-  const netPnlRupees = Number((grossPnlRupees - ZERODHA_ROUND_TRIP_CHARGE_INR).toFixed(2));
-  const spotMovePct = entrySpot > 0 ? Number(((exitSpot - entrySpot) / entrySpot * 100).toFixed(3)) : 0;
+  const quantity = lotSize * ML_OPTION_LOTS;
+  const costRupees = Number((entryPremium * quantity).toFixed(2));
+  const spotMovePct =
+    entrySpot > 0 && exit.exitSpot > 0
+      ? Number(((exit.exitSpot - entrySpot) / entrySpot * 100).toFixed(3))
+      : 0;
 
   return {
     date,
     entryTime: ENTRY_TIME,
-    exitTime: EXIT_TIME,
+    exitTime: exit.exitTime,
+    exitReason: exit.exitReason,
+    targetProfitInr: targetInr,
+    targetProfitRupees: targetNetProfitRupees(targetInr),
+    targetHit: exit.hit,
     side,
     action: actionLabel(side),
     atmStrike: findAtmStrike(ctx.strikes, entrySpot),
     expiry: ctx.expiry,
     lotSize,
+    lots: ML_OPTION_LOTS,
     symbol,
     entrySpot: Number(entrySpot.toFixed(2)),
-    exitSpot: Number(exitSpot.toFixed(2)),
+    exitSpot: Number(exit.exitSpot.toFixed(2)),
     spotMovePct,
     entryPremium: Number(entryPremium.toFixed(2)),
-    exitPremium: Number(exitPremium.toFixed(2)),
+    exitPremium: Number(exit.exitPremium.toFixed(2)),
     quantity,
-    costRupees: Number((entryPremium * quantity).toFixed(2)),
-    grossPnlRupees,
+    costRupees,
+    grossPnlRupees: exit.grossPnlRupees,
     brokerageRupees: ZERODHA_ROUND_TRIP_CHARGE_INR,
-    netPnlRupees,
+    netPnlRupees: exit.netPnlRupees,
     dataSource,
     isProjection,
     note,
   };
 }
 
-async function fetchKitePremiums(
+async function fetchKiteMinuteCloseMap(
   accessToken: string,
   apiKey: string,
   date: string,
   instrument: KiteInstrumentRow,
-): Promise<{ entryPremium: number | null; exitPremium: number | null }> {
+): Promise<Map<string, number>> {
   const from = `${date} 09:15:00`;
   const to = `${date} 15:29:00`;
   const data = await kiteGet<{ candles: unknown[] }>(
@@ -224,35 +395,27 @@ async function fetchKitePremiums(
     accessToken,
     apiKey,
   );
-  const { openMap, closeMap } = buildCandlePriceMaps(data.candles ?? []);
-  const entryKey = `${date} ${ENTRY_TIME}`;
-  const exitKey = `${date} ${EXIT_TIME}`;
-  return {
-    entryPremium: lookupPremium(openMap, entryKey) ?? lookupPremium(closeMap, entryKey),
-    exitPremium: lookupPremium(closeMap, exitKey) ?? lookupPremium(openMap, exitKey),
-  };
+  return buildMinuteCloseMap(data.candles ?? []);
 }
 
-async function computeDayOptionTrade(
+export async function computeDayOptionTrade(
   accessToken: string,
   apiKey: string,
   date: string,
   slots: MlTradingHourSlotLike[],
-  outcome: string | undefined,
+  predictedOutcome: string,
   niftyOptions: KiteInstrumentRow[],
   options: {
-    exitSpotOverride?: number | null;
     isProjection?: boolean;
-    sideOverride?: "CE" | "PE";
+    predictedDayReturnPct?: number;
+    targetProfitInr?: number;
   } = {},
 ): Promise<MlTradingOptionTrade | null> {
-  const entrySpot = spotAtTime(slots, ENTRY_TIME, "open");
-  const exitSpot =
-    options.exitSpotOverride ??
-    spotAtTime(slots, EXIT_TIME, "close");
-  if (entrySpot == null || exitSpot == null || entrySpot <= 0 || exitSpot <= 0) {
-    return null;
-  }
+  const fullSlots = slots.filter((s) => s.open > 0 && s.close > 0);
+  if (fullSlots.length < 1) return null;
+
+  const entrySpot = spotAtTime(fullSlots, ENTRY_TIME, "open");
+  if (entrySpot == null || entrySpot <= 0) return null;
 
   const expiries = [...new Set(niftyOptions.map((i) => i.expiry).filter(Boolean))] as string[];
   const expiry = expiryForDate(expiries, date);
@@ -263,23 +426,22 @@ async function computeDayOptionTrade(
   const lotSize = expiryOptions[0]?.lot_size ?? 75;
   const ctx: OptionContext = { expiryOptions, strikes, lotSize, expiry };
 
-  const side = options.sideOverride ?? sideFromOutcome(outcome, entrySpot, exitSpot);
+  const side = sideFromPrediction(predictedOutcome, options.predictedDayReturnPct ?? 0);
   const strike = findAtmStrike(ctx.strikes, entrySpot);
   const instrument = resolveOptionInstrument(ctx.expiryOptions, ctx.expiry, strike, side);
+  const quantity = lotSize * ML_OPTION_LOTS;
 
   let entryPremium: number | null = null;
-  let exitPremium: number | null = null;
   let dataSource: "kite" | "model" = "model";
   let note: string | undefined;
+  let closeMap: Map<string, number> | null = null;
 
   if (instrument) {
     try {
-      const kitePremiums = await fetchKitePremiums(accessToken, apiKey, date, instrument);
-      entryPremium = kitePremiums.entryPremium;
-      exitPremium = kitePremiums.exitPremium;
-      if (entryPremium != null && exitPremium != null && entryPremium > 0 && exitPremium > 0) {
-        dataSource = "kite";
-      }
+      closeMap = await fetchKiteMinuteCloseMap(accessToken, apiKey, date, instrument);
+      const entryKey = `${date} ${ENTRY_TIME}`;
+      entryPremium = lookupPremium(closeMap, entryKey);
+      if (entryPremium != null && entryPremium > 0) dataSource = "kite";
     } catch {
       note = "Kite historical option data unavailable — using model estimate";
     }
@@ -289,8 +451,31 @@ async function computeDayOptionTrade(
     entryPremium = estimateOptionPremium(entrySpot, strike, date, ENTRY_TIME, ctx.expiry, side, DEFAULT_IV);
     dataSource = "model";
   }
-  if (exitPremium == null || exitPremium <= 0) {
-    exitPremium = estimateOptionPremium(exitSpot, strike, date, EXIT_TIME, ctx.expiry, side, DEFAULT_IV);
+
+  const targetInr = options.targetProfitInr ?? ML_OPTION_TARGET_PROFIT_INR;
+  const sessionEndKey = `${date} ${SESSION_END_TIME}`;
+  const entryKey = `${date} ${ENTRY_TIME}`;
+  const spotByHour = buildSpotByHour(fullSlots);
+
+  let exit: TargetExitResult;
+  if (closeMap && closeMap.size > 0 && dataSource === "kite") {
+    const spotByTime = new Map<string, number>();
+    for (const [hour, spot] of spotByHour) {
+      spotByTime.set(`${date} ${hour}`, spot);
+      spotByTime.set(hour, spot);
+    }
+    exit = scanTargetProfitExit(closeMap, entryKey, sessionEndKey, entryPremium, quantity, spotByTime, targetInr);
+  } else {
+    exit = scanTargetProfitExitHourly(
+      date,
+      fullSlots,
+      ctx,
+      side,
+      strike,
+      entryPremium,
+      quantity,
+      targetInr,
+    );
     if (dataSource !== "kite") dataSource = "model";
   }
 
@@ -299,41 +484,21 @@ async function computeDayOptionTrade(
     side,
     ctx,
     entrySpot,
-    exitSpot,
+    exit,
     entryPremium,
-    exitPremium,
     dataSource,
     Boolean(options.isProjection),
     instrument?.tradingsymbol ?? null,
     note,
+    targetInr,
   );
-}
-
-function projectedExitSpot(
-  match: Record<string, unknown>,
-  slots: MlTradingHourSlotLike[],
-  entrySpot: number,
-): number | null {
-  const hourPredictions = match.hourPredictions as
-    | { hourLabel: string; predClose: number | null; status: string }[]
-    | undefined;
-  const exitFromPred = hourPredictions?.find((row) => row.hourLabel === EXIT_TIME)?.predClose;
-  if (exitFromPred != null && exitFromPred > 0) return exitFromPred;
-
-  const actualExit = spotAtTime(slots, EXIT_TIME, "close");
-  if (actualExit != null && actualExit > 0) return actualExit;
-
-  const expectedDayReturnPct = Number(match.expectedDayReturnPct ?? 0);
-  if (entrySpot > 0 && expectedDayReturnPct !== 0) {
-    return Number((entrySpot * (1 + expectedDayReturnPct / 100)).toFixed(2));
-  }
-  return null;
 }
 
 export async function enrichMlTradingWithOptionTrades(
   accessToken: string,
   apiKey: string,
   match: Record<string, unknown>,
+  targetProfitInr = ML_OPTION_TARGET_PROFIT_INR,
 ): Promise<Record<string, unknown>> {
   try {
     const allInstruments = await getKiteInstruments("NFO", accessToken, apiKey);
@@ -353,17 +518,11 @@ export async function enrichMlTradingWithOptionTrades(
     const todaySlots =
       ((match.currentPattern as { fullDaySlots?: MlTradingHourSlotLike[] })?.fullDaySlots ??
         []) as MlTradingHourSlotLike[];
-    const todayEntry = spotAtTime(todaySlots, ENTRY_TIME, "open");
-    const todayExitOverride = projectedExitSpot(match, todaySlots, todayEntry ?? 0);
-    const todayIsProjection = todayExitOverride != null && spotAtTime(todaySlots, EXIT_TIME, "close") == null;
+    const todayIsProjection =
+      todaySlots.length > 0 && !todaySlots.some((s) => s.hour_label === SESSION_END_TIME.slice(0, 5));
 
     const prediction = String(match.prediction ?? "neutral");
-    const sideOverride: "CE" | "PE" =
-      prediction === "bearish"
-        ? "PE"
-        : prediction === "bullish"
-          ? "CE"
-          : sideFromOutcome(prediction, todayEntry ?? 0, todayExitOverride ?? todayEntry ?? 0);
+    const expectedDayReturnPct = Number(match.expectedDayReturnPct ?? 0);
 
     const todayOptionTrade = await computeDayOptionTrade(
       accessToken,
@@ -373,14 +532,15 @@ export async function enrichMlTradingWithOptionTrades(
       prediction,
       niftyOptions,
       {
-        exitSpotOverride: todayExitOverride,
         isProjection: todayIsProjection,
-        sideOverride,
+        predictedDayReturnPct: expectedDayReturnPct,
+        targetProfitInr,
       },
     );
 
     const weekMatches = (match.weekMatches as Record<string, unknown>[] | undefined) ?? [];
     const dayMatches = (match.matches as Record<string, unknown>[] | undefined) ?? [];
+    const tradeOpts = { targetProfitInr };
 
     const weekEntries = await Promise.all(
       weekMatches.map(async (weekMatch) => {
@@ -393,6 +553,7 @@ export async function enrichMlTradingWithOptionTrades(
           slots,
           String(weekMatch.todayAnalogOutcome ?? ""),
           niftyOptions,
+          tradeOpts,
         );
         return [analogDate, trade] as const;
       }),
@@ -410,6 +571,7 @@ export async function enrichMlTradingWithOptionTrades(
           slots,
           String(dayMatch.outcome ?? ""),
           niftyOptions,
+          tradeOpts,
         );
         return [date, trade] as const;
       }),
@@ -438,10 +600,13 @@ export async function enrichMlTradingWithOptionTrades(
       avgHistoricalNetPnl,
       optionTradeMeta: {
         entryTime: ENTRY_TIME,
-        exitTime: EXIT_TIME,
+        exitRule: `₹${targetProfitInr} net profit`,
+        sessionEnd: SESSION_END_TIME,
+        lots: ML_OPTION_LOTS,
         lotSize: todayLotSize,
         expiry: todayExpiry,
-        note: "ATM strike at 9:15 · enter option at 9:15 · exit at 3:15 · 1 lot · ₹50 round-trip brokerage",
+        targetProfitInr,
+        note: `ATM at 9:15 · ${ML_OPTION_LOTS} lot (×${todayLotSize} qty) · exit when net profit hits ₹${targetProfitInr} (else ${SESSION_END_TIME}) · ₹50 brokerage`,
       },
     };
   } catch (err) {
@@ -450,4 +615,78 @@ export async function enrichMlTradingWithOptionTrades(
       optionTradesError: err instanceof Error ? err.message : "Failed to compute option trades",
     };
   }
+}
+
+interface BatchDayRow {
+  date: string;
+  directionCorrect?: boolean;
+  predictedOutcome: string;
+  actualOutcome: string;
+  predictedDayReturnPct: number;
+  actualDayReturnPct: number;
+  dayReturnErrorPct: number;
+  actualSlots?: MlTradingHourSlotLike[];
+}
+
+export async function enrichBatchBacktestWithOptionTargets(
+  accessToken: string,
+  apiKey: string,
+  batch: Record<string, unknown>,
+  targetProfitInr = ML_OPTION_TARGET_PROFIT_INR,
+): Promise<Record<string, unknown>> {
+  const rawDays = (batch.days as BatchDayRow[] | undefined) ?? [];
+  if (!rawDays.length) return batch;
+
+  const allInstruments = await getKiteInstruments("NFO", accessToken, apiKey);
+  const niftyOptions = filterNiftyOptions(allInstruments);
+  if (!niftyOptions.length) {
+    return { ...batch, optionTradesError: "No NIFTY options found for profit-target backtest" };
+  }
+
+  const enrichedDays = await Promise.all(
+    rawDays.map(async (day) => {
+      const slots = day.actualSlots ?? [];
+      const trade = await computeDayOptionTrade(
+        accessToken,
+        apiKey,
+        day.date,
+        slots,
+        day.predictedOutcome,
+        niftyOptions,
+        { predictedDayReturnPct: day.predictedDayReturnPct, targetProfitInr },
+      );
+
+      const profitTargetHit = trade?.targetHit ?? false;
+
+      return {
+        ...day,
+        profitTargetHit,
+        success: profitTargetHit,
+        optionSide: trade?.side ?? null,
+        optionNetPnlRupees: trade?.netPnlRupees ?? null,
+        optionExitTime: trade?.exitTime ?? null,
+        optionExitReason: trade?.exitReason ?? null,
+        targetProfitInr,
+      };
+    }),
+  );
+
+  const tested = enrichedDays.length;
+  const daysCorrect = enrichedDays.filter((d) => d.success).length;
+  const daysWrong = tested - daysCorrect;
+
+  return {
+    ...batch,
+    targetProfitInr,
+    successMetric: "profit_target",
+    daysCorrect,
+    daysWrong,
+    directionAccuracyPct: batch.directionAccuracyPct,
+    profitTargetAccuracyPct: tested ? round1(daysCorrect / tested * 100) : 0,
+    days: enrichedDays,
+  };
+}
+
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
 }

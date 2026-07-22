@@ -36,7 +36,7 @@ app.listen(PORT, async () => {
     }
   } else if (directIp && !isIpWhitelistedForKite(directIp)) {
     console.log(
-      `[kite] Off-whitelist network (${directIp}) — Kite API will route via ${getEgressRelayUrl() ?? "Vercel"}`,
+      `[kite] Off-whitelist network (${directIp}) — set KITE_PROXY_URL to a proxy on a whitelisted IP, or whitelist this IP in Kite Connect`,
     );
   }
 

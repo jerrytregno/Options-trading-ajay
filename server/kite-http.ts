@@ -3,9 +3,13 @@ import {
   isIpWhitelistedForKite,
 } from "../src/lib/kite-trading-ip.js";
 import {
+  refreshKiteEgressRoute,
+  resolveKiteEgressRoute,
+  type KiteEgressRoute,
+} from "./kite-egress.js";
+import {
   extractKiteAccessToken,
   proxyKiteApiViaVercelApp,
-  shouldProxyKiteViaVercelApp,
 } from "./kite-vercel-proxy.js";
 
 let proxyAgent: unknown = null;
@@ -14,8 +18,14 @@ let directIpCache: { ip: string; at: number } | null = null;
 
 const KITE_API_ORIGIN = "https://api.kite.trade";
 const IP_CACHE_MS = 60_000;
-/** Production app — egress is on the Kite whitelist when relay env is not set locally. */
-const DEFAULT_EGRESS_RELAY_URL = "https://options-trading-yhys.vercel.app";
+let productionEgressCache: { ip: string; at: number; relayBase: string } | null = null;
+
+/** Clear cached IP probes so the next resolve re-checks network and fallback paths. */
+export function invalidateKiteHttpCaches() {
+  directIpCache = null;
+  productionEgressCache = null;
+  routeViaRelayCache = null;
+}
 
 function buildProxyUrlFromParts(): string | null {
   const host =
@@ -45,15 +55,51 @@ function getConfiguredTradingIp(): string | null {
 }
 
 export function getEgressRelayUrl(): string | null {
-  const url =
-    process.env.KITE_EGRESS_RELAY_URL?.trim() ||
-    (process.env.VERCEL ? null : DEFAULT_EGRESS_RELAY_URL);
-  return url ? url.replace(/\/$/, "") : null;
+  const url = process.env.KITE_EGRESS_RELAY_URL?.trim();
+  if (url) return url.replace(/\/$/, "");
+  if (!process.env.VERCEL && process.env.KITE_AUTO_PRODUCTION_EGRESS !== "0") {
+    return "https://options-trading-yhys.vercel.app";
+  }
+  return null;
 }
 
-export function getRelaySecret(): string | null {
+/** Production app egress (when KITE_EGRESS_RELAY_URL is set). Cached 60s. */
+export async function probeProductionAppEgressIpv4(force = false): Promise<string | null> {
+  const relayBase = getEgressRelayUrl();
+  if (!relayBase) return null;
+
+  if (
+    !force &&
+    productionEgressCache &&
+    productionEgressCache.relayBase === relayBase &&
+    Date.now() - productionEgressCache.at < IP_CACHE_MS
+  ) {
+    return productionEgressCache.ip;
+  }
+
+  try {
+    const res = await fetch(`${relayBase}/api/kite/public-egress-ip`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return productionEgressCache?.ip ?? null;
+    const json = (await res.json()) as { data?: { ip?: string } };
+    const ip = json.data?.ip?.trim();
+    if (ip && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+      productionEgressCache = { ip, at: Date.now(), relayBase };
+      return ip;
+    }
+  } catch {
+    // ignore
+  }
+
+  return productionEgressCache?.ip ?? null;
+}
+
+function getRelaySecret(): string | null {
   return process.env.KITE_RELAY_SECRET?.trim() || null;
 }
+
+export { getRelaySecret };
 
 export function isKiteProxyEnabled(): boolean {
   return Boolean(getProxyUrl());
@@ -78,28 +124,103 @@ function isKiteApiUrl(url: string): boolean {
   return url.startsWith(KITE_API_ORIGIN);
 }
 
-/** Plain IPv4 from this machine — never via relay/proxy. */
-export async function probeDirectIpv4(force = false): Promise<string | null> {
-  if (!force && directIpCache && Date.now() - directIpCache.at < IP_CACHE_MS) {
-    return directIpCache.ip;
+function isIpv4(ip: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(ip);
+}
+
+const DIRECT_IP_PROBE_URLS = [
+  "https://ipv4.icanhazip.com",
+  "https://v4.ident.me",
+  "https://checkip.amazonaws.com",
+  // ipify is last — it often disagrees with other probes on some ISPs.
+  "https://api4.ipify.org",
+] as const;
+
+export interface DirectIpProbeResult {
+  /** Best-effort primary IP (majority across probe services). */
+  ip: string | null;
+  /** Unique IPs returned by any probe service. */
+  samples: string[];
+  /** Probe services returned more than one distinct IP. */
+  unstable: boolean;
+}
+
+async function fetchProbeIpv4(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    const ip = (await res.text()).trim();
+    return isIpv4(ip) ? ip : null;
+  } catch {
+    return null;
+  }
+}
+
+function pickConsensusIpv4(samples: string[]): string | null {
+  if (samples.length === 0) return null;
+
+  const counts = new Map<string, number>();
+  for (const ip of samples) {
+    counts.set(ip, (counts.get(ip) ?? 0) + 1);
   }
 
-  const urls = ["https://api4.ipify.org", "https://ipv4.icanhazip.com", "https://v4.ident.me"];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      if (!res.ok) continue;
-      const ip = (await res.text()).trim();
-      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
-        directIpCache = { ip, at: Date.now() };
-        return ip;
-      }
-    } catch {
-      // try next
+  let bestIp: string | null = null;
+  let bestCount = 0;
+  for (const [ip, count] of counts) {
+    const whitelisted = isIpWhitelistedForKite(ip);
+    const bestWhitelisted = bestIp ? isIpWhitelistedForKite(bestIp) : false;
+    if (
+      count > bestCount ||
+      (count === bestCount && whitelisted && !bestWhitelisted)
+    ) {
+      bestIp = ip;
+      bestCount = count;
     }
   }
 
-  return directIpCache?.ip ?? null;
+  return bestIp;
+}
+
+/** Query several echo services in parallel; pick majority IP (not first-responder). */
+export async function probeDirectIpv4Samples(force = false): Promise<DirectIpProbeResult> {
+  if (!force && directIpCache && Date.now() - directIpCache.at < IP_CACHE_MS) {
+    return {
+      ip: directIpCache.ip,
+      samples: [directIpCache.ip],
+      unstable: false,
+    };
+  }
+
+  const probeResults = await Promise.all(DIRECT_IP_PROBE_URLS.map((url) => fetchProbeIpv4(url)));
+  const samples = [...new Set(probeResults.filter((ip): ip is string => Boolean(ip)))];
+  const ip = pickConsensusIpv4(probeResults.filter((value): value is string => Boolean(value)));
+  const unstable = samples.length > 1;
+
+  if (ip) {
+    directIpCache = { ip, at: Date.now() };
+  }
+
+  return { ip, samples, unstable };
+}
+
+/** Plain IPv4 from this machine — never via relay/proxy. */
+export async function probeDirectIpv4(force = false): Promise<string | null> {
+  const result = await probeDirectIpv4Samples(force);
+  return result.ip;
+}
+
+/** IPv4 seen when routing through KITE_PROXY_URL. */
+export async function probeProxyEgressIpv4(): Promise<string | null> {
+  if (!isKiteProxyEnabled()) return null;
+  try {
+    const proxyFetch = await getProxyFetch();
+    const res = await proxyFetch("https://api4.ipify.org", { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    const ip = (await res.text()).trim();
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : null;
+  } catch {
+    return null;
+  }
 }
 
 async function getProxyFetch(): Promise<typeof fetch> {
@@ -222,27 +343,64 @@ export async function shouldRouteKiteViaRelay(force = false): Promise<boolean> {
   return useRelay;
 }
 
-/** Kite Connect API — direct, relay, or production Vercel proxy when off-whitelist. */
-async function kiteApiFetch(url: string, init?: RequestInit): Promise<Response> {
+async function isKiteIpRejection(response: Response): Promise<boolean> {
+  if (response.status !== 403) return false;
+  try {
+    const text = await response.clone().text();
+    return /IP \([\d.]+\) is not allowed/i.test(text);
+  } catch {
+    return false;
+  }
+}
+
+async function fetchKiteViaRoute(url: string, init: RequestInit | undefined, route: KiteEgressRoute): Promise<Response> {
   if (isKiteProxyEnabled()) {
+    if (!route.ready) throw new Error(route.note);
     const proxyFetch = await getProxyFetch();
     return proxyFetch(url, init);
   }
 
   const accessToken = extractKiteAccessToken(init);
 
-  // Secret relay (egress-relay endpoint) when deployed.
-  if (getRelaySecret() && (await shouldRouteKiteViaRelay(true))) {
+  if (route.mode === "relay" && getRelaySecret()) {
     return relayKiteHttpFetch(url, init);
   }
 
-  // Off-whitelist home IP → route via production Vercel /api/kite/* (no secret needed).
-  if (accessToken && (await shouldProxyKiteViaVercelApp(true))) {
+  if (route.mode === "vercel-app" && accessToken) {
     const proxied = await proxyKiteApiViaVercelApp(url, init, accessToken);
     if (proxied) return proxied;
   }
 
+  if (route.mode === "direct") {
+    return fetch(url, init);
+  }
+
+  if (route.mode === "blocked" || !route.ready) {
+    throw new Error(route.note);
+  }
+
   return fetch(url, init);
+}
+
+/** Kite Connect API — auto-picks whitelisted egress; refreshes route on mismatch. */
+async function kiteApiFetch(url: string, init?: RequestInit): Promise<Response> {
+  let route = await resolveKiteEgressRoute();
+  if (!route.ready) {
+    route = await refreshKiteEgressRoute();
+  }
+  if (!route.ready) {
+    throw new Error(route.note);
+  }
+
+  let response = await fetchKiteViaRoute(url, init, route);
+  if (await isKiteIpRejection(response)) {
+    route = await refreshKiteEgressRoute();
+    if (route.ready) {
+      response = await fetchKiteViaRoute(url, init, route);
+    }
+  }
+
+  return response;
 }
 
 /** HTTP fetch — Kite API calls are restricted to whitelisted egress (relay/proxy when needed). */

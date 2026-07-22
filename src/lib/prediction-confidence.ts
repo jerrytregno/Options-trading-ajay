@@ -1,7 +1,72 @@
-import type { PredictionBacktestBar } from "@/types/prediction";
+import type { PredictionInterval } from "@/lib/prediction-intervals";
+import type { PredictionBacktestBar, PredictionMetrics } from "@/types/prediction";
 import { formatNumber } from "@/lib/utils";
 
 export const DISPLAY_CONFIDENCE_THRESHOLD = 0.75;
+
+/** Per-interval live trade threshold — 5m derived from 30-day backtest sweep. */
+export const DISPLAY_CONFIDENCE_BY_INTERVAL: Record<PredictionInterval, number> = {
+  minute: 0.75,
+  "3minute": 0.75,
+  "5minute": 0.58,
+  "15minute": 0.75,
+};
+
+/** More signals, slightly lower hit rate — 5m backtest: ~70% hit, ~17/day at 55%. */
+export const DISPLAY_CONFIDENCE_AGGRESSIVE: Partial<Record<PredictionInterval, number>> = {
+  "5minute": 0.55,
+};
+
+export function displayConfidenceThreshold(interval: PredictionInterval = "minute"): number {
+  return DISPLAY_CONFIDENCE_BY_INTERVAL[interval] ?? DISPLAY_CONFIDENCE_THRESHOLD;
+}
+
+/** Shown on Live signal when probabilities are capped by model calibration. */
+export function confidenceCalibrationNote(
+  interval: PredictionInterval,
+  metrics?: PredictionMetrics | null,
+  sweep?: ThresholdSweepSummary | null,
+): string | null {
+  if (interval !== "5minute") return null;
+  const isBinary =
+    metrics?.modelType === "directional_binary_ensemble" ||
+    (metrics?.schemaVersion ?? 0) >= 3;
+  if (metrics && !isBinary) return null;
+
+  const threshold = displayConfidenceThreshold(interval);
+  const stats = sweep?.probStats;
+  const rec = sweep?.recommended;
+
+  if (stats && rec) {
+    return (
+      `5 min is Up/Down-only (Flat = 0%). On ${sweep?.days ?? 30}-day backtest, max confidence was ${formatNumber(stats.maxSideMax * 100, 1)}% — ` +
+      `so 75% never triggers. Recommended trade threshold: ${formatNumber(rec.thresholdPct, 0)}% ` +
+      `(${formatNumber(rec.hitPct ?? 0, 1)}% hit, ~${formatNumber(rec.avgCallsPerDay, 1)} signals/day). ` +
+      `Live trades use ≥${formatNumber(threshold * 100, 0)}%.`
+    );
+  }
+
+  const holdout = metrics?.directionalHoldoutAccuracy ?? metrics?.holdoutAccuracy;
+  const accText =
+    holdout != null
+      ? `${formatNumber(holdout * 100, 0)}% holdout accuracy`
+      : "~50% holdout accuracy";
+
+  return `5 min uses an Up/Down-only model (Flat is always 0%). Confidence rarely exceeds ~61% (${accText}). Run threshold backtest below — live trades use ≥${formatNumber(threshold * 100, 0)}% (not 75%).`;
+}
+
+export interface ThresholdSweepSummary {
+  days: number;
+  probStats: {
+    maxSideMax: number;
+  };
+  recommended: {
+    threshold: number;
+    thresholdPct: number;
+    hitPct: number | null;
+    avgCallsPerDay: number;
+  } | null;
+}
 
 /** Check model stats, table signals, and option P/L simulation. */
 export const BACKTEST_CONFIDENCE_THRESHOLD = 0.85;
@@ -20,8 +85,11 @@ export interface BarProbabilities {
   up: number;
 }
 
-export function getDisplayPrediction(probs: BarProbabilities): "up" | "down" | "flat" {
-  return getConfidentDirection(probs, DISPLAY_CONFIDENCE_THRESHOLD, 0) ?? "flat";
+export function getDisplayPrediction(
+  probs: BarProbabilities,
+  interval: PredictionInterval = "minute",
+): "up" | "down" | "flat" {
+  return getConfidentDirection(probs, displayConfidenceThreshold(interval), 0) ?? "flat";
 }
 
 export function getBacktestDisplayPrediction(probs: BarProbabilities): "up" | "down" | "flat" {
