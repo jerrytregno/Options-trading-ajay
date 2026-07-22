@@ -52,3 +52,4 @@ Every push to `main` auto-deploys if Vercel is linked to GitHub. Manual: Vercel 
 
 - **ML Trading / Prediction Python** features need `python3` locally; Vercel serverless does not run the Python pipeline — sync/match may show Python unavailable on production unless you add a separate Python host later.
 - **Trading IP** is not a dedicated static IP on Vercel; check Settings after redeploys and update Kite whitelist if egress changes.
+- **Lightsail (recommended for auto trade):** see [DEPLOY-LIGHTSAIL.md](./DEPLOY-LIGHTSAIL.md) — static IP + server 9:16 bot, no browser tab.

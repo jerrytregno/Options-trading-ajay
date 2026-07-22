@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Upload } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Radio, Upload } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useKite } from "@/contexts/kite-context";
+import { getIndianMarketContext } from "@/lib/market-time";
 import {
   normalizeKiteOrder,
   pnlByExitOrderId,
@@ -18,6 +19,17 @@ import type { KiteHolding, KitePosition } from "@/types/kite";
 import { cn, formatCurrency, formatNumber, getChangeClass } from "@/lib/utils";
 
 type PortfolioTab = "positions" | "trades" | "holdings" | "orders";
+
+interface PortfolioMargins {
+  available: number;
+  cash: number;
+  used: number;
+  net: number;
+}
+
+const LIVE_POLL_MS_MARKET = 3000;
+const LIVE_POLL_MS_OFF = 15000;
+const HISTORY_POLL_MS = 30000;
 
 function formatOrderTime(value: string) {
   if (!value) return "—";
@@ -40,63 +52,104 @@ export default function PortfolioPage() {
   const [holdings, setHoldings] = useState<KiteHolding[]>([]);
   const [orders, setOrders] = useState<KiteOrderRow[]>([]);
   const [closedTrades, setClosedTrades] = useState<ClosedTradeRow[]>([]);
+  const [margins, setMargins] = useState<PortfolioMargins | null>(null);
   const [tradeHistoryNote, setTradeHistoryNote] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
-  const [tab, setTab] = useState<PortfolioTab>("trades");
+  const [tab, setTab] = useState<PortfolioTab>("positions");
   const importInputRef = useRef<HTMLInputElement>(null);
+
+  const loadLive = useCallback(async () => {
+    if (!connected) return;
+    try {
+      const res = await fetch("/api/kite/portfolio/live", { credentials: "include" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Failed to fetch live portfolio");
+      const data = json.data as {
+        positions?: { net?: KitePosition[] };
+        holdings?: KiteHolding[];
+        margins?: PortfolioMargins;
+        updatedAt?: string;
+      };
+      setPositions((data.positions?.net ?? []).filter((p) => p.quantity !== 0));
+      setHoldings(data.holdings ?? []);
+      setMargins(data.margins ?? null);
+      setLastUpdated(data.updatedAt ?? new Date().toISOString());
+      setLiveError(null);
+    } catch (err) {
+      setLiveError(err instanceof Error ? err.message : "Live update failed");
+    }
+  }, [connected]);
+
+  const loadHistory = useCallback(async () => {
+    if (!connected) return;
+    try {
+      const [ordRes, tradesRes] = await Promise.all([
+        fetch("/api/kite/orders", { credentials: "include" }),
+        fetch("/api/kite/portfolio/trades", { credentials: "include" }),
+      ]);
+      if (ordRes.ok) {
+        const { data } = await ordRes.json();
+        const parsed = (Array.isArray(data) ? data : [])
+          .map((row) => normalizeKiteOrder(row as Record<string, unknown>))
+          .filter((row): row is KiteOrderRow => row != null);
+        setOrders(parsed);
+      }
+      if (tradesRes.ok) {
+        const json = await tradesRes.json();
+        const fromApi = Array.isArray(json.data) ? (json.data as ClosedTradeRow[]) : [];
+        const merged = mergeStoredClosedTrades(loadStoredClosedTrades(), fromApi);
+        saveStoredClosedTrades(merged);
+        setClosedTrades(merged);
+        setTradeHistoryNote(typeof json.meta?.note === "string" ? json.meta.note : null);
+      } else {
+        const local = loadStoredClosedTrades();
+        if (local.length) setClosedTrades(local);
+      }
+    } catch {
+      /* history is secondary */
+    }
+  }, [connected]);
 
   useEffect(() => {
     if (!connected) {
       setLoading(false);
       return;
     }
-    async function load() {
-      try {
-        const [posRes, holdRes, ordRes, tradesRes] = await Promise.all([
-          fetch("/api/kite/positions", { credentials: "include" }),
-          fetch("/api/kite/holdings", { credentials: "include" }),
-          fetch("/api/kite/orders", { credentials: "include" }),
-          fetch("/api/kite/portfolio/trades", { credentials: "include" }),
-        ]);
-        if (posRes.ok) {
-          const { data } = await posRes.json();
-          setPositions((data?.net ?? []).filter((p: KitePosition) => p.quantity !== 0));
-        }
-        if (holdRes.ok) {
-          const { data } = await holdRes.json();
-          setHoldings(data ?? []);
-        }
-        if (ordRes.ok) {
-          const { data } = await ordRes.json();
-          const parsed = (Array.isArray(data) ? data : [])
-            .map((row) => normalizeKiteOrder(row as Record<string, unknown>))
-            .filter((row): row is KiteOrderRow => row != null);
-          setOrders(parsed);
-        }
-        if (tradesRes.ok) {
-          const json = await tradesRes.json();
-          const fromApi = Array.isArray(json.data) ? (json.data as ClosedTradeRow[]) : [];
-          const merged = mergeStoredClosedTrades(loadStoredClosedTrades(), fromApi);
-          saveStoredClosedTrades(merged);
-          setClosedTrades(merged);
-          setTradeHistoryNote(typeof json.meta?.note === "string" ? json.meta.note : null);
-        } else {
-          const local = loadStoredClosedTrades();
-          if (local.length) setClosedTrades(local);
-        }
-      } finally {
-        setLoading(false);
-      }
+
+    let cancelled = false;
+    async function bootstrap() {
+      setLoading(true);
+      await Promise.all([loadLive(), loadHistory()]);
+      if (!cancelled) setLoading(false);
     }
-    load();
-  }, [connected]);
+    void bootstrap();
+
+    const livePollMs = getIndianMarketContext().isMarketOpen
+      ? LIVE_POLL_MS_MARKET
+      : LIVE_POLL_MS_OFF;
+    const liveId = window.setInterval(() => void loadLive(), livePollMs);
+    const historyId = window.setInterval(() => void loadHistory(), HISTORY_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(liveId);
+      window.clearInterval(historyId);
+    };
+  }, [connected, loadLive, loadHistory]);
 
   const pnlSummary = useMemo(
     () => summarizePortfolioPnl(positions, closedTrades),
-    [positions, closedTrades]
+    [positions, closedTrades],
   );
+  const holdingsPnl = useMemo(
+    () => holdings.reduce((sum, h) => sum + (h.pnl ?? 0), 0),
+    [holdings],
+  );
+  const totalPnl = pnlSummary.openPnl + pnlSummary.closedPnl + holdingsPnl;
   const exitOrderPnl = useMemo(() => pnlByExitOrderId(closedTrades), [closedTrades]);
 
   async function handleTradebookImport(file: File) {
@@ -147,17 +200,36 @@ export default function PortfolioPage() {
       <div className="flex-between flex-wrap gap-4 mb-8">
         <div className="page-header" style={{ marginBottom: 0 }}>
           <h1>Portfolio</h1>
-          <p>Positions, closed trades, holdings, and orders</p>
+          <p>Live P&L from Zerodha · positions refresh every 3s in market hours</p>
         </div>
         {connected && (
           <div className="text-right">
+            <div className="flex gap-2 items-center justify-end mb-1">
+              <span className="badge badge-success">
+                <Radio size={12} />
+                Live
+              </span>
+              {lastUpdated && (
+                <span className="text-muted text-sm">
+                  Updated {formatOrderTime(lastUpdated)}
+                </span>
+              )}
+            </div>
             <p className="text-muted text-sm">Total P&L</p>
-            <p className={cn("font-bold", getChangeClass(pnlSummary.totalPnl))} style={{ fontSize: "1.5rem" }}>
-              {formatCurrency(pnlSummary.totalPnl)}
+            <p className={cn("font-bold", getChangeClass(totalPnl))} style={{ fontSize: "1.5rem" }}>
+              {formatCurrency(totalPnl)}
             </p>
             <p className="text-muted text-sm mt-3">
-              Open {formatCurrency(pnlSummary.openPnl)} · Closed {formatCurrency(pnlSummary.closedPnl)}
+              Open {formatCurrency(pnlSummary.openPnl)}
+              {holdingsPnl !== 0 && <> · Holdings {formatCurrency(holdingsPnl)}</>}
+              {" · "}Closed {formatCurrency(pnlSummary.closedPnl)}
             </p>
+            {margins && (
+              <p className="text-muted text-sm mt-2">
+                Available {formatCurrency(margins.available)}
+              </p>
+            )}
+            {liveError && <p className="text-down text-sm mt-2">{liveError}</p>}
           </div>
         )}
       </div>
@@ -177,8 +249,8 @@ export default function PortfolioPage() {
             <div className="flex gap-2 flex-wrap">
             {(
               [
-                ["trades", `Trades (${closedTrades.length})`],
                 ["positions", `Positions (${positions.length})`],
+                ["trades", `Trades (${closedTrades.length})`],
                 ["holdings", "Holdings"],
                 ["orders", "Orders"],
               ] as const

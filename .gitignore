@@ -47,6 +47,8 @@ yarn-error.log*
 .env*.local
 
 /data/kite-trade-history.json
+/data/kite-session.json
+/data/nine-sixteen-ran-*.json
 /trading-ai/data/ml-trading/*.json
 !trading-ai/data/ml-trading/.gitkeep
 

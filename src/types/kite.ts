@@ -97,14 +97,3 @@ export interface ApiResponse<T> {
   error?: string;
 }
 
-export const POPULAR_UNDERLYINGS = [
-  { symbol: "NIFTY", exchange: "NFO", label: "Nifty 50" },
-  { symbol: "BANKNIFTY", exchange: "NFO", label: "Bank Nifty" },
-  { symbol: "FINNIFTY", exchange: "NFO", label: "Fin Nifty" },
-  { symbol: "SENSEX", exchange: "BFO", label: "Sensex" },
-  { symbol: "RELIANCE", exchange: "NFO", label: "Reliance" },
-  { symbol: "TCS", exchange: "NFO", label: "TCS" },
-  { symbol: "INFY", exchange: "NFO", label: "Infosys" },
-] as const;
-
-export { WATCHLIST_DEFAULT, WATCHLIST_ITEMS } from "../lib/watchlist";

@@ -13,7 +13,7 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!loading && user) navigate("/dashboard", { replace: true });
+    if (!loading && user) navigate("/dashboard/nine-fifteen", { replace: true });
   }, [user, loading, navigate]);
 
   const handleSubmit = async (e: FormEvent) => {
@@ -23,7 +23,7 @@ export default function LoginPage() {
     try {
       if (isSignUp) await signUp(email, password);
       else await signIn(email, password);
-      navigate("/dashboard");
+      navigate("/dashboard/nine-fifteen");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed");
     } finally {
@@ -41,14 +41,14 @@ export default function LoginPage() {
         <div className="login-logo">
           <div className="logo" style={{ justifyContent: "center" }}>
             <div className="logo-icon"><Zap size={20} /></div>
-            <span className="logo-text">OptionFlow</span>
+            <span className="logo-text">9:15 Trader</span>
           </div>
         </div>
 
         <div className="card">
           <div className="card-header">
             <h2 className="card-title">{isSignUp ? "Create account" : "Welcome back"}</h2>
-            <p className="card-desc">{isSignUp ? "Sign up to start trading options" : "Sign in to your trading dashboard"}</p>
+            <p className="card-desc">{isSignUp ? "Sign up for 9:15 analysis and auto trade" : "Sign in to view 9:15 candles and bot status"}</p>
           </div>
 
           <form onSubmit={handleSubmit}>

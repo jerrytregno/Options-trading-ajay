@@ -10,7 +10,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
-import { NineSixteenAutoTrader } from "@/components/trade/NineSixteenAutoTrader";
+import { ServerNineSixteenBotPanel } from "@/components/trade/ServerNineSixteenBotPanel";
 import { useKite } from "@/contexts/kite-context";
 import {
   NINE_FIFTEEN_RUPEE_LEVELS,
@@ -164,7 +164,7 @@ export default function NineFifteenPage() {
           </div>
         )}
 
-        {connected && <NineSixteenAutoTrader connected={connected} />}
+        {connected && <ServerNineSixteenBotPanel connected={connected} />}
 
         {loading && !data && (
           <div className="card nf-loading">

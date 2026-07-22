@@ -1,33 +1,11 @@
 import { Link, useLocation } from "react-router-dom";
-import {
-  Bot,
-  Brain,
-  BrainCircuit,
-  Clock,
-  LayoutDashboard,
-  LineChart,
-  Settings,
-  TrendingUp,
-  Wallet,
-  Zap,
-  Radio,
-  LogOut,
-  Menu,
-  X,
-} from "lucide-react";
+import { Clock, LogOut, Menu, Settings, Wallet, X, Zap } from "lucide-react";
 import { useState } from "react";
 import { useAuth } from "@/contexts/auth-context";
 import { useKite } from "@/contexts/kite-context";
 
 const navItems = [
-  { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
-  { href: "/dashboard/streaming", label: "Streaming", icon: Radio },
-  { href: "/dashboard/prediction", label: "Prediction Model", icon: Brain },
-  { href: "/dashboard/ml-trading", label: "ML Trading", icon: BrainCircuit },
   { href: "/dashboard/nine-fifteen", label: "9:15 Candle", icon: Clock },
-  { href: "/dashboard/gemini", label: "Options AI", icon: Bot },
-  { href: "/dashboard/trade", label: "Trade", icon: TrendingUp },
-  { href: "/dashboard/options", label: "Nifty Options", icon: LineChart },
   { href: "/dashboard/portfolio", label: "Portfolio", icon: Wallet },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
@@ -50,8 +28,8 @@ export function Sidebar() {
         <div className="sidebar-header">
           <div className="logo-icon"><Zap size={20} /></div>
           <div>
-            <p className="font-semibold">OptionFlow</p>
-            <p className="text-muted" style={{ fontSize: "0.75rem" }}>Options Trading</p>
+            <p className="font-semibold">9:15 Trader</p>
+            <p className="text-muted" style={{ fontSize: "0.75rem" }}>Auto trade at 9:16 IST</p>
           </div>
         </div>
 
