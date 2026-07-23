@@ -13,6 +13,7 @@ import {
 } from "./kite-vercel-proxy.js";
 
 let proxyAgent: unknown = null;
+let directIpv4Agent: unknown = null;
 let routeViaRelayCache: { at: number; value: boolean } | null = null;
 let directIpCache: { ip: string; at: number } | null = null;
 
@@ -244,6 +245,23 @@ async function getProxyFetch(): Promise<typeof fetch> {
   }
 }
 
+/** Direct fetch pinned to IPv4 — Lightsail/AWS often has IPv6; Kite only whitelists your static IPv4. */
+async function getDirectIpv4Fetch(): Promise<typeof fetch> {
+  const undici = await import("undici");
+  if (!directIpv4Agent) {
+    directIpv4Agent = new undici.Agent({
+      connect: {
+        family: 4,
+      },
+    });
+  }
+  return ((input: string | URL, init?: RequestInit) =>
+    undici.fetch(input, {
+      ...init,
+      dispatcher: directIpv4Agent as InstanceType<typeof undici.Agent>,
+    })) as typeof fetch;
+}
+
 function headersToRecord(headers?: RequestInit["headers"]): Record<string, string> {
   if (!headers) return {};
   if (headers instanceof Headers) {
@@ -347,7 +365,7 @@ async function isKiteIpRejection(response: Response): Promise<boolean> {
   if (response.status !== 403) return false;
   try {
     const text = await response.clone().text();
-    return /IP \([\d.]+\) is not allowed/i.test(text);
+    return /IP \([^)]+\) is not allowed/i.test(text);
   } catch {
     return false;
   }
@@ -372,7 +390,8 @@ async function fetchKiteViaRoute(url: string, init: RequestInit | undefined, rou
   }
 
   if (route.mode === "direct") {
-    return fetch(url, init);
+    const ipv4Fetch = await getDirectIpv4Fetch();
+    return ipv4Fetch(url, init);
   }
 
   if (route.mode === "blocked" || !route.ready) {

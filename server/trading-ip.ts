@@ -34,8 +34,10 @@ export function isTradingIpPinned(): boolean {
 }
 
 export function recordKiteRejectedIp(ip: string) {
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return;
-  lastKiteRejectedIp = ip;
+  const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(ip);
+  const isIpv6 = ip.includes(":");
+  if (!isIpv4 && !isIpv6) return;
+  lastKiteRejectedIp = isIpv4 ? ip : null;
   lastKiteRejectedAt = Date.now();
   invalidateKiteEgressRoute();
   invalidateKiteHttpCaches();
@@ -90,7 +92,7 @@ export async function detectOutboundPublicIp(force = false): Promise<string | nu
 }
 
 export function extractIpFromKiteError(message: string): string | null {
-  const match = message.match(/IP \(([\d.]+)\) is not allowed/i);
+  const match = message.match(/IP \(([^)]+)\) is not allowed/i);
   return match?.[1] ?? null;
 }
 
@@ -165,7 +167,7 @@ export async function assertKiteEgressReady(): Promise<void> {
 export { refreshKiteEgressRoute };
 
 export async function enrichKiteIpOrderError(message: string): Promise<string> {
-  if (!/IP \([\d.]+\) is not allowed/i.test(message)) return message;
+  if (!/IP \([^)]+\) is not allowed/i.test(message)) return message;
 
   const rejectedIp = extractIpFromKiteError(message);
   if (rejectedIp) recordKiteRejectedIp(rejectedIp);
@@ -174,6 +176,9 @@ export async function enrichKiteIpOrderError(message: string): Promise<string> {
   const allowed = formatKiteWhitelistIps();
 
   if (rejectedIp && !isIpWhitelistedForKite(rejectedIp)) {
+    if (rejectedIp.includes(":")) {
+      return `Zerodha blocked IPv6 (${rejectedIp}) — Kite only accepts your whitelisted IPv4 (${allowed}). Redeploy the latest server build (forces IPv4 for orders). Whitelist ${allowed} in Kite Connect → ${consoleUrl}`;
+    }
     return `Zerodha blocked ${rejectedIp} — not whitelisted. Kite only allows ${allowed}. On localhost set KITE_PROXY_URL to a proxy on a whitelisted IP, or add your network IP in Kite Connect → ${consoleUrl}`;
   }
 
