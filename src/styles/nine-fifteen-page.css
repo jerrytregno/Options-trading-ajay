@@ -157,6 +157,23 @@
   opacity: 0.35;
 }
 
+.nf-threshold-cell--miss {
+  opacity: 0.85;
+}
+
+.nf-threshold-x {
+  color: rgba(248, 113, 113, 0.75);
+}
+
+.nf-th-level--checkpoint {
+  font-size: 0.65rem;
+}
+
+.nf-th-group--checkpoint {
+  font-size: 0.7rem;
+  border-left: 1px solid rgba(148, 163, 184, 0.2);
+}
+
 
 .nf-header {
   display: flex;
@@ -164,6 +181,90 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
+}
+
+.nf-live-rules {
+  margin-bottom: 1rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
+  background: color-mix(in srgb, var(--card) 92%, var(--background));
+}
+
+.nf-live-rules-title {
+  margin: 0 0 0.85rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.nf-live-rules-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1.25rem 1.5rem;
+}
+
+.nf-live-rules-heading {
+  margin: 0 0 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.nf-live-rules-list {
+  margin: 0;
+  padding-left: 1.15rem;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--foreground);
+}
+
+.nf-live-rules-list li + li {
+  margin-top: 0.45rem;
+}
+
+.nf-live-rules-lead {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.nf-live-rules-sublist {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+  list-style: disc;
+}
+
+.nf-live-rules-sublist li + li {
+  margin-top: 0.2rem;
+}
+
+.nf-live-rules-foot {
+  margin: 0.65rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.nf-inline-code {
+  font-size: 0.75em;
+  padding: 0.1em 0.35em;
+  border-radius: 0.25rem;
+  background: color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.nf-lot-size-note {
+  margin: 0.35rem 0 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #4ade80;
+}
+
+.nf-exit-note {
+  margin: 0.25rem 0 0;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: #94a3b8;
+  max-width: 42rem;
+  line-height: 1.45;
 }
 
 .nf-banner,
@@ -296,6 +397,13 @@
   margin-bottom: 1rem;
 }
 
+.nf-backtest-section-heading {
+  margin: 1.25rem 0 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
 .nf-today-signal {
   display: flex;
   flex-direction: column;
@@ -415,4 +523,390 @@
 
 .ns916-grid {
   margin-bottom: 0.75rem;
+}
+
+.nf-failures-block {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.nf-nearmiss-block {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 2px solid var(--border);
+}
+
+.nf-band-breakdown {
+  margin-top: 1.75rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.nf-band-breakdown-summary {
+  cursor: pointer;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text);
+  list-style: none;
+}
+
+.nf-band-breakdown-summary::-webkit-details-marker {
+  display: none;
+}
+
+.nf-band-breakdown[open] > .nf-band-breakdown-summary {
+  margin-bottom: 1rem;
+}
+
+.nf-fiveyear-block {
+  margin-top: 2rem;
+}
+
+.nf-nearmiss-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.nf-failures-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.nf-failures-intro {
+  margin: 0 0 0.75rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.nf-failures-details {
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.nf-failures-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.8125rem;
+  list-style: none;
+}
+
+.nf-failures-summary::-webkit-details-marker {
+  display: none;
+}
+
+.nf-failures-rule {
+  font-weight: 600;
+}
+
+.nf-failures-table-wrap {
+  overflow-x: auto;
+  border-top: 1px solid var(--border);
+}
+
+.nf-failures-table {
+  width: 100%;
+  font-size: 0.8125rem;
+  border-collapse: collapse;
+}
+
+.nf-failures-table th,
+.nf-failures-table td {
+  padding: 0.4rem 0.65rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+}
+
+.nf-failures-table th {
+  font-size: 0.6875rem;
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.nf-failures-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.nf-loss-accordion {
+  border-top: 1px solid var(--border);
+  padding: 0.65rem 0.75rem 0.85rem;
+}
+
+.nf-loss-accordion-hint {
+  margin: 0 0 0.65rem;
+  line-height: 1.4;
+}
+
+.nf-loss-day {
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  margin-bottom: 0.45rem;
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+}
+
+.nf-loss-day[open] {
+  border-color: color-mix(in srgb, var(--border) 60%, var(--muted));
+}
+
+.nf-loss-day-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.75rem;
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.8125rem;
+}
+
+.nf-loss-day-summary::-webkit-details-marker {
+  display: none;
+}
+
+.nf-loss-day-chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.nf-loss-day[open] .nf-loss-day-chevron {
+  transform: rotate(180deg);
+}
+
+.nf-loss-day-date {
+  font-weight: 600;
+}
+
+.nf-loss-day-alt {
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.nf-loss-day-body {
+  padding: 0 0.7rem 0.75rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+}
+
+.nf-loss-day-meta {
+  margin: 0.55rem 0 0.5rem;
+  line-height: 1.4;
+}
+
+.nf-loss-day-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  padding: 0.75rem 0;
+}
+
+.nf-loss-day-status--err {
+  color: var(--down, #f87171);
+}
+
+.nf-day-chart-wrap {
+  overflow-x: auto;
+  margin-top: 0.25rem;
+}
+
+.nf-day-chart-svg {
+  width: 100%;
+  min-width: 640px;
+  height: auto;
+  display: block;
+  color: var(--muted);
+}
+
+.nf-day-chart-grid {
+  stroke: color-mix(in srgb, var(--border) 70%, transparent);
+  stroke-width: 1;
+}
+
+.nf-day-chart-axis {
+  fill: var(--muted);
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.nf-day-candle--up line,
+.nf-day-candle--up rect {
+  stroke: var(--up, #34d399);
+  fill: var(--up, #34d399);
+  stroke-width: 1;
+}
+
+.nf-day-candle--down line,
+.nf-day-candle--down rect {
+  stroke: var(--down, #f87171);
+  fill: var(--down, #f87171);
+  stroke-width: 1;
+}
+
+.nf-day-chart-level {
+  stroke-width: 1.25;
+  stroke-dasharray: 4 3;
+}
+
+.nf-day-chart-level--entry {
+  stroke: #94a3b8;
+}
+
+.nf-day-chart-level--target {
+  stroke: #fbbf24;
+}
+
+.nf-day-chart-level--switch {
+  stroke: #38bdf8;
+}
+
+.nf-day-chart-level-label {
+  fill: var(--muted);
+  font-size: 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.nf-day-chart-switch-x {
+  stroke: #38bdf8;
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.7;
+}
+
+.nf-wins-block {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid color-mix(in srgb, #4ade80 35%, var(--border));
+}
+
+.nf-wins-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: #4ade80;
+}
+
+.nf-wins-details {
+  border-color: color-mix(in srgb, #4ade80 30%, var(--border));
+}
+
+.nf-wins-hourly {
+  margin: 1rem 0 0.75rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid color-mix(in srgb, #4ade80 28%, var(--border));
+  background: color-mix(in srgb, #4ade80 5%, var(--card));
+}
+
+.nf-wins-hourly-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.35rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #4ade80;
+}
+
+.nf-wins-hourly-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.nf-wins-hourly-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.nf-wins-hourly-cell {
+  display: grid;
+  grid-template-columns: 3.25rem 1fr 2rem;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.nf-wins-hourly-label {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+.nf-wins-hourly-bar-wrap {
+  height: 0.55rem;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+  overflow: hidden;
+}
+
+.nf-wins-hourly-bar {
+  height: 100%;
+  min-width: 0;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #22c55e, #4ade80);
+  transition: width 0.2s ease;
+}
+
+.nf-wins-hourly-count {
+  text-align: right;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.nf-wins-hourly-foot {
+  margin: 0.65rem 0 0;
+  font-size: 0.75rem;
+}
+
+.nf-filter-stats {
+  margin-top: 1.25rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid color-mix(in srgb, var(--primary) 25%, var(--border));
+  background: color-mix(in srgb, var(--primary) 4%, var(--card));
+}
+
+.nf-filter-stats-source {
+  margin: 0 0 0.75rem;
+  font-size: 0.75rem;
+}
+
+.nf-filter-stats-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.nf-filter-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.85rem 1rem;
+}
+
+.nf-filter-stat-label {
+  display: block;
+  font-size: 0.6875rem;
+  color: var(--muted);
+  margin-bottom: 0.2rem;
+}
+
+.nf-filter-stat-value {
+  display: block;
+  font-size: 1.25rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.nf-filter-stat-hint {
+  display: block;
+  font-size: 0.75rem;
+  margin-top: 0.15rem;
 }

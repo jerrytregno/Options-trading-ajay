@@ -1,6 +1,6 @@
 import "./load-env.js";
 import app from "./app.js";
-import { startNineSixteenBot } from "./nine-sixteen-bot.js";
+import { startNineSixteenBot, startNineSixteenLiveMonitor } from "./nine-sixteen-bot.js";
 import {
   getEgressRelayUrl,
   getRelaySecret,
@@ -44,6 +44,8 @@ app.listen(PORT, async () => {
   if (directIp && isIpWhitelistedForKite(directIp)) {
     console.log(`[kite] Kite egress ${directIp} (whitelisted — direct)`);
   }
+
+  startNineSixteenLiveMonitor();
 
   if (process.env.NINE_SIXTEEN_BOT_ENABLED === "1") {
     console.log("[nine-sixteen-bot] Server auto trade enabled — no browser tab required");

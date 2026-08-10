@@ -19,7 +19,7 @@ fi
 chmod 400 "$KEY"
 
 echo "==> rsync to $HOST:$REMOTE_DIR"
-rsync -avz --progress \
+rsync -avz --delete --progress \
   -e "ssh -i $KEY" \
   --exclude node_modules \
   --exclude dist \
@@ -27,6 +27,8 @@ rsync -avz --progress \
   --exclude .env.local \
   --exclude .env \
   --exclude data/kite-session.json \
+  --exclude data/bot-trade-logs.json \
+  --exclude data/nine-sixteen-capture.json \
   --exclude 'data/nine-sixteen-ran-*.json' \
   . "$HOST:$REMOTE_DIR/"
 

@@ -14,8 +14,6 @@ import {
   probeRelayEgressIpv4,
   type DirectIpProbeResult,
 } from "./kite-http.js";
-import { tryAutoNetworkRefresh } from "./network-refresh.js";
-
 function getConfiguredTradingIp(): string | null {
   const envIp = process.env.KITE_TRADING_IP?.trim();
   return envIp && /^\d{1,3}(\.\d{1,3}){3}$/.test(envIp) ? envIp : null;
@@ -28,7 +26,6 @@ export interface KiteEgressRoute {
   networkIp: string | null;
   networkIps: string[];
   networkIpUnstable: boolean;
-  networkRefreshAttempted: boolean;
   egressIp: string | null;
   allowedIps: string[];
   networkMatchesWhitelist: boolean;
@@ -179,19 +176,7 @@ export async function resolveKiteEgressRoute(force = false): Promise<KiteEgressR
 
   const allowedIps = getKiteWhitelistIps();
   const consoleUrl = getKiteConsoleUrl();
-  let probe = await probeDirectIpv4Samples(force);
-  let networkRefreshAttempted = false;
-
-  let needsFallback = !canUseDirectEgress(probe);
-
-  if (needsFallback && !process.env.VERCEL) {
-    networkRefreshAttempted = await tryAutoNetworkRefresh(force);
-    if (networkRefreshAttempted) {
-      invalidateKiteHttpCaches();
-      probe = await probeDirectIpv4Samples(true);
-      needsFallback = !canUseDirectEgress(probe);
-    }
-  }
+  const probe = await probeDirectIpv4Samples(force);
 
   const networkIp = probe.ip;
   const networkIps = probe.samples;
@@ -203,7 +188,6 @@ export async function resolveKiteEgressRoute(force = false): Promise<KiteEgressR
     networkIp,
     networkIps,
     networkIpUnstable,
-    networkRefreshAttempted,
     allowedIps,
     networkMatchesWhitelist,
     kiteConsoleUrl: consoleUrl,
@@ -250,7 +234,6 @@ export async function resolveKiteEgressRoute(force = false): Promise<KiteEgressR
     note:
       `${badIpNote} Set KITE_EGRESS_RELAY_URL to your production app (${formatKiteWhitelistIps()}). ` +
       `Kite Connect → ${consoleUrl}.` +
-      (networkRefreshAttempted ? " Wi-Fi was refreshed — still off-whitelist." : "") +
       (pinned ? ` Or set KITE_PROXY_URL via ${pinned}.` : ""),
   };
   routeCache = { route, at: Date.now() };

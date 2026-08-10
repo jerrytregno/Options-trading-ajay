@@ -49,6 +49,7 @@ yarn-error.log*
 /data/kite-trade-history.json
 /data/kite-session.json
 /data/nine-sixteen-ran-*.json
+/data/ticks/
 /trading-ai/data/ml-trading/*.json
 !trading-ai/data/ml-trading/.gitkeep
 

@@ -37,10 +37,16 @@ export function recordKiteRejectedIp(ip: string) {
   const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(ip);
   const isIpv6 = ip.includes(":");
   if (!isIpv4 && !isIpv6) return;
-  lastKiteRejectedIp = isIpv4 ? ip : null;
+  if (isIpWhitelistedForKite(ip)) return;
+  lastKiteRejectedIp = ip;
   lastKiteRejectedAt = Date.now();
   invalidateKiteEgressRoute();
   invalidateKiteHttpCaches();
+}
+
+export function clearKiteRejectedIp() {
+  lastKiteRejectedIp = null;
+  lastKiteRejectedAt = 0;
 }
 
 async function fetchTextIp(url: string): Promise<string | null> {
@@ -133,7 +139,6 @@ export async function buildTradingIpInfo(clientIp: string | null, force = false)
     networkIp: route.networkIp,
     networkIps: route.networkIps,
     networkIpUnstable: route.networkIpUnstable,
-    networkRefreshAttempted: route.networkRefreshAttempted,
     outboundIp,
     configuredIp: pinnedIp,
     rejectedOrderIp,
@@ -170,10 +175,16 @@ export async function enrichKiteIpOrderError(message: string): Promise<string> {
   if (!/IP \([^)]+\) is not allowed/i.test(message)) return message;
 
   const rejectedIp = extractIpFromKiteError(message);
-  if (rejectedIp) recordKiteRejectedIp(rejectedIp);
+  if (rejectedIp && !isIpWhitelistedForKite(rejectedIp)) {
+    recordKiteRejectedIp(rejectedIp);
+  }
 
   const consoleUrl = (await resolveKiteEgressRoute(true)).kiteConsoleUrl;
   const allowed = formatKiteWhitelistIps();
+
+  if (rejectedIp && isIpWhitelistedForKite(rejectedIp)) {
+    return `Kite API hiccup on whitelisted IP ${rejectedIp} — usually temporary. Position monitoring continues; reconnect Kite if orders fail repeatedly.`;
+  }
 
   if (rejectedIp && !isIpWhitelistedForKite(rejectedIp)) {
     if (rejectedIp.includes(":")) {

@@ -46,8 +46,6 @@ export interface TradingIpInfo {
   networkMatchesWhitelist?: boolean;
   egressMatchesWhitelist?: boolean;
   checkedAt?: string;
-  /** True when Wi-Fi was cycled to try to drop a bad public IP. */
-  networkRefreshAttempted?: boolean;
 }
 
 export const KITE_IP_WHITELIST_HELP =

@@ -22,12 +22,15 @@ function getIstParts(date: Date) {
   const pick = (type: Intl.DateTimeFormatPartTypes) =>
     Number(parts.find((part) => part.type === type)?.value ?? 0);
 
+  // en-IN + hour12:false can yield hour "24" at midnight; treat as 0.
+  const hour = pick("hour") % 24;
+
   return {
     weekday: parts.find((part) => part.type === "weekday")?.value ?? "",
     year: pick("year"),
     month: pick("month"),
     day: pick("day"),
-    hour: pick("hour"),
+    hour,
     minute: pick("minute"),
     second: pick("second"),
   };
@@ -81,6 +84,17 @@ export function getIndianMarketContext(date = new Date()) {
     minutesFromOpen,
     minutesToClose,
   };
+}
+
+/** Weekday name for an IST calendar date key `YYYY-MM-DD` (NSE session dates). */
+export function formatWeekdayFromDateKey(dateKey: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return "—";
+  const date = new Date(`${dateKey}T12:00:00+05:30`);
+  if (!Number.isFinite(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: NSE_FO_SESSION.timezone,
+    weekday: "long",
+  }).format(date);
 }
 
 function pad2(value: number) {

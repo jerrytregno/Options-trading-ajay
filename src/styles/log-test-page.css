@@ -1,0 +1,91 @@
+.log-test-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.log-test-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.log-test-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.log-test-stat {
+  padding: 0.9rem 1rem;
+}
+
+.log-test-label {
+  display: block;
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+
+.log-test-value {
+  font-size: 1.25rem;
+  font-weight: 650;
+}
+
+.log-test-message {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+  margin: 0 0 0.85rem;
+}
+
+.log-test-table-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.log-test-table-wrap {
+  max-height: min(70vh, 720px);
+  overflow: auto;
+}
+
+.log-test-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.log-test-table th,
+.log-test-table td {
+  padding: 0.55rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.log-test-table th {
+  position: sticky;
+  top: 0;
+  background: var(--card);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  z-index: 1;
+}
+
+.log-test-empty {
+  text-align: center;
+  padding: 2rem 1rem !important;
+}
+
+.log-test-stale td {
+  color: var(--muted);
+}

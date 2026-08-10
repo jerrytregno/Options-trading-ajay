@@ -1,11 +1,14 @@
 import { Link, useLocation } from "react-router-dom";
-import { Clock, LogOut, Menu, Settings, Wallet, X, Zap } from "lucide-react";
+import { Activity, ChartColumn, Clock, History, LogOut, Menu, Settings, Wallet, X, Zap } from "lucide-react";
 import { useState } from "react";
 import { useAuth } from "@/contexts/auth-context";
 import { useKite } from "@/contexts/kite-context";
 
 const navItems = [
   { href: "/dashboard/nine-fifteen", label: "9:15 Candle", icon: Clock },
+  { href: "/dashboard/backtesting", label: "Backtesting", icon: ChartColumn },
+  { href: "/dashboard/log-test", label: "Log Test", icon: Activity },
+  { href: "/dashboard/trades", label: "Trades", icon: History },
   { href: "/dashboard/portfolio", label: "Portfolio", icon: Wallet },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];

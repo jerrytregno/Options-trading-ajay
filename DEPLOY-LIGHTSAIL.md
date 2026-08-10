@@ -157,7 +157,7 @@ Open app → **Settings → Trading IP** — egress should match the static IP.
 1. **Before 9:15 IST** — open app on phone, go to **Settings**, tap **Connect Kite** (~30 sec)
 2. Server saves token to `data/kite-session.json`
 3. **9:16** — server bot runs automatically (no tab open)
-4. **Exit** — when Nifty ±50 from 9:15 open, or 3:25 PM square-off
+4. **Exit** — when Nifty ±30 from 9:15 open, or 3:25 PM square-off
 
 Enable/disable in app: **9:15 Candle → Server 9:16 bot (Lightsail)**
 

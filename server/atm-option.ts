@@ -5,6 +5,7 @@ import { getKiteInstruments } from "./kite-instruments.js";
 import { kiteGet } from "./kite-client.js";
 
 type KiteInstrument = {
+  instrument_token?: number;
   tradingsymbol: string;
   name: string;
   expiry?: string;
@@ -37,6 +38,7 @@ export async function resolveAtmNiftyOption(accessToken: string, leg: TradeLeg) 
   const streamInst = getStreamInstrument("nifty50");
   const rows = await getKiteInstruments(streamInst.chainExchange);
   const instruments: KiteInstrument[] = rows.map((row) => ({
+    instrument_token: row.instrument_token,
     tradingsymbol: row.tradingsymbol,
     name: row.name ?? "",
     expiry: row.expiry,
@@ -77,5 +79,6 @@ export async function resolveAtmNiftyOption(accessToken: string, leg: TradeLeg) 
     tradingsymbol: match.tradingsymbol,
     lotSize: match.lot_size ?? 65,
     spotPrice,
+    instrumentToken: match.instrument_token ?? 0,
   };
 }

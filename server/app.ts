@@ -5,11 +5,18 @@ import { fileURLToPath } from "url";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
-import { fetchNineFifteenCandleHistory } from "./nine-fifteen-candles.js";
-import { getNineSixteenBotStatus, setNineSixteenBotEnabled } from "./nine-sixteen-bot.js";
+import { fetchNineFifteenCandleHistory, NINE_FIFTEEN_DEFAULT_HISTORY_DAYS } from "./nine-fifteen-candles.js";
+import { getNineSixteenBotStatus, getNineSixteenBotStatusLive, getNineSixteenBotLiveTick, listBotTradeLogs, setNineSixteenBotEnabled } from "./nine-sixteen-bot.js";
+import {
+  clearNiftyLogTest,
+  getNiftyLogTestStatus,
+  startNiftyLogTest,
+  stopNiftyLogTest,
+} from "./nifty-log-test.js";
 import { saveKiteSession, clearKiteSession } from "./kite-session-store.js";
 import { getKiteInstruments } from "./kite-instruments.js";
 import { getRelaySecret, kiteHttpFetch, probeDirectIpv4 } from "./kite-http.js";
+import { kiteGet, parseKiteResponse } from "./kite-client.js";
 import { buildTradingIpInfo, enrichKiteIpOrderError } from "./trading-ip.js";
 import {
   importTradebookCsvIntoHistory,
@@ -21,20 +28,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const KITE_BASE = "https://api.kite.trade";
 const TOKEN_COOKIE = "kite_access_token";
-
-interface KiteApiResponse<T = unknown> {
-  status: string;
-  message?: string;
-  data?: T;
-}
-
-function parseKiteResponse<T>(json: unknown): T {
-  const payload = json as KiteApiResponse<T>;
-  if (payload.status === "error") {
-    throw new Error(payload.message ?? "Kite API error");
-  }
-  return payload.data as T;
-}
 
 function getAppUrl() {
   if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, "");
@@ -69,28 +62,6 @@ function getLoginUrl() {
   if (!config.configured || !config.apiKey) return null;
   const redirectUrl = `${config.appUrl}/api/kite/callback`;
   return `https://kite.zerodha.com/connect/login?v=3&api_key=${config.apiKey}&redirect_url=${encodeURIComponent(redirectUrl)}`;
-}
-
-async function kiteGet<T>(path: string, accessToken: string): Promise<T> {
-  const config = getKiteConfig();
-  const res = await kiteHttpFetch(`${KITE_BASE}${path}`, {
-    headers: {
-      "X-Kite-Version": "3",
-      Authorization: `token ${config.apiKey}:${accessToken}`,
-    },
-  });
-  const json: unknown = await res.json();
-  try {
-    return parseKiteResponse<T>(json);
-  } catch (error) {
-    throw await enrichKiteApiError(error);
-  }
-}
-
-async function enrichKiteApiError(error: unknown): Promise<Error> {
-  const raw = error instanceof Error ? error.message : "Kite API error";
-  const message = await enrichKiteIpOrderError(raw);
-  return new Error(message);
 }
 
 interface KiteInstrument {
@@ -301,7 +272,20 @@ app.get("/api/kite/callback", async (req, res) => {
         }),
       });
 
-      const sessionJson: unknown = await sessionRes.json();
+      const sessionText = await sessionRes.text();
+      if (!sessionText.trim() || /^\s*</.test(sessionText)) {
+        throw new Error(
+          `Kite login returned HTML instead of JSON (HTTP ${sessionRes.status})`,
+        );
+      }
+      let sessionJson: unknown;
+      try {
+        sessionJson = JSON.parse(sessionText) as unknown;
+      } catch {
+        throw new Error(
+          `Kite login returned non-JSON (HTTP ${sessionRes.status}): ${sessionText.replace(/\s+/g, " ").trim().slice(0, 80)}`,
+        );
+      }
       const session = parseKiteResponse<{ access_token: string }>(sessionJson);
 
       let userId: string | undefined;
@@ -350,7 +334,10 @@ app.get("/api/kite/nine-fifteen-candles", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
 
-  const days = Math.min(Math.max(Number(req.query.days ?? 365), 30), 365);
+  const days = Math.min(
+    Math.max(Number(req.query.days ?? NINE_FIFTEEN_DEFAULT_HISTORY_DAYS), 30),
+    NINE_FIFTEEN_DEFAULT_HISTORY_DAYS,
+  );
   const force = req.query.refresh === "1";
 
   try {
@@ -358,6 +345,61 @@ app.get("/api/kite/nine-fifteen-candles", async (req, res) => {
     return res.json({ data });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load 9:15 candles";
+    return res.status(502).json({ error: message });
+  }
+});
+
+/** Full NSE session 1-min Nifty 50 candles for one IST date (09:15–15:30). */
+app.get("/api/kite/nifty-session-minutes", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const date = String(req.query.date ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: "Query date=YYYY-MM-DD required" });
+  }
+
+  try {
+    const from = `${date} 09:15:00`;
+    const to = `${date} 15:30:00`;
+    const { candles: raw } = await fetchHistoricalCandles(
+      accessToken,
+      "NSE:NIFTY 50",
+      "minute",
+      from,
+      to,
+    );
+    const candles = (Array.isArray(raw) ? raw : [])
+      .map((row) => {
+        if (!Array.isArray(row) || row.length < 5) return null;
+        const [time, open, high, low, close] = row;
+        if (
+          typeof time !== "string" ||
+          ![open, high, low, close].every((v) => typeof v === "number" && Number.isFinite(v))
+        ) {
+          return null;
+        }
+        return {
+          time,
+          open: open as number,
+          high: high as number,
+          low: low as number,
+          close: close as number,
+        };
+      })
+      .filter((c): c is { time: string; open: number; high: number; low: number; close: number } => c != null);
+
+    return res.json({
+      data: {
+        date,
+        instrument: "NSE:NIFTY 50",
+        from,
+        to,
+        candles,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load session minutes";
     return res.status(502).json({ error: message });
   }
 });
@@ -513,14 +555,70 @@ app.post("/api/kite/portfolio/trades/import", async (req, res) => {
   }
 });
 
-app.get("/api/nine-sixteen/bot/status", (_req, res) => {
-  return res.json({ data: getNineSixteenBotStatus() });
+app.get("/api/nine-sixteen/bot/status", async (_req, res) => {
+  try {
+    const data = await getNineSixteenBotStatusLive();
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load bot status";
+    return res.status(500).json({ error: message });
+  }
 });
 
-app.post("/api/nine-sixteen/bot/toggle", (req, res) => {
+app.get("/api/nine-sixteen/bot/live", async (_req, res) => {
+  try {
+    const data = await getNineSixteenBotLiveTick();
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load live P&L";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.get("/api/trades", async (_req, res) => {
+  try {
+    const store = await listBotTradeLogs();
+    return res.json({
+      data: store.trades,
+      meta: { updatedAt: store.updatedAt },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load trade logs";
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.get("/api/log-test/status", (_req, res) => {
+  return res.json({ data: getNiftyLogTestStatus() });
+});
+
+app.post("/api/log-test/start", async (_req, res) => {
+  try {
+    const data = await startNiftyLogTest();
+    return res.json({ data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to start log test";
+    return res.status(400).json({ error: message });
+  }
+});
+
+app.post("/api/log-test/stop", (_req, res) => {
+  return res.json({ data: stopNiftyLogTest() });
+});
+
+app.post("/api/log-test/clear", (_req, res) => {
+  return res.json({ data: clearNiftyLogTest() });
+});
+
+app.post("/api/nine-sixteen/bot/toggle", async (req, res) => {
   const enabled = Boolean(req.body?.enabled);
   setNineSixteenBotEnabled(enabled);
-  return res.json({ data: getNineSixteenBotStatus() });
+  try {
+    const data = await getNineSixteenBotStatusLive();
+    return res.json({ data });
+  } catch {
+    return res.json({ data: getNineSixteenBotStatus() });
+  }
 });
 
 if (process.env.NODE_ENV === "production" && !process.env.VERCEL) {
