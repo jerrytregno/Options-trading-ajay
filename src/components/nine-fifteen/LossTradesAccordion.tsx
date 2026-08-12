@@ -17,6 +17,18 @@ type SwitchTarget = {
   points: number;
 };
 
+function formatRsi(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return formatNumber(value, 2);
+}
+
+function rsiClass(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "";
+  if (value >= 70) return "text-up";
+  if (value <= 30) return "text-down";
+  return "";
+}
+
 function DirectionBadge({ direction }: { direction: "up" | "down" | "flat" }) {
   if (direction === "up") return <span className="nf-direction nf-direction--up">Up</span>;
   if (direction === "down") return <span className="nf-direction nf-direction--down">Down</span>;
@@ -273,6 +285,13 @@ function LossDayAccordionItem({
           </span>
         </span>
         <span className="text-sm text-muted">
+          RSI @9:15{" "}
+          <span className={cn("font-mono", rsiClass(trade.rsi915))}>{formatRsi(trade.rsi915)}</span>
+          {" · "}
+          @9:16{" "}
+          <span className={cn("font-mono", rsiClass(trade.rsi916))}>{formatRsi(trade.rsi916)}</span>
+        </span>
+        <span className="text-sm text-muted">
           Entry{" "}
           <span className="font-mono">
             {entry != null ? formatNumber(entry, 2) : "—"}
@@ -293,6 +312,21 @@ function LossDayAccordionItem({
       <div className="nf-loss-day-body">
         <div className="nf-loss-day-meta text-muted text-sm">
           9:15 {formatNumber(trade.open915, 2)} → {formatNumber(trade.close915, 2)}
+          {trade.rsi915 != null && Number.isFinite(trade.rsi915) && (
+            <>
+              {" "}
+              · RSI(14) @9:15 {formatRsi(trade.rsi915)}
+              {trade.rsi916 != null && Number.isFinite(trade.rsi916) && (
+                <> · @9:16 {formatRsi(trade.rsi916)}</>
+              )}
+            </>
+          )}
+          {trade.rsi915 == null && trade.rsi916 != null && Number.isFinite(trade.rsi916) && (
+            <>
+              {" "}
+              · RSI(14) @9:16 {formatRsi(trade.rsi916)}
+            </>
+          )}
           {trade.exitTargetIndexPrice != null && (
             <>
               {" "}

@@ -12,7 +12,6 @@ import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useKite } from "@/contexts/kite-context";
 import {
   NINE_FIFTEEN_TIME_CHECKPOINTS,
-  NSE_SESSIONS_FIVE_YEARS,
   NSE_SESSIONS_ONE_YEAR,
   type NineFifteenCePeGuide,
   type NineFifteenCePeFailureTrade,
@@ -131,6 +130,18 @@ function DirectionBadge({ direction }: { direction: "up" | "down" | "flat" }) {
       Flat
     </span>
   );
+}
+
+function formatRsi(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return formatNumber(value, 2);
+}
+
+function rsiClass(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "";
+  if (value >= 70) return "text-up";
+  if (value <= 30) return "text-down";
+  return "";
 }
 
 function HitRateCell({ hits, pct }: { hits: number; pct: number }) {
@@ -301,6 +312,12 @@ function StrategyTradeDetailTable({
             <th className="text-right">9:15 close</th>
             <th className="text-right">Difference</th>
             <th>9:15 bar</th>
+            <th className="text-right" title="Wilder RSI(14) on 1-min Nifty closes at 9:15 bar">
+              RSI(14) @9:15
+            </th>
+            <th className="text-right" title="Wilder RSI(14) on 1-min Nifty closes at 9:16 bar">
+              RSI(14) @9:16
+            </th>
             <th>Entry 9:16:00 (Kite open)</th>
             {kind === "win" && <th>±{targetPoints} from entry (Kite ≥9:16)</th>}
             {kind === "loss" && (
@@ -373,6 +390,12 @@ function StrategyTradeDetailTable({
               </td>
               <td>
                 <DirectionBadge direction={f.direction} />
+              </td>
+              <td className={cn("text-right font-mono text-sm", rsiClass(f.rsi915))}>
+                {formatRsi(f.rsi915)}
+              </td>
+              <td className={cn("text-right font-mono text-sm", rsiClass(f.rsi916))}>
+                {formatRsi(f.rsi916)}
               </td>
               <td className="font-mono text-sm">
                 {f.entryAt ? (
@@ -847,8 +870,7 @@ export default function BacktestingPage() {
               Backtesting
             </h1>
             <p className="page-subtitle">
-              Nifty 50 · 9:15 follow strategy · Zerodha Kite minute data · ~{NSE_SESSIONS_ONE_YEAR} sessions ≈ 1y · ~
-              {NSE_SESSIONS_FIVE_YEARS} ≈ 5y
+              Nifty 50 · 9:15 follow strategy · Zerodha Kite minute data · ~{NSE_SESSIONS_ONE_YEAR} sessions ≈ 1y
             </p>
           </div>
           <button
@@ -886,8 +908,7 @@ export default function BacktestingPage() {
         {loading && !data && (
           <div className="card nf-loading">
             <RefreshCw size={18} className="spin" />
-            Loading ~5 years of Zerodha Kite sessions for 1y + 5y backtests (first load can take a few
-            minutes)…
+            Loading ~1 year of Zerodha Kite sessions (first load can take a minute)…
           </div>
         )}
 
@@ -962,24 +983,6 @@ export default function BacktestingPage() {
                   showHourlyWinBreakdown
                   showAlt20After1010OnLoss
                 />
-
-                {data.followFiveYear && (
-                  <div className="nf-fiveyear-block">
-                    <CePeStrategyTable
-                      guide={data.followFiveYear.cePeGuide}
-                      totalDays={data.followFiveYear.nseSessions}
-                      followFilterStats={data.followFiveYear.followFilterStats}
-                      nearMissFollow={data.followFiveYear.nearMissFollow}
-                      nearMissFollowFilterStats={data.followFiveYear.nearMissFollowFilterStats}
-                      liveConsolidatedFollow={data.followFiveYear.liveConsolidatedFollow}
-                      liveConsolidatedFilterStats={data.followFiveYear.liveConsolidatedFilterStats}
-                      historyLabel={`last 5 years · ${data.followFiveYear.fromDate} → ${data.followFiveYear.toDate} · dual-band live exits`}
-                      sessionsCount={data.followFiveYear.nseSessions}
-                      showHourlyWinBreakdown
-                      showAlt20After1010OnLoss
-                    />
-                  </div>
-                )}
               </div>
             )}
           </>

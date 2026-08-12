@@ -21,18 +21,19 @@ import {
   NINE_FIFTEEN_CEPE_TARGETS,
   NINE_FIFTEEN_RUPEE_LEVELS,
   NINE_FIFTEEN_TIME_CHECKPOINTS,
-  NSE_SESSIONS_FIVE_YEARS,
   NSE_SESSIONS_ONE_YEAR,
 } from "../src/types/nine-fifteen.js";
+import { rsiAtBarIndex } from "../src/lib/rsi.js";
 import {
   NINE_SIXTEEN_INDEX_TARGET_15,
   NINE_SIXTEEN_INDEX_TARGET_15_START_MINUTE,
   NINE_SIXTEEN_INDEX_TARGET_20,
   NINE_SIXTEEN_INDEX_TARGET_20_START_MINUTE,
+  NINE_SIXTEEN_ENTRY_SEC,
 } from "./nine-sixteen-logic.js";
 
 /** Backtest entry: Kite 9:16 candle open (real 1-min data). */
-const BACKTEST_ENTRY_SEC_OF_DAY = 9 * 3600 + 16 * 60;
+const BACKTEST_ENTRY_SEC_OF_DAY = NINE_SIXTEEN_ENTRY_SEC;
 
 const NIFTY_SPOT_KEY = "NSE:NIFTY 50";
 const IST = "Asia/Kolkata";
@@ -73,13 +74,14 @@ function isEntryBasedFollowTarget(targetPoints: number): boolean {
     targetPoints === NINE_FIFTEEN_NEAR_MISS_TARGET
   );
 }
+/** RSI lookback on consecutive 1-min closes ending at 9:15. */
+const NINE_FIFTEEN_RSI_PERIOD = 14;
 /** Default calendar days requested (~1y NSE sessions). */
 export const NINE_FIFTEEN_DEFAULT_HISTORY_DAYS = 365;
-/** Calendar lookback ceiling — wide enough for ~5y of weekday sessions + holiday buffer. */
+/** Calendar lookback ceiling — wide enough for ~1y of weekday sessions + holiday buffer. */
 export const NINE_FIFTEEN_MAX_HISTORY_DAYS =
-  Math.ceil(NSE_SESSIONS_FIVE_YEARS * (365 / NSE_SESSIONS_ONE_YEAR)) + 120;
+  Math.ceil(NSE_SESSIONS_ONE_YEAR * (365 / NSE_SESSIONS_ONE_YEAR)) + 120;
 const ONE_YEAR_SESSION_ROWS = NSE_SESSIONS_ONE_YEAR;
-const FIVE_YEAR_SESSION_ROWS = NSE_SESSIONS_FIVE_YEARS;
 /** Minimum 1-min bars in session (9:15–15:30) to count as a full Kite trading day. */
 const MIN_SESSION_MINUTE_BARS = 330;
 const TIME_CHECKPOINTS: { label: NineFifteenTimeCheckpoint; minutes: number }[] = [
@@ -571,6 +573,17 @@ function parseSessionRows(raw: unknown[]): NineFifteenCandleRow[] {
 
   const prevDayCloseByDate = buildPrevDayCloseMap(byDate);
 
+  const timeline: { date: string; mins: number; close: number; ms: number }[] = [];
+  for (const [date, candles] of byDate) {
+    for (const c of candles) {
+      timeline.push({ date, mins: c.mins, close: c.close, ms: c.time.getTime() });
+    }
+  }
+  timeline.sort((a, b) => a.ms - b.ms);
+  const closeSeries = timeline.map((c) => c.close);
+  const barIndexByKey = new Map<string, number>();
+  timeline.forEach((c, i) => barIndexByKey.set(`${c.date}@${c.mins}`, i));
+
   const rows: NineFifteenCandleRow[] = [];
 
   for (const [date, candles] of byDate) {
@@ -632,6 +645,17 @@ function parseSessionRows(raw: unknown[]): NineFifteenCandleRow[] {
         ? directionFromOhlc(prevDayClose, bar915.open)
         : null;
 
+    const bar915Idx = barIndexByKey.get(`${date}@${SESSION_OPEN_MINUTES}`);
+    const bar916Idx = barIndexByKey.get(`${date}@${SESSION_ENTRY_MINUTES}`);
+    const rsi915 =
+      bar915Idx != null
+        ? rsiAtBarIndex(closeSeries, bar915Idx, NINE_FIFTEEN_RSI_PERIOD)
+        : null;
+    const rsi916 =
+      bar916Idx != null
+        ? rsiAtBarIndex(closeSeries, bar916Idx, NINE_FIFTEEN_RSI_PERIOD)
+        : null;
+
     rows.push({
       date,
       open: bar915.open,
@@ -666,6 +690,8 @@ function parseSessionRows(raw: unknown[]): NineFifteenCandleRow[] {
       switch25Then20After1010Down: switch25_20.down,
       switch25Then15After1101Up: switch25_15.up,
       switch25Then15After1101Down: switch25_15.down,
+      rsi915: rsi915 != null ? Number(rsi915.toFixed(2)) : null,
+      rsi916: rsi916 != null ? Number(rsi916.toFixed(2)) : null,
     });
   }
 
@@ -867,6 +893,8 @@ function buildTradeDayDetail(
     winConfirmed: win,
     altTargetAfter1010,
     altTarget10After1010,
+    rsi915: row.rsi915 ?? null,
+    rsi916: row.rsi916 ?? null,
   };
 }
 
@@ -1334,9 +1362,9 @@ export async function fetchNineFifteenCandleHistory(
   force = false,
 ): Promise<NineFifteenCandlesResult> {
   const days = Math.min(Math.max(Math.round(daysRequested), 30), NINE_FIFTEEN_MAX_HISTORY_DAYS);
-  const calendarLookback = calendarDaysForSessionLookback(FIVE_YEAR_SESSION_ROWS);
+  const calendarLookback = calendarDaysForSessionLookback(ONE_YEAR_SESSION_ROWS);
 
-  const cacheKey = `nine-fifteen:session:v49:1y+5y-live-consolidated`;
+  const cacheKey = `nine-fifteen:session:v52:1y-live-consolidated-rsi915-916`;
   if (force) invalidateNineFifteenCache();
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_MS) {
@@ -1371,11 +1399,9 @@ export async function fetchNineFifteenCandleHistory(
     throw new Error("No complete NSE session days in Kite data (check 9:15–15:30 minute candles)");
   }
 
-  const rows5y = rowsAll.slice(0, Math.min(FIVE_YEAR_SESSION_ROWS, rowsAll.length));
-  const rows1y = rows5y.slice(0, Math.min(ONE_YEAR_SESSION_ROWS, rows5y.length));
+  const rows1y = rowsAll.slice(0, Math.min(ONE_YEAR_SESSION_ROWS, rowsAll.length));
 
   const block1y = buildFollowBacktestBlock(rows1y, true);
-  const block5y = buildFollowBacktestBlock(rows5y, false);
 
   const result: NineFifteenCandlesResult = {
     instrument: NIFTY_SPOT_KEY,
@@ -1392,7 +1418,6 @@ export async function fetchNineFifteenCandleHistory(
     nearMissFollowFilterStats: block1y.nearMissFollowFilterStats,
     liveConsolidatedFollow: block1y.liveConsolidatedFollow,
     liveConsolidatedFilterStats: block1y.liveConsolidatedFilterStats,
-    followFiveYear: block5y,
   };
 
   cache.set(cacheKey, { at: Date.now(), data: result });

@@ -49,6 +49,7 @@ export async function resolveEntryQuantity(
   accessToken: string,
   lotSize: number,
   optionLtp: number,
+  options?: { maxLots?: number },
 ): Promise<{
   quantity: number;
   lots: number;
@@ -63,9 +64,12 @@ export async function resolveEntryQuantity(
     optionLtp,
   });
 
+  const cappedLots =
+    options?.maxLots != null && options.maxLots >= 0 ? Math.min(lots, Math.floor(options.maxLots)) : lots;
+
   return {
-    quantity: lots * lotSize,
-    lots,
+    quantity: cappedLots * lotSize,
+    lots: cappedLots,
     availableBalance,
     costPerLot,
     usableBalance,

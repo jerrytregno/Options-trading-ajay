@@ -306,16 +306,25 @@ export async function waitForOrderComplete(
   accessToken: string,
   orderId: string,
   timeoutMs = 45_000,
-): Promise<{ average_price: number; filled_quantity: number; status: string }> {
+): Promise<{ average_price: number; filled_quantity: number; status: string; status_message?: string }> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const orders = await kiteGet<
-      { order_id: string; status: string; average_price: number; filled_quantity: number }[]
+      {
+        order_id: string;
+        status: string;
+        average_price: number;
+        filled_quantity: number;
+        status_message?: string;
+      }[]
     >("/orders", accessToken);
     const order = orders.find((row) => row.order_id === orderId);
     if (order && (order.status === "COMPLETE" || order.status === "REJECTED" || order.status === "CANCELLED")) {
       if (order.status !== "COMPLETE") {
-        throw new Error(`Order ${orderId} ${order.status}`);
+        const detail = order.status_message?.trim();
+        throw new Error(
+          detail ? `Order ${orderId} ${order.status}: ${detail}` : `Order ${orderId} ${order.status}`,
+        );
       }
       return order;
     }

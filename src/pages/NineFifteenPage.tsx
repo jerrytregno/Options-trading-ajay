@@ -77,9 +77,32 @@ export default function NineFifteenPage() {
                     <li>
                       Product: <strong>MIS</strong> market
                     </li>
-                    <li>Size: max lots balance allows</li>
+                    <li>Size: max lots balance allows (from live LTP × lot size)</li>
                     <li>
                       Needs: bot on, Kite logged in before 9:15, whitelisted IP
+                    </li>
+                  </ul>
+                </li>
+                <li>
+                  <strong>4. Fallback entry retry (if order fails)</strong>
+                  <ul className="nf-live-rules-sublist">
+                    <li>
+                      Failed / rejected orders are <strong>not</strong> counted as entry — only a{" "}
+                      <strong>filled</strong> order starts the trade
+                    </li>
+                    <li>
+                      Until <strong>9:16:30</strong>, retry as fast as possible (~250ms between attempts): fresh{" "}
+                      <strong>ATM LTP</strong>, fresh <strong>balance</strong>, recompute lots, place again
+                    </li>
+                    <li>
+                      If Kite <strong>rejects</strong> and you had &gt;1 lot, next attempt caps lots at{" "}
+                      <strong>previous − 1</strong> (margin / sizing mismatch)
+                    </li>
+                    <li>
+                      Retries keep the same CE/PE and exit band from step 2 — only strike sizing and LTP refresh
+                    </li>
+                    <li>
+                      If nothing fills by <strong>9:16:30</strong> → <strong>NO ENTRY</strong> for the day
                     </li>
                   </ul>
                 </li>

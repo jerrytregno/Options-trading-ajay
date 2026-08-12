@@ -246,7 +246,7 @@ function pushLog(text: string, type: NineSixteenBotStatus["logs"][number]["type"
     return;
   }
   logs.unshift({
-    time: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+    time: getIndianMarketContext().timeIST,
     message: text,
     type,
   });
@@ -460,6 +460,8 @@ function inferExitModeFromCaptures(): NineSixteenExitMode | null {
  * without this gate both would hammer /portfolio/positions past Kite's rate limit.
  */
 const RECONCILE_MIN_INTERVAL_MS = 5_000;
+/** Minimal pause between failed entry attempts (still within 9:16:00–9:16:30). */
+const ENTRY_RETRY_DELAY_MS = 250;
 let lastReconcileAt = 0;
 let reconcileInFlight = false;
 
@@ -511,10 +513,12 @@ async function reconcilePositionWithKiteInner(accessToken: string, dateIst: stri
   // Do not race a live square-off — squareOff persists the closed log itself.
   if (squareOffInFlight || phase === "exiting") return;
 
+  // Entry still in flight or retrying — no MIS position is expected; never finish the day.
+  if (phase === "entering") return;
+  if (!isPast916EntryWindow() && entryPrice <= 0 && phase !== "in_position") return;
+
   const wasTracking =
-    phase === "in_position" ||
-    Boolean(tradingsymbol) ||
-    fs.existsSync(STATE_FILE);
+    phase === "in_position" || (entryPrice > 0 && quantity > 0 && Boolean(tradingsymbol));
 
   if (!wasTracking) return;
 
@@ -933,9 +937,30 @@ async function squareOffInner(accessToken: string, reason: string) {
   finishDay(dateIst, `CLOSED · ${reason}`, "success");
 }
 
+function clearFailedEntryAttempt() {
+  tradingsymbol = null;
+  quantity = 0;
+  entryPrice = 0;
+  lastOptionPrice = null;
+  unrealisedPnl = null;
+}
+
+function isRetryableEntryOrderError(message: string): boolean {
+  return /REJECTED|CANCELLED|fill timeout|timeout/i.test(message);
+}
+
+function isMarginRelatedOrderError(message: string): boolean {
+  return /margin|insufficient|fund|balance|required/i.test(message);
+}
+
+function entryRetryDelayMs() {
+  return ENTRY_RETRY_DELAY_MS;
+}
+
 async function tryEnter(accessToken: string, dateIst: string) {
   phase = "entering";
   message = "Placing 9:16:00 entry…";
+  clearFailedEntryAttempt();
 
   if (capturedOpen915 == null || capturedClose915 == null) {
     throw new Error("Missing captured 9:15 open/close — cannot enter");
@@ -968,90 +993,142 @@ async function tryEnter(accessToken: string, dateIst: string) {
   leg = nextLeg;
   await assertKiteEgressReady();
 
-  const resolved = await resolveAtmNiftyOption(accessToken, nextLeg);
-  if (!resolved) throw new Error("ATM option not found");
+  const modeLabel =
+    exitMode === "near_miss" ? "near-miss exits (±20→±10@10:01)" : "main exits (±25→±20@10:01→±15@11:01)";
 
-  const optionLtp = await fetchOptionLtp(accessToken, resolved.tradingsymbol);
-  if (optionLtp <= 0) throw new Error("Option LTP unavailable for sizing");
+  let attempt = 0;
+  let maxLotsCap: number | undefined;
+  let lastAttemptLots = 0;
+  let lastFailure = "";
 
-  const sizing = await resolveEntryQuantity(accessToken, resolved.lotSize, optionLtp);
-  if (sizing.lots <= 0 || sizing.quantity <= 0) {
-    const skipNote = `SKIPPED · balance too low for 1 lot · need ~₹${Math.ceil(sizing.costPerLot)} · available ₹${Math.floor(sizing.availableBalance)} · open ${bar.open.toFixed(2)} · close ${bar.close.toFixed(2)} · Δ ${bar.change.toFixed(2)}`;
-    pushLog(skipNote, "warning");
-    await persistTradeLog(dateIst, "skipped", skipNote);
-    finishDay(dateIst, skipNote, "warning");
-    return;
-  }
+  while (!isPast916EntryWindow()) {
+    attempt += 1;
+    clearFailedEntryAttempt();
+    message = attempt === 1 ? "Placing 9:16:00 entry…" : `Retrying entry (${attempt}) until 9:16:30…`;
 
-  tradingsymbol = resolved.tradingsymbol;
-  quantity = sizing.quantity;
-
-  const modeLabel = exitMode === "near_miss" ? "near-miss exits (±20→±10@10:01)" : "main exits (±25→±20@10:01→±15@11:01)";
-  pushLog(
-    `9:15 ${bar.direction.toUpperCase()} · |Δ| ${Math.abs(bar.change).toFixed(2)} → ${legLabel(nextLeg)} ${resolved.tradingsymbol} · ${modeLabel} · ${sizing.lots} lot(s) · ₹${Math.floor(sizing.availableBalance)} avail`,
-    "success",
-  );
-
-  const orderId = await placeRegularMarketOrder(accessToken, {
-    tradingsymbol: resolved.tradingsymbol,
-    exchange: "NFO",
-    transaction_type: "BUY",
-    product: "MIS",
-    quantity: sizing.quantity,
-  });
-  await waitForOrderComplete(accessToken, orderId);
-  clearKiteRejectedIp();
-
-  const filled = await fetchMisPosition(accessToken, tradingsymbol, "MIS");
-  if (filled) {
-    entryPrice = filled.average_price;
-    lastOptionPrice = filled.last_price;
-    unrealisedPnl = filled.unrealised ?? filled.pnl;
-  }
-
-  // Lock exit anchor = Nifty 50 WS spot at fill (~9:16:00), not 9:15 open / not option premium
-  if (lastSpot != null && lastSpot > 0) {
-    entrySpot = lastSpot;
-  } else {
     try {
-      const spot = await fetchNiftySpot(accessToken);
-      if (spot > 0) {
-        entrySpot = spot;
-        lastSpot = spot;
+      const resolved = await resolveAtmNiftyOption(accessToken, nextLeg);
+      if (!resolved) throw new Error("ATM option not found");
+
+      const optionLtp = await fetchOptionLtp(accessToken, resolved.tradingsymbol);
+      if (optionLtp <= 0) throw new Error("Option LTP unavailable for sizing");
+
+      const sizing = await resolveEntryQuantity(accessToken, resolved.lotSize, optionLtp, {
+        maxLots: maxLotsCap,
+      });
+      if (sizing.lots <= 0 || sizing.quantity <= 0) {
+        lastFailure = `balance too low for 1 lot · need ~₹${Math.ceil(sizing.costPerLot)} · available ₹${Math.floor(sizing.availableBalance)}`;
+        pushLog(`Entry attempt ${attempt} · ${lastFailure} · retrying with fresh LTP…`, "warning");
+        await new Promise((resolve) => setTimeout(resolve, entryRetryDelayMs()));
+        continue;
       }
-    } catch {
-      /* required for index exits — retry on next tick */
+
+      lastAttemptLots = sizing.lots;
+
+      pushLog(
+        `Entry attempt ${attempt} · ${legLabel(nextLeg)} ${resolved.tradingsymbol} @ ₹${optionLtp.toFixed(2)} · ${modeLabel} · ${sizing.lots} lot(s) · ₹${Math.floor(sizing.availableBalance)} avail`,
+        attempt === 1 ? "success" : "info",
+      );
+
+      const orderId = await placeRegularMarketOrder(accessToken, {
+        tradingsymbol: resolved.tradingsymbol,
+        exchange: "NFO",
+        transaction_type: "BUY",
+        product: "MIS",
+        quantity: sizing.quantity,
+      });
+      const orderResult = await waitForOrderComplete(accessToken, orderId);
+      clearKiteRejectedIp();
+
+      tradingsymbol = resolved.tradingsymbol;
+      quantity = sizing.quantity;
+      entryPrice = orderResult.average_price > 0 ? orderResult.average_price : 0;
+
+      const filled = await fetchMisPosition(accessToken, tradingsymbol, "MIS");
+      if (filled) {
+        entryPrice = filled.average_price;
+        lastOptionPrice = filled.last_price;
+        unrealisedPnl = filled.unrealised ?? filled.pnl;
+      } else if (orderResult.average_price > 0) {
+        lastOptionPrice = orderResult.average_price;
+      }
+
+      if (entryPrice <= 0) {
+        throw new Error(`Order ${orderId} COMPLETE but entry price missing`);
+      }
+
+      // Lock exit anchor = Nifty 50 WS spot at fill (~9:16:00), not 9:15 open / not option premium
+      if (lastSpot != null && lastSpot > 0) {
+        entrySpot = lastSpot;
+      } else {
+        try {
+          const spot = await fetchNiftySpot(accessToken);
+          if (spot > 0) {
+            entrySpot = spot;
+            lastSpot = spot;
+          }
+        } catch {
+          /* required for index exits — retry on next tick */
+        }
+      }
+
+      if (entrySpot <= 0) {
+        throw new Error("Nifty spot unavailable at entry — cannot set index exit from Nifty spot at 9:16:00");
+      }
+
+      optionInstrumentToken =
+        resolved.instrumentToken > 0
+          ? resolved.instrumentToken
+          : ((await resolveInstrumentToken("NFO", resolved.tradingsymbol, accessToken)) ?? 0);
+      if (niftyInstrumentToken > 0) {
+        setBotTickerInstruments(
+          optionInstrumentToken > 0 ? [niftyInstrumentToken, optionInstrumentToken] : [niftyInstrumentToken],
+        );
+      }
+
+      phase = "in_position";
+      message = `In position · WS exit ${getIndexExitScheduleLabel(exitMode)} from ${entrySpot.toFixed(2)} · P&L ${getPnlExitScheduleLabel()}`;
+      pushLog(
+        `Entry filled on attempt ${attempt} · Nifty spot ${entrySpot.toFixed(2)} · index exit ${getIndexExitScheduleLabel(exitMode)} (${exitMode})`,
+        "success",
+      );
+      pushLog(
+        optionInstrumentToken > 0
+          ? `Exit websocket live · Nifty 50 + ${resolved.tradingsymbol}`
+          : "Exit websocket live · Nifty 50 (option token missing — P&L uses quote fallback)",
+        optionInstrumentToken > 0 ? "success" : "warning",
+      );
+      pushLog(message, "success");
+      saveBotState(dateIst);
+      return;
+    } catch (err) {
+      clearFailedEntryAttempt();
+      lastFailure = err instanceof Error ? err.message : "Entry failed";
+
+      if (isMarginRelatedOrderError(lastFailure) && lastAttemptLots > 0) {
+        maxLotsCap = lastAttemptLots - 1;
+      } else if (/REJECTED/i.test(lastFailure) && lastAttemptLots > 1) {
+        maxLotsCap = lastAttemptLots - 1;
+      }
+
+      if (!isRetryableEntryOrderError(lastFailure) && !/LTP unavailable|ATM option not found/i.test(lastFailure)) {
+        throw err;
+      }
+
+      pushLog(`Entry attempt ${attempt} failed · ${lastFailure} · retrying with fresh ATM LTP…`, "warning");
+      if (isPast916EntryWindow()) break;
+      await new Promise((resolve) => setTimeout(resolve, entryRetryDelayMs()));
     }
   }
 
-  if (entrySpot <= 0) {
-    throw new Error("Nifty spot unavailable at entry — cannot set index exit from Nifty spot at 9:16:00");
-  }
-
-  optionInstrumentToken =
-    resolved.instrumentToken > 0
-      ? resolved.instrumentToken
-      : ((await resolveInstrumentToken("NFO", resolved.tradingsymbol, accessToken)) ?? 0);
-  if (niftyInstrumentToken > 0) {
-    setBotTickerInstruments(
-      optionInstrumentToken > 0 ? [niftyInstrumentToken, optionInstrumentToken] : [niftyInstrumentToken],
-    );
-  }
-
-  phase = "in_position";
-  message = `In position · WS exit ${getIndexExitScheduleLabel(exitMode)} from ${entrySpot.toFixed(2)} · P&L ${getPnlExitScheduleLabel()}`;
-  pushLog(
-    `Entry Nifty spot ${entrySpot.toFixed(2)} · index exit ${getIndexExitScheduleLabel(exitMode)} (${exitMode}) · 9:15 chose CE/PE + exit band`,
-    "success",
-  );
-  pushLog(
-    optionInstrumentToken > 0
-      ? `Exit websocket live · Nifty 50 + ${resolved.tradingsymbol}`
-      : "Exit websocket live · Nifty 50 (option token missing — P&L uses quote fallback)",
-    optionInstrumentToken > 0 ? "success" : "warning",
-  );
-  pushLog(message, "success");
-  saveBotState(dateIst);
+  clearFailedEntryAttempt();
+  const note =
+    attempt > 0
+      ? `NO ENTRY · ${lastFailure || "Order failed"} · ${attempt} attempt(s) before 9:16:30`
+      : "NO ENTRY · Missed 9:16 entry window";
+  pushLog(note, "warning");
+  await persistTradeLog(dateIst, "no_entry", note);
+  finishDay(dateIst, note, "warning");
 }
 
 function purgeStaleIpErrorLogs() {
@@ -1368,7 +1445,7 @@ async function mainLoop() {
       capturedClose915 != null &&
       capturedClose915 > 0;
 
-    if (has915Ohlc && isReadyFor916Entry()) {
+    if (has915Ohlc && (isReadyFor916Entry() || phase === "entering") && !isPast916EntryWindow()) {
       await tryEnter(session.accessToken, ctx.dateIST);
       return;
     }
@@ -1398,6 +1475,7 @@ async function mainLoop() {
       message = `9:15 WS OHLC ready · waiting for 9:16:00 entry · ${Math.ceil(waitMs / 1000)}s`;
     }
   } catch (err) {
+    const wasEntering = phase === "entering";
     phase = "error";
     message = err instanceof Error ? err.message : "Bot error";
     pushLog(message, "error");
@@ -1411,6 +1489,9 @@ async function mainLoop() {
     if (isPast916EntryWindow()) {
       await persistTradeLog(getIndianMarketContext().dateIST, "error", message);
       finishDay(getIndianMarketContext().dateIST, message, "error");
+    } else if (wasEntering || (entryPrice <= 0 && isReadyFor916Entry())) {
+      clearFailedEntryAttempt();
+      phase = "entering";
     } else {
       phase = "waiting";
     }

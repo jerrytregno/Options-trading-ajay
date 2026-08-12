@@ -10,7 +10,6 @@ export type NineFifteenTimeCheckpoint = (typeof NINE_FIFTEEN_TIME_CHECKPOINTS)[n
 /** ~NSE cash sessions per year (matches server backtest 1y slice). */
 export const NSE_SESSIONS_ONE_YEAR = 252;
 /** ~5 years of NSE cash sessions for the extended live backtest. */
-export const NSE_SESSIONS_FIVE_YEARS = NSE_SESSIONS_ONE_YEAR * 5;
 
 /** CE/PE strategy backtest exit targets (Nifty index points from 9:15 open). */
 export const NINE_FIFTEEN_CEPE_TARGETS = [10, 20, 30, 40, 50, 100] as const;
@@ -90,6 +89,10 @@ export interface NineFifteenCandleRow {
   /** Max favorable move after entry (CE = high−entry, PE = entry−low) from 9:16+ bars. */
   maxFavorableCeAfterEntry?: NineFifteenMfePeak | null;
   maxFavorablePeAfterEntry?: NineFifteenMfePeak | null;
+  /** Wilder RSI(14) on 1-min Nifty closes at the 9:15 bar (uses prior session minutes). */
+  rsi915?: number | null;
+  /** Wilder RSI(14) at the 9:16 bar close (includes 9:15 bar in lookback). */
+  rsi916?: number | null;
 }
 
 /** Max favorable excursion after 9:16 entry (one Kite minute bar). */
@@ -150,8 +153,6 @@ export interface NineFifteenCandlesResult {
    */
   liveConsolidatedFollow: NineFifteenCePeStrategyStats;
   liveConsolidatedFilterStats: NineFifteenFollowFilterStats;
-  /** Same live dual-band rules over ~5 years of Kite sessions. */
-  followFiveYear: NineFifteenFollowBacktestBlock;
 }
 
 export interface NineFifteenFollowBacktestBlock {
@@ -224,6 +225,10 @@ export interface NineFifteenCePeFailureTrade {
   altTargetAfter1010?: NineFifteenAltTargetAfterTime | null;
   /** Diagnostic: ±15 from 11:01 when tiered primary missed. */
   altTarget10After1010?: NineFifteenAltTargetAfterTime | null;
+  /** RSI(14) on 1-min chart at 9:15 bar close (same as row.rsi915). */
+  rsi915?: number | null;
+  /** RSI(14) at 9:16 bar close (same as row.rsi916). */
+  rsi916?: number | null;
 }
 
 /** Hypothetical exit: one target before a switch time, tighter target after. */

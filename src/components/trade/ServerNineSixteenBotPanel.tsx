@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Bot, RefreshCw, Server } from "lucide-react";
 import { cn, formatCurrency, formatNumber, getChangeClass } from "@/lib/utils";
+import { getIndianMarketContext } from "@/lib/market-time";
 import "@/styles/prediction-auto-trade.css";
 import "@/styles/log-test-page.css";
 
@@ -563,7 +564,7 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
         {status.pnlExitSchedule ?? "10:01–11:00 +5% · 11:01+ +3%"}.
         {!status.enabled && inPosition && <> Re-enable auto exit to let the bot square off at target.</>}
         {lastLiveAt && inPosition && (
-          <> Last tick {new Date(lastLiveAt).toLocaleTimeString("en-IN", { hour12: false })}.</>
+          <> Last tick {getIndianMarketContext(new Date(lastLiveAt)).timeIST} IST.</>
         )}
         {status.sessionAgeHours != null && status.sessionAgeHours > 20 && (
           <> Session age {formatNumber(status.sessionAgeHours, 1)}h — reconnect before tomorrow.</>
