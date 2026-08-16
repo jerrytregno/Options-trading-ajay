@@ -161,9 +161,13 @@ export async function buildTradingIpInfo(clientIp: string | null, force = false)
   };
 }
 
-/** Validate Kite orders will egress from a whitelisted IP (auto-routes when configured). */
-export async function assertKiteEgressReady(): Promise<void> {
-  const route = await refreshKiteEgressRoute();
+/**
+ * Validate Kite orders will egress from a whitelisted IP (auto-routes when configured).
+ * `force` re-probes the outbound IP over the network; leave it off on the 9:16:00 order path
+ * and warm the route beforehand instead.
+ */
+export async function assertKiteEgressReady(force = false): Promise<void> {
+  const route = force ? await refreshKiteEgressRoute() : await resolveKiteEgressRoute();
   if (!route.ready) {
     throw new Error(route.note);
   }

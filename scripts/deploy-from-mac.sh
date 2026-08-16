@@ -29,7 +29,9 @@ rsync -avz --delete --progress \
   --exclude data/kite-session.json \
   --exclude data/bot-trade-logs.json \
   --exclude data/nine-sixteen-capture.json \
+  --exclude data/nine-sixteen-state.json \
   --exclude 'data/nine-sixteen-ran-*.json' \
+  --exclude data/ticks \
   . "$HOST:$REMOTE_DIR/"
 
 echo "==> remote deploy"

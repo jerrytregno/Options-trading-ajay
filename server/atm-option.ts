@@ -34,7 +34,33 @@ function getNearestExpiry(expiries: string[]) {
   return upcoming[0] ?? sorted[0];
 }
 
-export async function resolveAtmNiftyOption(accessToken: string, leg: TradeLeg) {
+export interface ResolvedAtmOption {
+  strike: number;
+  tradingsymbol: string;
+  lotSize: number;
+  spotPrice: number;
+  instrumentToken: number;
+}
+
+/**
+ * Load the NFO instrument master into cache ahead of time. The dump is ~100k rows, so paying
+ * for it at 9:16:00 costs seconds of the entry window.
+ */
+export async function prewarmNiftyOptionChain(): Promise<number> {
+  const streamInst = getStreamInstrument("nifty50");
+  const rows = await getKiteInstruments(streamInst.chainExchange);
+  return rows.length;
+}
+
+/**
+ * `spotPrice` lets callers pass the live websocket Nifty tick. Kite caps /quote at one request
+ * per second, so skipping that call keeps the 9:16:00 order path free of REST latency.
+ */
+export async function resolveAtmNiftyOption(
+  accessToken: string,
+  leg: TradeLeg,
+  options?: { spotPrice?: number },
+): Promise<ResolvedAtmOption | null> {
   const streamInst = getStreamInstrument("nifty50");
   const rows = await getKiteInstruments(streamInst.chainExchange);
   const instruments: KiteInstrument[] = rows.map((row) => ({
@@ -60,11 +86,14 @@ export async function resolveAtmNiftyOption(accessToken: string, leg: TradeLeg) 
   const selectedExpiry = getNearestExpiry(expiries);
   const expiryOptions = underlyingOptions.filter((i) => i.expiry === selectedExpiry);
 
-  const spotQuotes = await kiteGet<Record<string, { last_price?: number }>>(
-    `/quote?i=${encodeURIComponent(streamInst.kiteKey)}`,
-    accessToken,
-  );
-  const spotPrice = spotQuotes[streamInst.kiteKey]?.last_price ?? 0;
+  let spotPrice = options?.spotPrice != null && options.spotPrice > 0 ? options.spotPrice : 0;
+  if (spotPrice <= 0) {
+    const spotQuotes = await kiteGet<Record<string, { last_price?: number }>>(
+      `/quote?i=${encodeURIComponent(streamInst.kiteKey)}`,
+      accessToken,
+    );
+    spotPrice = spotQuotes[streamInst.kiteKey]?.last_price ?? 0;
+  }
   const strikes = [...new Set(expiryOptions.map((i) => i.strike!).filter(Boolean))];
   const atmStrike = findAtmStrike(strikes, spotPrice);
   const { optionType } = parseTradeLeg(leg);

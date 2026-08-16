@@ -25,6 +25,10 @@ export const NINE_SIXTEEN_NEAR_MISS_SWITCH_MINUTE = 10 * 60 + 1;
 
 export type NineSixteenExitMode = "main" | "near_miss";
 export const NINE_SIXTEEN_PNL_TARGET_PCT = 3;
+/** +10% P&L exit: 9:16 AM through 10:00 AM IST (inclusive). */
+export const NINE_SIXTEEN_PNL_MORNING_TARGET_PCT = 10;
+export const NINE_SIXTEEN_PNL_MORNING_EXIT_START_MINUTE = 9 * 60 + 16;
+export const NINE_SIXTEEN_PNL_MORNING_EXIT_END_MINUTE = 10 * 60;
 /** +5% P&L exit: 10:01 AM through 11:00 AM IST (inclusive). */
 export const NINE_SIXTEEN_PNL_EARLY_TARGET_PCT = 5;
 export const NINE_SIXTEEN_PNL_EARLY_EXIT_START_MINUTE = 10 * 60 + 1;
@@ -58,6 +62,10 @@ export const NINE_SIXTEEN_ENTRY_SEC = 9 * 3600 + 16 * 60;
 export const NINE_SIXTEEN_ENTRY_BUFFER_SEC = 0;
 /** Entry order window ends at 9:16:30 IST (seconds of day). */
 export const NINE_SIXTEEN_ENTRY_WINDOW_END_SEC = 9 * 3600 + 16 * 60 + 30;
+/** From 9:00 — warm instruments, egress route and balance so 9:16:00 makes no cold calls. */
+export const NINE_SIXTEEN_PREWARM_SEC = NINE_SIXTEEN_WS_CONNECT_SEC;
+/** At 9:15:58 — resolve ATM CE + PE from the live websocket spot, before the close is sealed. */
+export const NINE_SIXTEEN_PRE_RESOLVE_SEC = 9 * 3600 + 15 * 60 + 58;
 /** @deprecated use NINE_SIXTEEN_ENTRY_WINDOW_END_SEC */
 export const NINE_SIXTEEN_ENTRY_WINDOW_END_MINUTE = Math.floor(NINE_SIXTEEN_ENTRY_WINDOW_END_SEC / 60);
 /** Kite allows 1 /quote request per second — never poll faster than that. */
@@ -91,6 +99,19 @@ function istTimeParts(date: Date) {
 export function istSecondsOfDay(date = new Date()): number {
   const { hour, minute, second } = istTimeParts(date);
   return hour * 3600 + minute * 60 + second;
+}
+
+/**
+ * Milliseconds elapsed in the IST day. IST is offset by whole minutes, so the sub-second part
+ * of the epoch is identical to the sub-second part in IST.
+ */
+export function istMsOfDay(nowMs = Date.now()): number {
+  return istSecondsOfDay(new Date(nowMs)) * 1000 + (nowMs % 1000);
+}
+
+/** Signed ms until 9:16:00.000 IST — negative once the entry instant has passed. */
+export function msUntilEntryInstant(nowMs = Date.now()): number {
+  return NINE_SIXTEEN_ENTRY_SEC * 1000 - istMsOfDay(nowMs);
 }
 
 function nineSixteenEntryWindowEndSec(): number {
@@ -221,6 +242,27 @@ export function isIn915CloseTickWindow(nowMs = Date.now()): boolean {
 export function isReadyFor916Entry(nowMs = Date.now()): boolean {
   const nowSec = istSecondsOfDay(new Date(nowMs));
   return nowSec >= NINE_SIXTEEN_ENTRY_SEC && nowSec <= nineSixteenEntryWindowEndSec();
+}
+
+/** 9:00 until entry — safe to warm caches without competing with the order path. */
+export function isReadyForEntryPrewarm(nowMs = Date.now()): boolean {
+  const nowSec = istSecondsOfDay(new Date(nowMs));
+  return nowSec >= NINE_SIXTEEN_PREWARM_SEC && nowSec < NINE_SIXTEEN_ENTRY_SEC;
+}
+
+/** 9:15:58–9:15:59 — resolve ATM strikes from the websocket spot, just before entry. */
+export function isReadyForAtmPreResolve(nowMs = Date.now()): boolean {
+  const nowSec = istSecondsOfDay(new Date(nowMs));
+  return nowSec >= NINE_SIXTEEN_PRE_RESOLVE_SEC && nowSec < NINE_SIXTEEN_ENTRY_SEC;
+}
+
+/**
+ * 9:15:58–9:16:30 — the entry burst. Non-critical Kite calls (reconcile, UI live sync) stay
+ * off the wire here so they cannot delay the order or burn rate limit.
+ */
+export function isInNineSixteenBurst(nowMs = Date.now()): boolean {
+  const nowSec = istSecondsOfDay(new Date(nowMs));
+  return nowSec >= NINE_SIXTEEN_PRE_RESOLVE_SEC && nowSec <= nineSixteenEntryWindowEndSec();
 }
 
 export function build915BarFromCaptured(
@@ -381,6 +423,15 @@ function istMinuteOfDay(nowMs = Date.now()): number {
   return hour * 60 + minute;
 }
 
+/** 9:16–10:00 IST — +10% of entry cost. */
+export function isPnlMorningExitWindowActive(nowMs = Date.now()): boolean {
+  const mod = istMinuteOfDay(nowMs);
+  return (
+    mod >= NINE_SIXTEEN_PNL_MORNING_EXIT_START_MINUTE &&
+    mod <= NINE_SIXTEEN_PNL_MORNING_EXIT_END_MINUTE
+  );
+}
+
 /** 10:01–11:00 IST — +5% of entry cost. */
 export function isPnlEarlyExitWindowActive(nowMs = Date.now()): boolean {
   const mod = istMinuteOfDay(nowMs);
@@ -392,23 +443,28 @@ export function isPnlLateExitWindowActive(nowMs = Date.now()): boolean {
   return istMinuteOfDay(nowMs) >= NINE_SIXTEEN_PNL_EXIT_START_MINUTE;
 }
 
-/** Either P&L % exit window. */
+/** Any P&L % exit window (morning, early, or late). */
 export function isPnlExitWindowActive(nowMs = Date.now()): boolean {
-  return isPnlEarlyExitWindowActive(nowMs) || isPnlLateExitWindowActive(nowMs);
+  return (
+    isPnlMorningExitWindowActive(nowMs) ||
+    isPnlEarlyExitWindowActive(nowMs) ||
+    isPnlLateExitWindowActive(nowMs)
+  );
 }
 
 export function activePnlTargetPct(nowMs = Date.now()): number | null {
+  if (isPnlMorningExitWindowActive(nowMs)) return NINE_SIXTEEN_PNL_MORNING_TARGET_PCT;
   if (isPnlEarlyExitWindowActive(nowMs)) return NINE_SIXTEEN_PNL_EARLY_TARGET_PCT;
   if (isPnlLateExitWindowActive(nowMs)) return NINE_SIXTEEN_PNL_TARGET_PCT;
   return null;
 }
 
 export function getPnlExitScheduleLabel(): string {
-  return `10:01–11:00 +${NINE_SIXTEEN_PNL_EARLY_TARGET_PCT}% · 11:01+ +${NINE_SIXTEEN_PNL_TARGET_PCT}%`;
+  return `9:16–10:00 +${NINE_SIXTEEN_PNL_MORNING_TARGET_PCT}% · 10:01–11:00 +${NINE_SIXTEEN_PNL_EARLY_TARGET_PCT}% · 11:01+ +${NINE_SIXTEEN_PNL_TARGET_PCT}%`;
 }
 
 function pnlExitStartMinuteOfDay(): number {
-  return NINE_SIXTEEN_PNL_EXIT_START_MINUTE;
+  return NINE_SIXTEEN_PNL_MORNING_EXIT_START_MINUTE;
 }
 
 /** True from 3:00 PM IST (before 3:25 square-off). */

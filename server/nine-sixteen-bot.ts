@@ -5,6 +5,10 @@ import {
   isPast916EntryWindow,
   isPastNineSixteenForceExit,
   isReadyFor916Entry,
+  isReadyForEntryPrewarm,
+  isReadyForAtmPreResolve,
+  isInNineSixteenBurst,
+  msUntilEntryInstant,
   isInBotWsHours,
   isPastBotWsHours,
   msUntilWsDisconnect,
@@ -29,13 +33,24 @@ import {
   type NineSixteenExitMode,
 } from "./nine-sixteen-logic.js";
 import { legLabel, type TradeLeg } from "../src/lib/trade-calculations.js";
-import { resolveAtmNiftyOption } from "./atm-option.js";
-import { resolveEntryQuantity } from "./nine-sixteen-sizing.js";
+import {
+  prewarmNiftyOptionChain,
+  resolveAtmNiftyOption,
+  type ResolvedAtmOption,
+} from "./atm-option.js";
+import {
+  formatLotSplitLabel,
+  getMaxLotsPerOrder,
+  resolveEntryQuantity,
+  splitLotsIntoOrderChunks,
+  splitQuantityIntoOrderChunks,
+} from "./nine-sixteen-sizing.js";
 import {
   assertKiteEgressReady,
   clearKiteRejectedIp,
 } from "./trading-ip.js";
 import {
+  fetchEquityAvailableBalance,
   fetchMisPosition,
   fetchNetQty,
   fetchNiftyAndOptionQuotes,
@@ -167,6 +182,8 @@ interface PersistedBotState {
   tradingsymbol: string;
   quantity: number;
   entryPrice: number;
+  /** Lot size of the open leg — split exits need it after a restart. */
+  lotSize?: number;
 }
 
 interface PersistedCaptureState {
@@ -187,6 +204,8 @@ let leg: TradeLeg | null = null;
 let tradingsymbol: string | null = null;
 let quantity = 0;
 let entryPrice = 0;
+/** Lot size of the open Nifty MIS leg (for split exit sizing). */
+let positionLotSize = 0;
 let lastSpot: number | null = null;
 let lastOptionPrice: number | null = null;
 let unrealisedPnl: number | null = null;
@@ -210,6 +229,25 @@ let lastPositionSyncAt = 0;
 let quoteRefreshInFlight = false;
 let loopBusy = false;
 const logs: NineSixteenBotStatus["logs"] = [];
+
+/** Once-a-day cache warm (9:00) so the 9:16:00 order path makes no cold calls. */
+let prewarmDoneDate: string | null = null;
+let prewarmInFlight = false;
+let lastPrewarmAttemptAt = 0;
+const PREWARM_RETRY_MS = 60_000;
+
+/** ATM CE/PE resolved at 9:15:58 from the live websocket spot (zero REST at 9:16:00). */
+let preResolvedDate: string | null = null;
+let preResolvedCe: ResolvedAtmOption | null = null;
+let preResolvedPe: ResolvedAtmOption | null = null;
+let preResolveInFlight = false;
+let lastPreResolveAttemptAt = 0;
+const PRE_RESOLVE_RETRY_MS = 1_000;
+
+/** Dedicated 9:16:00.000 trigger — the poll loop alone can be up to 250ms late. */
+let entryTimer: ReturnType<typeof setTimeout> | null = null;
+let entryTimerDate: string | null = null;
+let entryBurstInFlight = false;
 
 /** Keep ~2h of per-second Nifty samples in memory; UI gets the newest slice. */
 const LIVE_SPOT_MAX_SAMPLES = 7_200;
@@ -426,6 +464,7 @@ function saveBotState(dateIst: string) {
     tradingsymbol,
     quantity,
     entryPrice,
+    lotSize: positionLotSize > 0 ? positionLotSize : undefined,
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(payload, null, 2));
 }
@@ -444,6 +483,7 @@ function loadBotState(dateIst: string) {
     tradingsymbol = parsed.tradingsymbol;
     quantity = parsed.quantity;
     entryPrice = parsed.entryPrice;
+    positionLotSize = parsed.lotSize ?? 0;
     message = `In position · exit ${getIndexExitScheduleLabel(exitMode)} from ${entrySpot > 0 ? entrySpot.toFixed(2) : "—"}`;
   } catch {
     /* ignore corrupt state */
@@ -462,6 +502,13 @@ function inferExitModeFromCaptures(): NineSixteenExitMode | null {
 const RECONCILE_MIN_INTERVAL_MS = 5_000;
 /** Minimal pause between failed entry attempts (still within 9:16:00–9:16:30). */
 const ENTRY_RETRY_DELAY_MS = 250;
+/** Parallel SELL rounds attempted per square-off before deferring to the next tick. */
+const SQUARE_OFF_MAX_ROUNDS = 3;
+/** Extra BUY rounds used to reach the target size after a partial split fill. */
+const ENTRY_TOP_UP_MAX_ROUNDS = 2;
+/** Gap enforced between square-off attempts so tick-driven retries cannot spam orders. */
+const SQUARE_OFF_RETRY_COOLDOWN_MS = 3_000;
+let lastSquareOffAttemptAt = 0;
 let lastReconcileAt = 0;
 let reconcileInFlight = false;
 
@@ -683,6 +730,7 @@ function finishDay(dateIst: string, note: string, type: NineSixteenBotStatus["lo
   tradingsymbol = null;
   quantity = 0;
   entryPrice = 0;
+  positionLotSize = 0;
   entrySpot = 0;
   exitMode = "main";
   open915 = 0;
@@ -816,7 +864,13 @@ function handleBotTick(tick: NiftyTick) {
   }
 
   if (phase === "in_position") {
-    void evaluateLiveExits();
+    // Never let a tick-driven exit failure become an unhandled rejection (crashes the process).
+    void evaluateLiveExits().catch((err) => {
+      pushLog(
+        `Tick exit check failed · ${err instanceof Error ? err.message : "unknown"}`,
+        "warning",
+      );
+    });
   }
 }
 
@@ -888,9 +942,370 @@ async function ensureNiftyTicker(accessToken: string, _dateIst: string) {
   }
 }
 
+/**
+ * From 9:00: pull the NFO instrument master into cache, settle the whitelisted egress route,
+ * and open a connection to /user/margins. Each of these otherwise runs cold inside tryEnter
+ * and pushes the first order several seconds past 9:16:00.
+ */
+async function prewarmEntryPath(accessToken: string, dateIst: string) {
+  if (prewarmDoneDate === dateIst || prewarmInFlight) return;
+  if (Date.now() - lastPrewarmAttemptAt < PREWARM_RETRY_MS) return;
+  prewarmInFlight = true;
+  lastPrewarmAttemptAt = Date.now();
+  try {
+    const [chain, egress, balance] = await Promise.allSettled([
+      prewarmNiftyOptionChain(),
+      assertKiteEgressReady(true),
+      fetchEquityAvailableBalance(accessToken),
+    ]);
+
+    if (chain.status !== "fulfilled") {
+      pushLog(
+        `Pre-warm retry · NFO instruments unavailable · ${chain.reason instanceof Error ? chain.reason.message : "unknown"}`,
+        "warning",
+      );
+      return;
+    }
+
+    prewarmDoneDate = dateIst;
+    pushLog(
+      `Pre-warmed for 9:16:00 · ${chain.value} NFO instruments cached · ${
+        egress.status === "fulfilled" ? "egress ready" : "egress pending"
+      } · ${balance.status === "fulfilled" ? `₹${Math.floor(balance.value)} avail` : "balance pending"}`,
+      "success",
+    );
+  } finally {
+    prewarmInFlight = false;
+  }
+}
+
+/**
+ * At 9:15:58 resolve both ATM legs from the live websocket spot. The 9:15 close still decides
+ * CE vs PE at 9:16:00 — this only pre-computes the strike so entry is a pure order placement.
+ * Instruments are already cached and the spot comes from a tick, so this costs no REST call.
+ */
+async function preResolveAtmSymbols(accessToken: string, dateIst: string) {
+  if (preResolvedDate === dateIst || preResolveInFlight) return;
+  if (Date.now() - lastPreResolveAttemptAt < PRE_RESOLVE_RETRY_MS) return;
+  const spot = lastSpot;
+  if (spot == null || spot <= 0) return;
+
+  preResolveInFlight = true;
+  lastPreResolveAttemptAt = Date.now();
+  try {
+    // Refill the 45s egress route cache so tryEnter never probes the outbound IP at 9:16:00.
+    // Non-forcing (never clears the existing route) and detached, so it cannot delay arming.
+    void assertKiteEgressReady().catch(() => {
+      /* tryEnter re-checks and surfaces the real error */
+    });
+
+    const [ce, pe] = await Promise.all([
+      resolveAtmNiftyOption(accessToken, "CE_BUY", { spotPrice: spot }),
+      resolveAtmNiftyOption(accessToken, "PE_BUY", { spotPrice: spot }),
+    ]);
+    if (!ce || !pe) {
+      pushLog("ATM pre-resolve incomplete · 9:16:00 will resolve live", "warning");
+      return;
+    }
+    preResolvedCe = ce;
+    preResolvedPe = pe;
+    preResolvedDate = dateIst;
+    pushLog(
+      `ATM pre-resolved @ spot ${spot.toFixed(2)} · CE ${ce.tradingsymbol} · PE ${pe.tradingsymbol} · armed for 9:16:00`,
+      "success",
+    );
+  } catch (err) {
+    pushLog(
+      `ATM pre-resolve failed · ${err instanceof Error ? err.message : "unknown"} · 9:16:00 will resolve live`,
+      "warning",
+    );
+  } finally {
+    preResolveInFlight = false;
+  }
+}
+
+/**
+ * Time-gated cache warming; each step is a no-op outside its window or once done for the day.
+ * Both steps are detached: they are pure optimisations, and if a cache is unexpectedly cold
+ * they must never hold the poll loop past 9:16:00. tryEnter resolves live either way.
+ */
+function maintainEntryReadiness(accessToken: string, dateIst: string) {
+  if (isReadyForEntryPrewarm()) {
+    void prewarmEntryPath(accessToken, dateIst).catch(() => {
+      /* logged inside */
+    });
+  }
+  if (isReadyForAtmPreResolve()) {
+    void preResolveAtmSymbols(accessToken, dateIst).catch(() => {
+      /* logged inside */
+    });
+  }
+}
+
+/**
+ * Cached route first — pre-warmed at 9:00 and refilled at 9:15:58, so this is normally free.
+ * A cached "blocked" verdict lives 45s, longer than the whole entry window, so re-probe before
+ * giving up in case the outbound IP just changed or recovered.
+ */
+async function assertEgressReadyForEntry() {
+  try {
+    await assertKiteEgressReady();
+  } catch {
+    await assertKiteEgressReady(true);
+  }
+}
+
+/**
+ * Attempt 1 reuses the 9:15:58 pre-resolved leg for the fastest possible order. Retries
+ * re-resolve against the current websocket spot so a fast move still gets the right strike.
+ */
+async function resolveEntryOption(
+  accessToken: string,
+  entryLeg: TradeLeg,
+  attempt: number,
+  dateIst: string,
+): Promise<ResolvedAtmOption | null> {
+  if (attempt === 1 && preResolvedDate === dateIst) {
+    const cached = entryLeg === "CE_BUY" ? preResolvedCe : preResolvedPe;
+    if (cached) return cached;
+  }
+  return resolveAtmNiftyOption(accessToken, entryLeg, {
+    spotPrice: lastSpot != null && lastSpot > 0 ? lastSpot : undefined,
+  });
+}
+
+/** Kite allows ~10 order requests/sec — send simultaneously, but never exceed one burst. */
+const MAX_PARALLEL_ORDERS_PER_BURST = 9;
+
+async function placeSplitMarketOrders(
+  accessToken: string,
+  input: {
+    tradingsymbol: string;
+    transaction_type: "BUY" | "SELL";
+    quantities: number[];
+  },
+): Promise<{ orderIds: string[]; failures: Error[] }> {
+  const orderIds: string[] = [];
+  const failures: Error[] = [];
+
+  for (let i = 0; i < input.quantities.length; i += MAX_PARALLEL_ORDERS_PER_BURST) {
+    const burst = input.quantities.slice(i, i + MAX_PARALLEL_ORDERS_PER_BURST);
+    const results = await Promise.allSettled(
+      burst.map((quantity) =>
+        placeRegularMarketOrder(accessToken, {
+          tradingsymbol: input.tradingsymbol,
+          exchange: "NFO",
+          transaction_type: input.transaction_type,
+          product: "MIS",
+          quantity,
+        }),
+      ),
+    );
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        orderIds.push(result.value);
+      } else {
+        failures.push(
+          result.reason instanceof Error ? result.reason : new Error(String(result.reason)),
+        );
+      }
+    }
+    if (i + MAX_PARALLEL_ORDERS_PER_BURST < input.quantities.length) {
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+    }
+  }
+
+  return { orderIds, failures };
+}
+
+const TERMINAL_ORDER_STATUSES = new Set(["COMPLETE", "REJECTED", "CANCELLED"]);
+
+/**
+ * Quantity already working on Kite for this symbol/side. Retry rounds subtract this so a
+ * slow order can never be duplicated into an oversized (or short) position.
+ */
+async function pendingOrderQuantity(
+  accessToken: string,
+  symbol: string,
+  side: "BUY" | "SELL",
+): Promise<number> {
+  try {
+    const orders = await kiteGet<
+      {
+        tradingsymbol: string;
+        transaction_type: string;
+        status: string;
+        quantity: number;
+        filled_quantity: number;
+      }[]
+    >("/orders", accessToken);
+    return orders
+      .filter(
+        (order) =>
+          order.tradingsymbol === symbol &&
+          order.transaction_type === side &&
+          !TERMINAL_ORDER_STATUSES.has((order.status ?? "").toUpperCase()),
+      )
+      .reduce(
+        (sum, order) => sum + Math.max(0, (order.quantity ?? 0) - (order.filled_quantity ?? 0)),
+        0,
+      );
+  } catch {
+    return 0;
+  }
+}
+
+async function awaitOrderFills(
+  accessToken: string,
+  orderIds: string[],
+): Promise<{
+  fills: { average_price: number; filled_quantity: number }[];
+  failures: Error[];
+}> {
+  const results = await Promise.allSettled(
+    orderIds.map((orderId) => waitForOrderComplete(accessToken, orderId)),
+  );
+  const fills: { average_price: number; filled_quantity: number }[] = [];
+  const failures: Error[] = [];
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      fills.push(result.value);
+    } else {
+      failures.push(result.reason instanceof Error ? result.reason : new Error(String(result.reason)));
+    }
+  }
+  return { fills, failures };
+}
+
+function weightedAverageFillPrice(
+  fills: { average_price: number; filled_quantity: number }[],
+): number {
+  let notional = 0;
+  let qty = 0;
+  for (const fill of fills) {
+    if (fill.filled_quantity > 0 && fill.average_price > 0) {
+      notional += fill.average_price * fill.filled_quantity;
+      qty += fill.filled_quantity;
+    }
+  }
+  return qty > 0 ? notional / qty : 0;
+}
+
+async function syncEntryFromMisPosition(
+  accessToken: string,
+  symbol: string,
+  lotSize: number,
+): Promise<boolean> {
+  const filled = await fetchMisPosition(accessToken, symbol, "MIS");
+  if (!filled || filled.quantity <= 0 || filled.average_price <= 0) return false;
+  positionLotSize = lotSize;
+  tradingsymbol = symbol;
+  quantity = filled.quantity;
+  entryPrice = filled.average_price;
+  lastOptionPrice = filled.last_price;
+  unrealisedPnl = filled.unrealised ?? filled.pnl;
+  return true;
+}
+
+async function finalizeEntryInPosition(
+  accessToken: string,
+  dateIst: string,
+  resolved: { tradingsymbol: string; instrumentToken: number; lotSize: number },
+  attempt: number,
+  splitLabel: string,
+) {
+  if (lastSpot != null && lastSpot > 0) {
+    entrySpot = lastSpot;
+  } else {
+    try {
+      const spot = await fetchNiftySpot(accessToken);
+      if (spot > 0) {
+        entrySpot = spot;
+        lastSpot = spot;
+      }
+    } catch {
+      /* required for index exits — retry on next tick */
+    }
+  }
+
+  if (entrySpot <= 0) {
+    throw new Error("Nifty spot unavailable at entry — cannot set index exit from Nifty spot at 9:16:00");
+  }
+
+  optionInstrumentToken =
+    resolved.instrumentToken > 0
+      ? resolved.instrumentToken
+      : ((await resolveInstrumentToken("NFO", resolved.tradingsymbol, accessToken)) ?? 0);
+  if (niftyInstrumentToken > 0) {
+    setBotTickerInstruments(
+      optionInstrumentToken > 0 ? [niftyInstrumentToken, optionInstrumentToken] : [niftyInstrumentToken],
+    );
+  }
+
+  phase = "in_position";
+  message = `In position · WS exit ${getIndexExitScheduleLabel(exitMode)} from ${entrySpot.toFixed(2)} · P&L ${getPnlExitScheduleLabel()}`;
+  pushLog(
+    `Entry filled on attempt ${attempt} · ${splitLabel} · ${quantity} qty @ ₹${entryPrice.toFixed(2)} · Nifty spot ${entrySpot.toFixed(2)} · index exit ${getIndexExitScheduleLabel(exitMode)} (${exitMode})`,
+    "success",
+  );
+  pushLog(
+    optionInstrumentToken > 0
+      ? `Exit websocket live · Nifty 50 + ${resolved.tradingsymbol}`
+      : "Exit websocket live · Nifty 50 (option token missing — P&L uses quote fallback)",
+    optionInstrumentToken > 0 ? "success" : "warning",
+  );
+  pushLog(message, "success");
+  saveBotState(dateIst);
+}
+
+/** One round of parallel SELL orders for whatever is still open. */
+async function squareOffAllSplitOrders(
+  accessToken: string,
+  symbol: string,
+  lotSize: number,
+  round: number,
+): Promise<{ average_price: number; filled_quantity: number }[]> {
+  const openQty = await fetchNetQty(accessToken, symbol);
+  if (openQty <= 0) return [];
+
+  const working = round > 1 ? await pendingOrderQuantity(accessToken, symbol, "SELL") : 0;
+  const qtyToSell = openQty - working;
+  if (qtyToSell <= 0) {
+    pushLog(`Exit round ${round} · ${working} qty already working on Kite · waiting`, "info");
+    return [];
+  }
+
+  const quantities = splitQuantityIntoOrderChunks(qtyToSell, lotSize);
+  if (quantities.length === 0) return [];
+
+  pushLog(
+    `Exit round ${round} · ${quantities.length} parallel SELL order(s) · max ${getMaxLotsPerOrder()} lots each · ${qtyToSell} qty`,
+    "info",
+  );
+
+  const { orderIds, failures } = await placeSplitMarketOrders(accessToken, {
+    tradingsymbol: symbol,
+    transaction_type: "SELL",
+    quantities,
+  });
+
+  for (const failure of failures) {
+    pushLog(`Exit order rejected · ${failure.message}`, "warning");
+  }
+
+  const { fills, failures: fillFailures } = await awaitOrderFills(accessToken, orderIds);
+  for (const failure of fillFailures) {
+    pushLog(`Exit order did not fill · ${failure.message}`, "warning");
+  }
+  return fills;
+}
+
 async function squareOff(accessToken: string, reason: string) {
   if (squareOffInFlight) return;
+  // Ticks arrive several times a second — never re-fire orders faster than Kite can settle them.
+  if (Date.now() - lastSquareOffAttemptAt < SQUARE_OFF_RETRY_COOLDOWN_MS) return;
   squareOffInFlight = true;
+  lastSquareOffAttemptAt = Date.now();
   try {
     await squareOffInner(accessToken, reason);
   } finally {
@@ -910,31 +1325,103 @@ async function squareOffInner(accessToken: string, reason: string) {
   message = reason;
   pushLog(reason, "success");
 
-  const openQty = await fetchNetQty(accessToken, tradingsymbol);
+  const symbol = tradingsymbol;
+  const lotSize = positionLotSize > 0 ? positionLotSize : 65;
+
+  let openQty = await fetchNetQty(accessToken, symbol);
   if (openQty <= 0) {
     await persistTradeLog(dateIst, "closed", "Already flat", { exitReason: reason, pnl: unrealisedPnl });
     finishDay(dateIst, "Already flat", "info");
     return;
   }
 
-  const exitSide = leg === "PE_BUY" ? "SELL" : "SELL";
-  const orderId = await placeRegularMarketOrder(accessToken, {
-    tradingsymbol,
-    exchange: "NFO",
-    transaction_type: exitSide,
-    product: "MIS",
-    quantity,
-  });
-  const exitFill = await waitForOrderComplete(accessToken, orderId);
-  const exitPrice = exitFill.average_price;
-  const pnl = entryPrice > 0 ? (exitPrice - entryPrice) * quantity : unrealisedPnl;
+  // Keep firing parallel SELL rounds until Kite shows flat — a stuck leg must never be abandoned.
+  const fills: { average_price: number; filled_quantity: number }[] = [];
+  for (let round = 1; round <= SQUARE_OFF_MAX_ROUNDS && openQty > 0; round += 1) {
+    try {
+      fills.push(...(await squareOffAllSplitOrders(accessToken, symbol, lotSize, round)));
+    } catch (err) {
+      pushLog(
+        `Exit round ${round} failed · ${err instanceof Error ? err.message : "unknown"}`,
+        "warning",
+      );
+    }
+
+    try {
+      openQty = await fetchNetQty(accessToken, symbol);
+    } catch {
+      openQty = 1; // unknown — assume still open and retry
+    }
+
+    if (openQty > 0 && round < SQUARE_OFF_MAX_ROUNDS) {
+      pushLog(`Exit incomplete · ${openQty} qty still open · retrying`, "warning");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
+  if (openQty > 0) {
+    // Stay in position so the next tick retries; never mark the day done holding stock.
+    phase = "in_position";
+    message = `EXIT FAILED · ${openQty} qty still open · retrying on next tick`;
+    pushLog(message, "error");
+    saveBotState(dateIst);
+    return;
+  }
+
+  const exitPrice = weightedAverageFillPrice(fills);
+  const closedQty = fills.reduce((sum, fill) => sum + fill.filled_quantity, 0) || quantity;
+  const pnl = entryPrice > 0 && exitPrice > 0 ? (exitPrice - entryPrice) * closedQty : unrealisedPnl;
   await persistTradeLog(dateIst, "closed", `CLOSED · ${reason}`, {
-    exitPrice,
+    exitPrice: exitPrice > 0 ? exitPrice : null,
     exitSpot: lastSpot,
     pnl,
     exitReason: reason,
   });
   finishDay(dateIst, `CLOSED · ${reason}`, "success");
+}
+
+/**
+ * After a partial split fill, buy the missing quantity while the 9:16 window is still open.
+ * Re-checks live balance each round so a top-up can never overspend.
+ */
+async function topUpEntryQuantity(
+  accessToken: string,
+  resolved: { tradingsymbol: string; lotSize: number },
+  targetQuantity: number,
+) {
+  for (let round = 1; round <= ENTRY_TOP_UP_MAX_ROUNDS; round += 1) {
+    if (isPast916EntryWindow()) return;
+
+    const working = await pendingOrderQuantity(accessToken, resolved.tradingsymbol, "BUY");
+    const missing = targetQuantity - quantity - working;
+    if (missing < resolved.lotSize) return;
+
+    let affordableLots = Math.floor(missing / resolved.lotSize);
+    try {
+      const ltp = await fetchOptionLtp(accessToken, resolved.tradingsymbol);
+      if (ltp > 0) {
+        const sizing = await resolveEntryQuantity(accessToken, resolved.lotSize, ltp, {
+          maxLots: affordableLots,
+        });
+        affordableLots = sizing.lots;
+      }
+    } catch {
+      /* quote/balance hiccup — fall back to the missing lots */
+    }
+
+    if (affordableLots <= 0) return;
+
+    const chunks = splitLotsIntoOrderChunks(affordableLots).map((lots) => lots * resolved.lotSize);
+    pushLog(`Entry top-up round ${round} · ${formatLotSplitLabel(splitLotsIntoOrderChunks(affordableLots))}`, "info");
+
+    const placed = await placeSplitMarketOrders(accessToken, {
+      tradingsymbol: resolved.tradingsymbol,
+      transaction_type: "BUY",
+      quantities: chunks,
+    });
+    await awaitOrderFills(accessToken, placed.orderIds);
+    await syncEntryFromMisPosition(accessToken, resolved.tradingsymbol, resolved.lotSize);
+  }
 }
 
 function clearFailedEntryAttempt() {
@@ -950,7 +1437,7 @@ function isRetryableEntryOrderError(message: string): boolean {
 }
 
 function isMarginRelatedOrderError(message: string): boolean {
-  return /margin|insufficient|fund|balance|required/i.test(message);
+  return /margin|insufficient|fund|balance|required|maximum allowed|quantity limit|exceed.*quantity/i.test(message);
 }
 
 function entryRetryDelayMs() {
@@ -991,7 +1478,7 @@ async function tryEnter(accessToken: string, dateIst: string) {
   const nextLeg = entryDecision.leg;
   exitMode = entryDecision.exitMode;
   leg = nextLeg;
-  await assertKiteEgressReady();
+  await assertEgressReadyForEntry();
 
   const modeLabel =
     exitMode === "near_miss" ? "near-miss exits (±20→±10@10:01)" : "main exits (±25→±20@10:01→±15@11:01)";
@@ -1007,7 +1494,7 @@ async function tryEnter(accessToken: string, dateIst: string) {
     message = attempt === 1 ? "Placing 9:16:00 entry…" : `Retrying entry (${attempt}) until 9:16:30…`;
 
     try {
-      const resolved = await resolveAtmNiftyOption(accessToken, nextLeg);
+      const resolved = await resolveEntryOption(accessToken, nextLeg, attempt, dateIst);
       if (!resolved) throw new Error("ATM option not found");
 
       const optionLtp = await fetchOptionLtp(accessToken, resolved.tradingsymbol);
@@ -1024,82 +1511,65 @@ async function tryEnter(accessToken: string, dateIst: string) {
       }
 
       lastAttemptLots = sizing.lots;
+      const lotChunks = splitLotsIntoOrderChunks(sizing.lots);
+      const splitLabel = formatLotSplitLabel(lotChunks);
 
       pushLog(
-        `Entry attempt ${attempt} · ${legLabel(nextLeg)} ${resolved.tradingsymbol} @ ₹${optionLtp.toFixed(2)} · ${modeLabel} · ${sizing.lots} lot(s) · ₹${Math.floor(sizing.availableBalance)} avail`,
+        `Entry attempt ${attempt} · ${legLabel(nextLeg)} ${resolved.tradingsymbol} @ ₹${optionLtp.toFixed(2)} · ${modeLabel} · ${splitLabel} · ₹${Math.floor(sizing.availableBalance)} avail`,
         attempt === 1 ? "success" : "info",
       );
 
-      const orderId = await placeRegularMarketOrder(accessToken, {
+      // Never double-buy: if Kite already shows an open Nifty MIS leg, adopt it instead.
+      const existingBeforeOrders = await findOpenNiftyMisOption(accessToken);
+      if (existingBeforeOrders && existingBeforeOrders.quantity > 0) {
+        const existingSymbol = existingBeforeOrders.tradingsymbol;
+        if (!(await syncEntryFromMisPosition(accessToken, existingSymbol, resolved.lotSize))) {
+          throw new Error("Open MIS position on Kite but could not sync entry");
+        }
+        leg = existingSymbol.endsWith("PE") ? "PE_BUY" : "CE_BUY";
+        await finalizeEntryInPosition(
+          accessToken,
+          dateIst,
+          { ...resolved, tradingsymbol: existingSymbol, instrumentToken: 0 },
+          attempt,
+          `adopted open Kite position (${quantity} qty)`,
+        );
+        return;
+      }
+
+      const orderQuantities = lotChunks.map((lots) => lots * resolved.lotSize);
+      const placed = await placeSplitMarketOrders(accessToken, {
         tradingsymbol: resolved.tradingsymbol,
-        exchange: "NFO",
         transaction_type: "BUY",
-        product: "MIS",
-        quantity: sizing.quantity,
+        quantities: orderQuantities,
       });
-      const orderResult = await waitForOrderComplete(accessToken, orderId);
+      for (const failure of placed.failures) {
+        pushLog(`Entry order rejected at placement · ${failure.message}`, "warning");
+      }
+
+      const { fills, failures: fillFailures } = await awaitOrderFills(accessToken, placed.orderIds);
+
+      if (fills.length === 0) {
+        const firstErr = fillFailures[0] ?? placed.failures[0];
+        throw firstErr ?? new Error("All split entry orders failed");
+      }
+
       clearKiteRejectedIp();
 
-      tradingsymbol = resolved.tradingsymbol;
-      quantity = sizing.quantity;
-      entryPrice = orderResult.average_price > 0 ? orderResult.average_price : 0;
-
-      const filled = await fetchMisPosition(accessToken, tradingsymbol, "MIS");
-      if (filled) {
-        entryPrice = filled.average_price;
-        lastOptionPrice = filled.last_price;
-        unrealisedPnl = filled.unrealised ?? filled.pnl;
-      } else if (orderResult.average_price > 0) {
-        lastOptionPrice = orderResult.average_price;
+      if (!(await syncEntryFromMisPosition(accessToken, resolved.tradingsymbol, resolved.lotSize))) {
+        throw new Error("Split entry orders filled but MIS position missing on Kite");
       }
 
-      if (entryPrice <= 0) {
-        throw new Error(`Order ${orderId} COMPLETE but entry price missing`);
-      }
-
-      // Lock exit anchor = Nifty 50 WS spot at fill (~9:16:00), not 9:15 open / not option premium
-      if (lastSpot != null && lastSpot > 0) {
-        entrySpot = lastSpot;
-      } else {
-        try {
-          const spot = await fetchNiftySpot(accessToken);
-          if (spot > 0) {
-            entrySpot = spot;
-            lastSpot = spot;
-          }
-        } catch {
-          /* required for index exits — retry on next tick */
-        }
-      }
-
-      if (entrySpot <= 0) {
-        throw new Error("Nifty spot unavailable at entry — cannot set index exit from Nifty spot at 9:16:00");
-      }
-
-      optionInstrumentToken =
-        resolved.instrumentToken > 0
-          ? resolved.instrumentToken
-          : ((await resolveInstrumentToken("NFO", resolved.tradingsymbol, accessToken)) ?? 0);
-      if (niftyInstrumentToken > 0) {
-        setBotTickerInstruments(
-          optionInstrumentToken > 0 ? [niftyInstrumentToken, optionInstrumentToken] : [niftyInstrumentToken],
+      const rejectedCount = placed.failures.length + fillFailures.length;
+      if (rejectedCount > 0) {
+        pushLog(
+          `Partial entry · ${fills.length}/${orderQuantities.length} orders filled · ${quantity} qty · topping up before 9:16:30`,
+          "warning",
         );
+        await topUpEntryQuantity(accessToken, resolved, sizing.quantity);
       }
 
-      phase = "in_position";
-      message = `In position · WS exit ${getIndexExitScheduleLabel(exitMode)} from ${entrySpot.toFixed(2)} · P&L ${getPnlExitScheduleLabel()}`;
-      pushLog(
-        `Entry filled on attempt ${attempt} · Nifty spot ${entrySpot.toFixed(2)} · index exit ${getIndexExitScheduleLabel(exitMode)} (${exitMode})`,
-        "success",
-      );
-      pushLog(
-        optionInstrumentToken > 0
-          ? `Exit websocket live · Nifty 50 + ${resolved.tradingsymbol}`
-          : "Exit websocket live · Nifty 50 (option token missing — P&L uses quote fallback)",
-        optionInstrumentToken > 0 ? "success" : "warning",
-      );
-      pushLog(message, "success");
-      saveBotState(dateIst);
+      await finalizeEntryInPosition(accessToken, dateIst, resolved, attempt, splitLabel);
       return;
     } catch (err) {
       clearFailedEntryAttempt();
@@ -1349,6 +1819,18 @@ async function mainLoop() {
     if (hasRanToday(ctx.dateIST) && phase !== "in_position" && phase !== "exiting") {
       phase = "done";
       if (isInBotWsHours() && sessionEarly?.accessToken) {
+        // Safety net: a stray open leg (manual order, failed exit) must still be managed.
+        let recoveredPosition = false;
+        try {
+          await reconcilePositionWithKite(sessionEarly.accessToken, ctx.dateIST);
+          recoveredPosition = (phase as NineSixteenBotPhase) === "in_position";
+        } catch {
+          /* transient Kite glitch — retry next loop */
+        }
+        if (recoveredPosition) {
+          await tickInPosition(sessionEarly.accessToken, ctx.dateIST);
+          return;
+        }
         await ensureNiftyTicker(sessionEarly.accessToken, ctx.dateIST);
         message = isKiteTickerConnected()
           ? "Session complete · websocket live until 16:00"
@@ -1379,6 +1861,7 @@ async function mainLoop() {
         return;
       }
       await ensureNiftyTicker(session.accessToken, ctx.dateIST);
+      maintainEntryReadiness(session.accessToken, ctx.dateIST);
       phase = "waiting";
       const waitMs = msUntilNextEntryPhase(false);
       message = isInBotWsHours()
@@ -1390,7 +1873,12 @@ async function mainLoop() {
     }
 
     try {
-      await reconcilePositionWithKite(session.accessToken, ctx.dateIST);
+      // 9:15:58–9:16:30: /portfolio/positions stays off the wire so it cannot delay the order.
+      // tryEnter still calls findOpenNiftyMisOption before every order, so a stray open leg
+      // is caught either way.
+      if (!isInNineSixteenBurst()) {
+        await reconcilePositionWithKite(session.accessToken, ctx.dateIST);
+      }
     } catch (err) {
       const note = err instanceof Error ? err.message : "Reconcile failed";
       // Transient HTML/JSON glitches must not block WS capture or 9:16:00 entry
@@ -1434,6 +1922,7 @@ async function mainLoop() {
     }
 
     await ensureNiftyTicker(session.accessToken, ctx.dateIST);
+    maintainEntryReadiness(session.accessToken, ctx.dateIST);
 
     if (isReadyToSeal915Close()) {
       seal915CloseFromTicks(ctx.dateIST);
@@ -1475,33 +1964,127 @@ async function mainLoop() {
       message = `9:15 WS OHLC ready · waiting for 9:16:00 entry · ${Math.ceil(waitMs / 1000)}s`;
     }
   } catch (err) {
-    const wasEntering = phase === "entering";
-    phase = "error";
-    message = err instanceof Error ? err.message : "Bot error";
-    pushLog(message, "error");
-    const authFail = /api_key|access_token|TokenException|Incorrect/i.test(message);
-    // Auth failures are recoverable with daily login — never burn the trading day.
-    if (authFail) {
-      phase = "waiting";
-      message = "Kite session invalid — reconnect in Settings before 9:15";
-      return;
-    }
-    if (isPast916EntryWindow()) {
-      await persistTradeLog(getIndianMarketContext().dateIST, "error", message);
-      finishDay(getIndianMarketContext().dateIST, message, "error");
-    } else if (wasEntering || (entryPrice <= 0 && isReadyFor916Entry())) {
-      clearFailedEntryAttempt();
-      phase = "entering";
-    } else {
-      phase = "waiting";
-    }
+    await handleBotLoopError(err);
   } finally {
     loopBusy = false;
   }
 }
 
+/** Shared recovery for both the poll loop and the 9:16:00 entry burst. */
+async function handleBotLoopError(err: unknown) {
+  const wasEntering = phase === "entering";
+  const holdsPosition =
+    phase === "in_position" ||
+    phase === "exiting" ||
+    (Boolean(tradingsymbol) && entryPrice > 0 && quantity > 0);
+  phase = "error";
+  message = err instanceof Error ? err.message : "Bot error";
+  pushLog(message, "error");
+  const authFail = /api_key|access_token|TokenException|Incorrect/i.test(message);
+  // Auth failures are recoverable with daily login — never burn the trading day.
+  if (authFail) {
+    phase = holdsPosition ? "in_position" : "waiting";
+    message = "Kite session invalid — reconnect in Settings before 9:15";
+    return;
+  }
+  // An open leg must keep being managed until it is squared off.
+  if (holdsPosition) {
+    phase = "in_position";
+    message = `Recovering · ${message}`;
+    return;
+  }
+  if (isPast916EntryWindow()) {
+    await persistTradeLog(getIndianMarketContext().dateIST, "error", message);
+    finishDay(getIndianMarketContext().dateIST, message, "error");
+  } else if (wasEntering || (entryPrice <= 0 && isReadyFor916Entry())) {
+    clearFailedEntryAttempt();
+    phase = "entering";
+  } else {
+    phase = "waiting";
+  }
+}
+
+/**
+ * Seal the 9:15 close and place the entry the instant 9:16:00 arrives. The poll loop wakes on
+ * a 50–250ms cadence, and that lag lands directly on the order timestamp.
+ */
+async function runEntryBurst() {
+  if (!enabled || entryBurstInFlight) return;
+
+  // A poll iteration may already be mid-flight; wait it out so entry cannot fire twice.
+  for (let i = 0; i < 40 && loopBusy; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (loopBusy) {
+    pushLog("9:16:00 timer yielded to in-flight poll · entry continues on the poll loop", "warning");
+    return;
+  }
+
+  const ctx = getIndianMarketContext();
+  if (ctx.sessionStatus === "closed_weekend" || ctx.sessionStatus === "post_market") return;
+  if (phase === "in_position" || phase === "exiting" || phase === "done") return;
+  if (isPast916EntryWindow() || hasRanToday(ctx.dateIST)) return;
+
+  const session = loadKiteSession();
+  if (!session?.accessToken) return;
+
+  entryBurstInFlight = true;
+  loopBusy = true;
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+
+  try {
+    seal915CloseFromTicks(ctx.dateIST);
+    if (
+      capturedOpen915 == null ||
+      capturedOpen915 <= 0 ||
+      capturedClose915 == null ||
+      capturedClose915 <= 0
+    ) {
+      // No usable 9:15 bar — the poll loop logs the NO ENTRY reason on its next pass.
+      return;
+    }
+    await tryEnter(session.accessToken, ctx.dateIST);
+  } catch (err) {
+    await handleBotLoopError(err);
+  } finally {
+    loopBusy = false;
+    entryBurstInFlight = false;
+    scheduleNext();
+  }
+}
+
+/**
+ * Aim a one-shot timer at 9:16:00.000 IST. Re-armed on every poll so the delay is recomputed
+ * from the wall clock each time: one long setTimeout would drift under load and would not
+ * follow an NTP correction, and by 9:15:59 the poll runs every 50ms so the final arm lands
+ * within milliseconds of the target.
+ */
+function armEntryInstantTimer() {
+  const ctx = getIndianMarketContext();
+  if (ctx.sessionStatus === "closed_weekend" || ctx.sessionStatus === "post_market") return;
+  const delay = msUntilEntryInstant();
+  // Only inside the final 10 minutes, so a restart at 02:00 never holds a stale timer.
+  if (delay < 0 || delay > 10 * 60 * 1000) return;
+  if (entryBurstInFlight || hasRanToday(ctx.dateIST)) return;
+
+  if (entryTimer) clearTimeout(entryTimer);
+  entryTimer = setTimeout(() => {
+    entryTimer = null;
+    void runEntryBurst();
+  }, delay);
+
+  if (entryTimerDate !== ctx.dateIST) {
+    entryTimerDate = ctx.dateIST;
+    pushLog(`9:16:00.000 entry armed · T-${(delay / 1000).toFixed(1)}s`, "info");
+  }
+}
+
 function scheduleNext() {
   if (!enabled) return;
+  armEntryInstantTimer();
   if (timer) clearTimeout(timer);
   const has915Ohlc =
     capturedOpen915 != null &&
@@ -1605,7 +2188,10 @@ export async function getNineSixteenBotStatusLive(): Promise<NineSixteenBotStatu
   loadBotState(ctx.dateIST);
 
   try {
-    await reconcilePositionWithKite(session.accessToken, ctx.dateIST);
+    // UI polling must not spend Kite rate limit during the 9:16:00 entry burst.
+    if (!isInNineSixteenBurst()) {
+      await reconcilePositionWithKite(session.accessToken, ctx.dateIST);
+    }
     // While ticks are streaming the snapshot is already fresh — REST would just burn quota.
     if (
       (phase === "in_position" || phase === "exiting") &&
@@ -1663,6 +2249,9 @@ export function setNineSixteenBotEnabled(next: boolean) {
   if (!enabled) {
     if (timer) clearTimeout(timer);
     timer = null;
+    if (entryTimer) clearTimeout(entryTimer);
+    entryTimer = null;
+    entryTimerDate = null;
     haltBotTicker(true);
     if (phase === "in_position" || phase === "exiting") {
       message = `Auto exit paused · ${getIndexExitScheduleLabel(exitMode)} · P&L ${getPnlExitScheduleLabel()}`;

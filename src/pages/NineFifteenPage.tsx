@@ -68,8 +68,13 @@ export default function NineFifteenPage() {
                   <strong>3. Place order</strong>
                   <ul className="nf-live-rules-sublist">
                     <li>
-                      Time: <strong>immediately at 9:16:00</strong> (window until <strong>9:16:30</strong>; miss → no
-                      entry)
+                      Time: fired by a dedicated <strong>9:16:00.000</strong> timer, not the polling loop (window
+                      until <strong>9:16:30</strong>; miss → no entry)
+                    </li>
+                    <li>
+                      Pre-warmed at <strong>9:00</strong> (instrument list, whitelisted IP route, balance) and{" "}
+                      <strong>9:15:58</strong> (ATM CE + PE strikes from the live tick) — so 9:16:00 is order
+                      placement only, with zero lookups
                     </li>
                     <li>
                       Strike: <strong>ATM</strong> Nifty weekly (nearest expiry)
@@ -78,6 +83,10 @@ export default function NineFifteenPage() {
                       Product: <strong>MIS</strong> market
                     </li>
                     <li>Size: max lots balance allows (from live LTP × lot size)</li>
+                    <li>
+                      Exchange limit: max <strong>25 lots per order</strong> — larger sizes split into parallel
+                      orders (e.g. 35 lots → 25+10 at the same time)
+                    </li>
                     <li>
                       Needs: bot on, Kite logged in before 9:15, whitelisted IP
                     </li>
@@ -112,7 +121,8 @@ export default function NineFifteenPage() {
               <h3 className="nf-live-rules-heading">Exit (live) — whichever fires first</h3>
               <p className="nf-live-rules-lead text-muted">
                 On every Kite websocket tick (REST fallback if WS drops): exit if <strong>either</strong> the index
-                rule <strong>or</strong> the option P&amp;L % rule is met — not both required. Then EOD force
+                rule <strong>or</strong> the option P&amp;L % rule is met — not both required. Split entry orders are
+                one single position, so <strong>all lots exit together</strong> (see step 4). Then EOD force
                 square-off.
               </p>
               <ol className="nf-live-rules-list">
@@ -137,12 +147,19 @@ export default function NineFifteenPage() {
                   <strong>2. Option P&amp;L %</strong> (independent of index — either exits the trade)
                   <ul className="nf-live-rules-sublist">
                     <li>
+                      <strong>9:16–10:00 IST:</strong> unrealised ≥ <strong>+10%</strong> of (entry premium × qty)
+                    </li>
+                    <li>
                       <strong>10:01–11:00 IST:</strong> unrealised ≥ <strong>+5%</strong> of (entry premium × qty)
                     </li>
                     <li>
                       <strong>From 11:01 IST:</strong> unrealised ≥ <strong>+3%</strong> of (entry premium × qty)
                     </li>
-                    <li>No P&amp;L % exit before 10:01</li>
+                    <li>No P&amp;L % exit before 9:16 (entry)</li>
+                    <li>
+                      With split entries, P&amp;L uses the <strong>weighted average entry price</strong> and{" "}
+                      <strong>total quantity</strong> — not each order separately
+                    </li>
                   </ul>
                 </li>
                 <li>
@@ -153,10 +170,42 @@ export default function NineFifteenPage() {
                     </li>
                   </ul>
                 </li>
+                <li>
+                  <strong>4. Exiting a split (multi-order) position</strong>
+                  <ul className="nf-live-rules-sublist">
+                    <li>
+                      All 9:16 split orders are the <strong>same strike + expiry</strong>, so Zerodha holds them as{" "}
+                      <strong>one MIS position</strong> — there are no separate trades to manage
+                    </li>
+                    <li>
+                      Exit rules are checked <strong>once on the whole position</strong> (avg entry, total qty) — never
+                      per order, so partial exits can’t happen by rule
+                    </li>
+                    <li>
+                      When a rule fires, the full open quantity is split into <strong>max 25 lots per SELL order</strong>{" "}
+                      and <strong>all orders are sent simultaneously</strong> (e.g. 34 lots → 25+9 at once)
+                    </li>
+                    <li>
+                      If any SELL is rejected or unfilled, the bot re-sends only the{" "}
+                      <strong>remaining quantity</strong> (up to 3 rounds, then every tick) until Zerodha shows{" "}
+                      <strong>flat</strong>
+                    </li>
+                    <li>
+                      Orders already working on Kite are subtracted before a retry, so the position can never be{" "}
+                      <strong>double-sold or flipped short</strong>
+                    </li>
+                    <li>
+                      The day is marked complete <strong>only when quantity is 0</strong> — an unfilled leg keeps the
+                      bot in position and retrying
+                    </li>
+                  </ul>
+                </li>
               </ol>
               <p className="nf-live-rules-foot text-muted">
                 Example after 10:01: Nifty +20 from fill exits even if option P&amp;L is under +5%; or +5% P&amp;L
-                exits even if Nifty has not reached ±20. Same OR logic from 11:01 with ±15 / +3%.
+                exits even if Nifty has not reached ±20. Same OR logic from 11:01 with ±15 / +3%. Split example: entered
+                75 lots as 25+25+25 at 9:16 → on target, exits as 25+25+25 SELL orders fired together, not one after
+                another.
               </p>
             </div>
           </div>

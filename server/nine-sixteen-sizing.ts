@@ -8,13 +8,64 @@ function balanceBufferPct(): number {
   return Math.min(parsed, 50) / 100;
 }
 
-/** Optional hard cap on lots (0 = no cap). */
+/** Optional hard cap on total lots per day (0 = no cap). */
 function maxLotsCap(): number | null {
   const raw = process.env.NINE_SIXTEEN_MAX_LOTS?.trim();
   if (!raw) return null;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return Math.floor(parsed);
+}
+
+/** Exchange-safe max lots per single Kite order (Nifty MIS ~1800 qty ≈ 28 lots). */
+export function getMaxLotsPerOrder(): number {
+  const raw = process.env.NINE_SIXTEEN_MAX_LOTS_PER_ORDER?.trim();
+  const parsed = raw ? Number(raw) : 25;
+  if (!Number.isFinite(parsed) || parsed <= 0) return 25;
+  return Math.floor(parsed);
+}
+
+/** Split total lots into order chunks of at most `maxLotsPerOrder` (default 25). */
+export function splitLotsIntoOrderChunks(
+  totalLots: number,
+  maxLotsPerOrder = getMaxLotsPerOrder(),
+): number[] {
+  if (totalLots <= 0) return [];
+  const cap = Math.max(1, maxLotsPerOrder);
+  const chunks: number[] = [];
+  let remaining = Math.floor(totalLots);
+  while (remaining > 0) {
+    const chunk = Math.min(cap, remaining);
+    chunks.push(chunk);
+    remaining -= chunk;
+  }
+  return chunks;
+}
+
+/**
+ * Split total quantity into MIS order sizes (each chunk ≤ max lots × lot size).
+ * Any non-lot-aligned remainder becomes its own trailing chunk so nothing is left behind.
+ */
+export function splitQuantityIntoOrderChunks(
+  totalQuantity: number,
+  lotSize: number,
+  maxLotsPerOrder = getMaxLotsPerOrder(),
+): number[] {
+  if (totalQuantity <= 0) return [];
+  if (lotSize <= 0) return [totalQuantity];
+
+  const totalLots = Math.floor(totalQuantity / lotSize);
+  const remainder = totalQuantity - totalLots * lotSize;
+  if (totalLots <= 0) return [totalQuantity];
+
+  const chunks = splitLotsIntoOrderChunks(totalLots, maxLotsPerOrder).map((lots) => lots * lotSize);
+  if (remainder > 0) chunks.push(remainder);
+  return chunks;
+}
+
+export function formatLotSplitLabel(lotChunks: number[]): string {
+  if (lotChunks.length <= 1) return `${lotChunks[0] ?? 0} lot(s)`;
+  return `${lotChunks.reduce((a, b) => a + b, 0)} lot(s) in ${lotChunks.length} orders (${lotChunks.join("+")})`;
 }
 
 /** Optional premium buffer for market BUY (default 0 = use raw LTP). */

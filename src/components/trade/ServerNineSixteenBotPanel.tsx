@@ -384,7 +384,7 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
                   : "—"}
               </span>
               <span className="pat-stat-hint">
-                {status.pnlExitSchedule ?? "10:01–11:00 +5% · 11:01+ +3%"} ·{" "}
+                {status.pnlExitSchedule ?? "9:16–10:00 +10% · 10:01–11:00 +5% · 11:01+ +3%"} ·{" "}
                 {status.pnlExitActive && status.pnlTargetPct != null
                   ? `active now (+${status.pnlTargetPct}%)`
                   : "outside P&L window"}
@@ -561,7 +561,7 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
         ±20 then ±10@10:01 · WS 9:00–16:00 · open@9:15:00–15 · close before 9:16 · order@9:16 · UP→CE, DOWN→PE
         (ATM). Auto exit: WS ticks · {status.indexExitSchedule ?? `±${indexTargetPts} from fill spot`} · fallback
         poll {spotPollSec}s if WS down · P&L{" "}
-        {status.pnlExitSchedule ?? "10:01–11:00 +5% · 11:01+ +3%"}.
+        {status.pnlExitSchedule ?? "9:16–10:00 +10% · 10:01–11:00 +5% · 11:01+ +3%"}.
         {!status.enabled && inPosition && <> Re-enable auto exit to let the bot square off at target.</>}
         {lastLiveAt && inPosition && (
           <> Last tick {getIndianMarketContext(new Date(lastLiveAt)).timeIST} IST.</>
