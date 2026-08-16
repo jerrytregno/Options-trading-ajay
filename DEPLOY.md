@@ -5,7 +5,7 @@ Production URL: **https://options-trading-yhys.vercel.app**
 ## 1. Connect GitHub to Vercel
 
 1. Push this repo to GitHub.
-2. [vercel.com](https://vercel.com) → **Add New Project** → import **Options-Trading**.
+2. [vercel.com](https://vercel.com) → **Add New Project** → import **Options-trading-ajay**.
 3. Framework: **Other** (uses `vercel.json`).
 4. Deploy.
 

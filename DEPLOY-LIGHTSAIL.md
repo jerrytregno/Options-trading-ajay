@@ -54,8 +54,8 @@ sudo npm install -g pm2
 ## 5. Clone and build
 
 ```bash
-git clone https://github.com/jerrytregno/Options-Trading.git
-cd Options-Trading
+git clone https://github.com/jerrytregno/Options-trading-ajay.git
+cd Options-trading-ajay
 npm install
 npm run build
 mkdir -p data
@@ -63,7 +63,7 @@ mkdir -p data
 
 ## 6. Environment file
 
-Create `/home/ubuntu/Options-Trading/.env` (never commit):
+Create `/home/ubuntu/Options-trading-ajay/.env` (never commit):
 
 ```env
 NODE_ENV=production
@@ -96,7 +96,7 @@ Load env in production: the app reads `.env` via `server/load-env.ts`.
 ## 7. Start with PM2
 
 ```bash
-cd ~/Options-Trading
+cd ~/Options-trading-ajay
 pm2 start npm --name options-trading -- start
 pm2 save
 pm2 startup
@@ -172,7 +172,7 @@ Two scripts are included in the repo.
 ### On Lightsail (after `git pull` or rsync)
 
 ```bash
-cd ~/Options-Trading
+cd ~/Options-trading-ajay
 chmod +x deploy.sh   # first time only
 ./deploy.sh
 ```
@@ -197,7 +197,7 @@ cd "/Users/jerrytonsurya/Desktop/Options trading"
 Optional overrides:
 
 ```bash
-DEPLOY_HOST=ubuntu@13.206.140.159 \
+DEPLOY_HOST=ubuntu@65.1.253.100 \
 DEPLOY_KEY=~/Downloads/LightsailDefaultKey-ap-south-1.pem \
 ./scripts/deploy-from-mac.sh
 ```

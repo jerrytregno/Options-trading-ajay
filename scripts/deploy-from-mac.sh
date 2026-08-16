@@ -6,9 +6,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-HOST="${DEPLOY_HOST:-ubuntu@13.206.140.159}"
+HOST="${DEPLOY_HOST:-ubuntu@65.1.253.100}"
 KEY="${DEPLOY_KEY:-$HOME/Downloads/LightsailDefaultKey-ap-south-1.pem}"
-REMOTE_DIR="${DEPLOY_REMOTE_DIR:-~/Options-Trading}"
+REMOTE_DIR="${DEPLOY_REMOTE_DIR:-~/Options-trading-ajay}"
 
 if [[ ! -f "$KEY" ]]; then
   echo "SSH key not found: $KEY"
