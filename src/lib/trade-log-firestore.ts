@@ -10,10 +10,10 @@ import {
   type Unsubscribe,
 } from "firebase/firestore";
 import type { BotTradeLog } from "@/types/trade-log";
-import { db } from "@/lib/firestore";
+import { getDb } from "@/lib/firestore";
 
 function tradeLogsCollection(userId: string) {
-  return collection(db, "users", userId, "tradeLogs");
+  return collection(getDb(), "users", userId, "tradeLogs");
 }
 
 export async function syncServerTradesToFirestore(userId: string): Promise<number> {

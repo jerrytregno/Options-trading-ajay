@@ -37,4 +37,4 @@ rsync -avz --delete --progress \
 echo "==> remote deploy"
 ssh -i "$KEY" "$HOST" "cd $REMOTE_DIR && chmod +x deploy.sh && ./deploy.sh"
 
-echo "==> Deploy complete → https://tradinganalystjry.com"
+echo "==> Deploy complete → https://tradinganalystajay.com"

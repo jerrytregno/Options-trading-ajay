@@ -2,7 +2,7 @@
 
 Use Lightsail when you want a **fixed static IP** for Kite Connect and a **server-side 9:16 bot** (no browser tab).
 
-Production URL: **https://tradinganalystjry.com**
+Production URL: **https://tradinganalystajay.com**
 
 ## Why Lightsail
 
