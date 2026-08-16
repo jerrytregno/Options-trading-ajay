@@ -77,6 +77,11 @@ export default function NineFifteenPage() {
                       placement only, with zero lookups
                     </li>
                     <li>
+                      Position sync with Zerodha pauses <strong>9:15:58–9:16:30</strong> so nothing competes with
+                      the order — a duplicate check still runs <strong>before every order</strong>, so an existing
+                      position is adopted instead of bought again
+                    </li>
+                    <li>
                       Strike: <strong>ATM</strong> Nifty weekly (nearest expiry)
                     </li>
                     <li>
@@ -108,7 +113,12 @@ export default function NineFifteenPage() {
                       <strong>previous − 1</strong> (margin / sizing mismatch)
                     </li>
                     <li>
-                      Retries keep the same CE/PE and exit band from step 2 — only strike sizing and LTP refresh
+                      Retries keep the same CE/PE and exit band from step 2 — the <strong>strike is re-checked
+                      against the live tick</strong> each attempt, so a fast move still gets the right ATM
+                    </li>
+                    <li>
+                      If the whitelisted-IP check fails from cache, it <strong>re-probes immediately</strong> rather
+                      than blocking the rest of the window
                     </li>
                     <li>
                       If nothing fills by <strong>9:16:30</strong> → <strong>NO ENTRY</strong> for the day
@@ -123,7 +133,8 @@ export default function NineFifteenPage() {
                 On every Kite websocket tick (REST fallback if WS drops): exit if <strong>either</strong> the index
                 rule <strong>or</strong> the option P&amp;L % rule is met — not both required. Split entry orders are
                 one single position, so <strong>all lots exit together</strong> (see step 4). Then EOD force
-                square-off.
+                square-off. Exit checks start the moment the entry fills and are{" "}
+                <strong>never paused</strong> — the 9:16 speed-ups only pause position sync, not the exit rules.
               </p>
               <ol className="nf-live-rules-list">
                 <li>
