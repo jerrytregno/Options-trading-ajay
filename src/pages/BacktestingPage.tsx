@@ -638,7 +638,8 @@ function BreakoutBacktestSection({
 }) {
   const winPctDelta = breakout.winPct - breakout.baseWinPct;
   const stopFromLabel = breakout.stopActiveFromIst?.slice(0, 5) ?? "12:01";
-  const title = `Breakout backtest — stop ±${breakout.stopMainPoints} main / ±${breakout.stopNearMissPoints} near-miss from ${stopFromLabel} IST (${historyLabel})`;
+  const stopTuesdayLabel = breakout.stopActiveFromIstTuesday?.slice(0, 5) ?? "11:01";
+  const title = `Breakout backtest — stop ±${breakout.stopMainPoints} main / ±${breakout.stopNearMissPoints} near-miss from ${stopFromLabel} IST (${stopTuesdayLabel} Tue) (${historyLabel})`;
 
   return (
     <div className="card nf-cepe-guide">
@@ -654,7 +655,8 @@ function BreakoutBacktestSection({
         <strong>±20 → ±10@10:01</strong>). <strong>The one addition</strong> is a stop measured from the
         9:16 entry price that stays fixed all day: <strong>±{breakout.stopMainPoints}</strong> on the main
         band and <strong>±{breakout.stopNearMissPoints}</strong> on the near-miss band. The stop is only
-        checked from <strong>{stopFromLabel} IST</strong> onward — adverse moves before that time do not
+        checked from <strong>{stopFromLabel} IST</strong> onward (
+        <strong>{stopTuesdayLabel} IST on Tuesday</strong>) — adverse moves before that time do not
         trigger an exit. A CE buy is stopped when the index trades{" "}
         <strong>{breakout.stopMainPoints} points below</strong> entry; a PE buy when it trades{" "}
         <strong>{breakout.stopMainPoints} points above</strong>. Whichever active level the index touches
@@ -719,7 +721,7 @@ function BreakoutBacktestSection({
           These days did eventually reach their index target, so the backtest above counts them as wins.
           But the index first moved {breakout.stopMainPoints} points (main) or{" "}
           {breakout.stopNearMissPoints} points (near-miss) against the trade{" "}
-          <strong>from {stopFromLabel} IST onward</strong>, so the breakout rule would have exited at a
+          <strong>from {stopFromLabel} IST onward ({stopTuesdayLabel} IST on Tuesday)</strong>, so the breakout rule would have exited at a
           loss before the target arrived. <strong>Exit index</strong> is the actual Nifty price on the stop
           minute (bar low for CE · bar high for PE). <strong>Exit − stop</strong> is the gap from the stop
           level (entry ±{breakout.stopMainPoints} or ±{breakout.stopNearMissPoints}) in index points.
@@ -734,6 +736,7 @@ function BreakoutBacktestSection({
             trades={breakout.missedWins}
             kind="missed-win"
             stopActiveFromIst={breakout.stopActiveFromIst}
+            stopActiveFromIstTuesday={breakout.stopActiveFromIstTuesday}
           />
         )}
       </div>
@@ -755,6 +758,7 @@ function BreakoutBacktestSection({
             trades={breakout.stoppedLosses}
             kind="stopped-loss"
             stopActiveFromIst={breakout.stopActiveFromIst}
+            stopActiveFromIstTuesday={breakout.stopActiveFromIstTuesday}
           />
         )}
       </div>

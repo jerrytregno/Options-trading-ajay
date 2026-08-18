@@ -141,14 +141,18 @@ export interface NineFifteenBreakoutTrade {
   closestToTarget: NineFifteenBreakoutTargetApproach | null;
   /** `open` = neither level touched, trade rides to 15:30. */
   outcome: "target" | "stop" | "open";
+  /** When the ±70 stop starts scanning for this session (11:01 Tue · 12:01 other days). */
+  stopActiveFromIst: string;
 }
 
 export interface NineFifteenBreakoutStats {
   label: string;
   stopMainPoints: number;
   stopNearMissPoints: number;
-  /** First IST time the adverse stop is scanned (e.g. 12:01:00). */
+  /** Default stop scan start (Mon/Wed–Fri). */
   stopActiveFromIst: string;
+  /** Tuesday stop scan start. */
+  stopActiveFromIstTuesday: string;
   sampleDays: number;
   tradeDays: number;
   /** Existing backtest with no stop-loss — baseline for comparison. */

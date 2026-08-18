@@ -27,6 +27,7 @@ import {
   NSE_SESSIONS_ONE_YEAR,
 } from "../src/types/nine-fifteen.js";
 import { rsiAtBarIndex } from "../src/lib/rsi.js";
+import { formatWeekdayFromDateKey } from "../src/lib/market-time.js";
 import {
   NINE_SIXTEEN_INDEX_TARGET_15,
   NINE_SIXTEEN_INDEX_TARGET_15_START_MINUTE,
@@ -75,8 +76,16 @@ export const NINE_FIFTEEN_LIVE_MIN_ABS_DIFF = NINE_FIFTEEN_NEAR_MISS_MIN_ABS_DIF
  */
 export const NINE_FIFTEEN_BREAKOUT_STOP_MAIN = 70;
 export const NINE_FIFTEEN_BREAKOUT_STOP_NEAR_MISS = 70;
-/** Breakout stops are only checked from this IST minute onward (12:01). */
+/** Breakout stops are checked from this IST minute onward on Mon/Wed–Fri. */
 export const NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE = 12 * 60 + 1;
+/** Tuesday only — stop checked from 11:01 IST. */
+export const NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_TUESDAY_MINUTE = 11 * 60 + 1;
+
+function breakoutStopActiveFromMinsForDate(dateKey: string): number {
+  return formatWeekdayFromDateKey(dateKey) === "Tuesday"
+    ? NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_TUESDAY_MINUTE
+    : NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE;
+}
 
 type BreakoutStopConfig = {
   stopMainPoints: number;
@@ -796,7 +805,7 @@ function parseSessionRows(raw: unknown[]): NineFifteenCandleRow[] {
             sessionCandles,
             breakoutSide,
             breakoutStopPoints,
-            NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE,
+            breakoutStopActiveFromMinsForDate(date),
           )
         : null;
     const breakoutClosestToTarget =
@@ -1309,6 +1318,7 @@ function buildBreakoutTrade(
     stopHit,
     closestToTarget: row.breakoutClosestToTarget ?? null,
     outcome: stopFirst ? "stop" : targetHit ? "target" : "open",
+    stopActiveFromIst: formatIstHms(breakoutStopActiveFromMinsForDate(row.date) * 60),
   };
 }
 
@@ -1337,12 +1347,12 @@ function buildBreakoutStats(
     label:
       `Breakout: same 9:16 entry and tiered targets, plus a fixed stop from entry — ` +
       `main ±${config.stopMainPoints} · near-miss ±${config.stopNearMissPoints}` +
-      (config.stopActiveFromMins > BACKTEST_EXIT_START_MINUTES
-        ? ` · stop active from ${formatIstHms(config.stopActiveFromMins * 60)} IST`
-        : ""),
+      ` · stop active from ${formatIstHms(NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE * 60)} IST` +
+      ` (Tue ${formatIstHms(NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_TUESDAY_MINUTE * 60)} IST)`,
     stopMainPoints: config.stopMainPoints,
     stopNearMissPoints: config.stopNearMissPoints,
-    stopActiveFromIst: formatIstHms(config.stopActiveFromMins * 60),
+    stopActiveFromIst: formatIstHms(NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE * 60),
+    stopActiveFromIstTuesday: formatIstHms(NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_TUESDAY_MINUTE * 60),
     sampleDays: rows.length,
     tradeDays,
     baseWins,
@@ -1620,7 +1630,7 @@ export async function fetchNineFifteenCandleHistory(
   const days = Math.min(Math.max(Math.round(daysRequested), 30), NINE_FIFTEEN_MAX_HISTORY_DAYS);
   const calendarLookback = calendarDaysForSessionLookback(ONE_YEAR_SESSION_ROWS);
 
-  const cacheKey = `nine-fifteen:session:v68:1y-live-consolidated-rsi915-916-breakout-closest`;
+  const cacheKey = `nine-fifteen:session:v69:1y-live-consolidated-rsi915-916-breakout-closest`;
   if (force) invalidateNineFifteenCache();
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_MS) {

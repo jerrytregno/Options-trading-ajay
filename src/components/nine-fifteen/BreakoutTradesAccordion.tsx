@@ -595,11 +595,9 @@ function BreakoutTargetGapChart({
 function BreakoutDayAccordionItem({
   trade,
   kind,
-  stopActiveFromIst,
 }: {
   trade: NineFifteenBreakoutTrade;
   kind: "missed-win" | "stopped-loss";
-  stopActiveFromIst: string;
 }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -635,7 +633,7 @@ function BreakoutDayAccordionItem({
 
   const entry = trade.entry?.indexPrice ?? null;
   const vsStop = formatExitVsStopPts(trade.stopHit?.exitVsStopPts);
-  const stopActiveLabel = stopActiveFromIst.slice(0, 5);
+  const stopActiveLabel = trade.stopActiveFromIst.slice(0, 5);
 
   return (
     <details
@@ -758,7 +756,7 @@ function BreakoutDayAccordionItem({
                 side={trade.side}
                 stopPoints={trade.stopPoints}
                 targetPoints={trade.targetPoints}
-                stopActiveFromIst={stopActiveFromIst}
+                stopActiveFromIst={trade.stopActiveFromIst}
                 stopExitTimeIst={trade.stopHit?.timeIst}
               />
             </div>
@@ -768,7 +766,7 @@ function BreakoutDayAccordionItem({
                 entryPrice={entry}
                 side={trade.side}
                 targetPoints={trade.targetPoints}
-                stopActiveFromIst={stopActiveFromIst}
+                stopActiveFromIst={trade.stopActiveFromIst}
                 stopExitTimeIst={trade.stopHit?.timeIst}
               />
             </div>
@@ -783,12 +781,17 @@ export function BreakoutTradesAccordion({
   trades,
   kind,
   stopActiveFromIst,
+  stopActiveFromIstTuesday,
 }: {
   trades: NineFifteenBreakoutTrade[];
   kind: "missed-win" | "stopped-loss";
   stopActiveFromIst: string;
+  stopActiveFromIstTuesday: string;
 }) {
   if (trades.length === 0) return null;
+
+  const stopLabel = stopActiveFromIst.slice(0, 5);
+  const stopTuesdayLabel = stopActiveFromIstTuesday.slice(0, 5);
 
   return (
     <div className="nf-loss-accordion">
@@ -796,16 +799,11 @@ export function BreakoutTradesAccordion({
         Expand a day to load that session’s Nifty 50 1-min candles (9:15–15:30). Entry, initial target, and
         stop levels are overlaid on the price chart; RSI(14) sits below it. A second chart shows how many index
         points Nifty was from the fixed entry target (±25 main · ±20 near-miss) at each minute (0 = target
-        touched). Hover either chart for details. Blue vertical = stop active from {stopActiveFromIst.slice(0, 5)}{" "}
-        IST; red vertical = stop exit minute (when applicable).
+        touched). Hover either chart for details. Blue vertical = stop active from {stopLabel} IST (
+        {stopTuesdayLabel} IST on Tuesday); red vertical = stop exit minute (when applicable).
       </p>
       {trades.map((trade) => (
-        <BreakoutDayAccordionItem
-          key={`${kind}-${trade.date}`}
-          trade={trade}
-          kind={kind}
-          stopActiveFromIst={stopActiveFromIst}
-        />
+        <BreakoutDayAccordionItem key={`${kind}-${trade.date}`} trade={trade} kind={kind} />
       ))}
     </div>
   );
