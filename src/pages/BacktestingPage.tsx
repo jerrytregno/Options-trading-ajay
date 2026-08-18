@@ -816,7 +816,8 @@ function CePeStrategyTable({
         <strong>Steps:</strong> (1) Live bot: first WS tick in <strong>9:15:00–9:15:15</strong> = open, last tick before{" "}
         <strong>9:16:00</strong> = close; enter at <strong>9:16:00</strong> if |Δ| ≥ {liveFloor}. (2) Green → CE; red →
         PE. (3) Exits by band: <strong>|Δ| ≥ 15</strong> → ±25 / ±20@10:01 / ±15@11:01 ·{" "}
-        <strong>11 ≤ |Δ| &lt; 15</strong> → ±20 / ±10@10:01. Sample: <strong>{sessions}</strong> NSE sessions (Kite).
+        <strong>11 ≤ |Δ| &lt; 15</strong> → ±20 / ±10@10:01 · <strong>Tuesday</strong> → flat ±10 from 9:16 (both
+        bands). Sample: <strong>{sessions}</strong> NSE sessions (Kite).
       </p>
 
       {consolidated && consolidatedFilter && (
@@ -843,7 +844,8 @@ function CePeStrategyTable({
               <>
                 UP → CE, DOWN → PE. Entry = <strong>9:16:00 Kite open</strong>.{" "}
                 <strong>|Δ| ≥ 15:</strong> win on ±25 before 10:01 / ±20 from 10:01 / ±15 from 11:01.{" "}
-                <strong>11 ≤ |Δ| &lt; 15:</strong> win on ±20 before 10:01 / ±10 from 10:01.
+                <strong>11 ≤ |Δ| &lt; 15:</strong> win on ±20 before 10:01 / ±10 from 10:01.{" "}
+                <strong>Tuesday:</strong> flat ±10 from 9:16 (both bands).
               </>
             }
             hourlyHitRuleLabel="when the band’s index exit was first hit"
@@ -853,8 +855,8 @@ function CePeStrategyTable({
             <div className="nf-failures-block">
               <h3 className="nf-failures-title">Loss trades — live consolidated</h3>
               <p className="nf-failures-intro text-muted">
-                Entered at 9:16; never hit that day’s band exit (main tiered or near-miss ±20→±10). Expand a day for
-                the full-session <strong>1-min candle chart</strong> (9:15–15:30).
+                Entered at 9:16; never hit that day’s band exit (main tiered, near-miss ±20→±10, or Tuesday ±10).
+                Expand a day for the full-session <strong>1-min candle chart</strong> (9:15–15:30).
               </p>
               <StrategyFailuresPanel
                 stats={consolidated}

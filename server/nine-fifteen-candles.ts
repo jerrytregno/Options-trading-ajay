@@ -1326,7 +1326,39 @@ function liveConsolidatedHit(row: NineFifteenCandleRow): boolean {
   const mode = liveExitModeForRow(row);
   if (!mode) return false;
   const tradeSide: "CE" | "PE" = row.direction === "down" ? "PE" : "CE";
-  return mode === "near_miss" ? nearMissSwitchHit(row, tradeSide) : mainTieredIndexHit(row, tradeSide);
+  return breakoutTargetHitForRow(row, mode, tradeSide) != null;
+}
+
+function buildLiveConsolidatedTradeDayDetail(row: NineFifteenCandleRow): NineFifteenCePeFailureTrade {
+  const mode = liveExitModeForRow(row)!;
+  const targetPoints = breakoutTargetPointsForDate(row.date, mode);
+  const tradeSide = failureSideForRow(row, "MIXED");
+  const targetHit = breakoutTargetHitForRow(row, mode, tradeSide);
+  const entryPx = entryIndexPrice(row);
+  const base = buildTradeDayDetail(row, targetPoints, "MIXED");
+  return {
+    ...base,
+    targetPoints,
+    targetHit,
+    targetHitAt: targetHit?.timeIst ?? null,
+    exitTargetIndexPrice:
+      entryPx != null
+        ? tradeSide === "CE"
+          ? entryPx + targetPoints
+          : entryPx - targetPoints
+        : null,
+    winConfirmed: targetHit != null,
+  };
+}
+
+function liveConsolidatedCheckpointHit(
+  row: NineFifteenCandleRow,
+  checkpoint: NineFifteenTimeCheckpoint,
+): boolean {
+  const mode = liveExitModeForRow(row);
+  if (!mode) return false;
+  const targetPoints = breakoutTargetPointsForDate(row.date, mode);
+  return checkpointHit(row, checkpoint, targetPoints, "follow");
 }
 
 function targetPointsForLiveMode(mode: "main" | "near_miss"): number {
@@ -1449,7 +1481,7 @@ export function computeLiveConsolidatedFilterStats(
     winPct: filteredTrades > 0 ? (wins / filteredTrades) * 100 : 0,
     skippedSmallBar: followRows.length - filteredTrades,
     display: {
-      filterTitle: `Live bot (consolidated): |Δ| ≥ ${NINE_FIFTEEN_FOLLOW_MIN_ABS_DIFF} · main ±25→±20@10:01→±15@11:01 · ${NINE_FIFTEEN_NEAR_MISS_MIN_ABS_DIFF} ≤ |Δ| < ${NINE_FIFTEEN_NEAR_MISS_MAX_ABS_DIFF} · near-miss ±20→±10@10:01 · UP→CE, DOWN→PE`,
+      filterTitle: `Live bot (consolidated): |Δ| ≥ ${NINE_FIFTEEN_FOLLOW_MIN_ABS_DIFF} · main ±25→±20@10:01→±15@11:01 · ${NINE_FIFTEEN_NEAR_MISS_MIN_ABS_DIFF} ≤ |Δ| < ${NINE_FIFTEEN_NEAR_MISS_MAX_ABS_DIFF} · near-miss ±20→±10@10:01 · Tue ±${NINE_FIFTEEN_BREAKOUT_TUESDAY_TARGET} flat · UP→CE, DOWN→PE`,
       takenLabel: `Trades taken (|Δ| ≥ ${NINE_FIFTEEN_LIVE_MIN_ABS_DIFF})`,
       skippedLabel: `Skipped (|Δ| < ${NINE_FIFTEEN_LIVE_MIN_ABS_DIFF})`,
     },
@@ -1462,27 +1494,17 @@ function buildLiveConsolidatedFollowStats(rows: NineFifteenCandleRow[]): NineFif
   const sampleDays = rows.length;
   const successes = taken
     .filter(liveConsolidatedHit)
-    .map((row) => {
-      const mode = liveExitModeForRow(row)!;
-      return buildTradeDayDetail(row, targetPointsForLiveMode(mode), "MIXED");
-    })
+    .map((row) => buildLiveConsolidatedTradeDayDetail(row))
     .sort((a, b) => b.date.localeCompare(a.date));
   const failures = taken
     .filter((row) => !liveConsolidatedHit(row))
-    .map((row) => {
-      const mode = liveExitModeForRow(row)!;
-      return buildTradeDayDetail(row, targetPointsForLiveMode(mode), "MIXED");
-    })
+    .map((row) => buildLiveConsolidatedTradeDayDetail(row))
     .sort((a, b) => b.date.localeCompare(a.date));
   const targetHits = successes.length;
 
   const checkpointHits = {} as NineFifteenCePeStrategyStats["checkpointHits"];
   for (const cp of NINE_FIFTEEN_TIME_CHECKPOINTS) {
-    const hits = taken.filter((row) => {
-      const mode = liveExitModeForRow(row);
-      if (!mode) return false;
-      return checkpointHit(row, cp, targetPointsForLiveMode(mode), "follow");
-    }).length;
+    const hits = taken.filter((row) => liveConsolidatedCheckpointHit(row, cp)).length;
     checkpointHits[cp] = {
       targetHits: hits,
       targetHitPct: tradeDays > 0 ? (hits / tradeDays) * 100 : 0,
@@ -1492,7 +1514,8 @@ function buildLiveConsolidatedFollowStats(rows: NineFifteenCandleRow[]): NineFif
   return {
     label:
       `Live consolidated: UP→CE, DOWN→PE · |Δ|≥${NINE_FIFTEEN_FOLLOW_MIN_ABS_DIFF} ±25→±20@10:01→±15@11:01 · ` +
-      `${NINE_FIFTEEN_NEAR_MISS_MIN_ABS_DIFF}≤|Δ|<${NINE_FIFTEEN_NEAR_MISS_MAX_ABS_DIFF} ±20→±10@10:01 (from 9:16 open)`,
+      `${NINE_FIFTEEN_NEAR_MISS_MIN_ABS_DIFF}≤|Δ|<${NINE_FIFTEEN_NEAR_MISS_MAX_ABS_DIFF} ±20→±10@10:01 · ` +
+      `Tue ±${NINE_FIFTEEN_BREAKOUT_TUESDAY_TARGET} from 9:16 (from 9:16 open)`,
     side: "MIXED",
     sampleDays,
     tradeDays,
@@ -1691,7 +1714,7 @@ export async function fetchNineFifteenCandleHistory(
   const days = Math.min(Math.max(Math.round(daysRequested), 30), NINE_FIFTEEN_MAX_HISTORY_DAYS);
   const calendarLookback = calendarDaysForSessionLookback(ONE_YEAR_SESSION_ROWS);
 
-  const cacheKey = `nine-fifteen:session:v70:1y-live-consolidated-rsi915-916-breakout-closest`;
+  const cacheKey = `nine-fifteen:session:v71:1y-live-consolidated-rsi915-916-breakout-closest`;
   if (force) invalidateNineFifteenCache();
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_MS) {
