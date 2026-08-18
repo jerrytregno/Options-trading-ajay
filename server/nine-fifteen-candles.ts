@@ -75,8 +75,8 @@ export const NINE_FIFTEEN_LIVE_MIN_ABS_DIFF = NINE_FIFTEEN_NEAR_MISS_MIN_ABS_DIF
  */
 export const NINE_FIFTEEN_BREAKOUT_STOP_MAIN = 70;
 export const NINE_FIFTEEN_BREAKOUT_STOP_NEAR_MISS = 70;
-/** Breakout stops are only checked from this IST minute onward (12:00). */
-export const NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE = 12 * 60;
+/** Breakout stops are only checked from this IST minute onward (11:00). */
+export const NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE = 11 * 60;
 
 type BreakoutStopConfig = {
   stopMainPoints: number;
@@ -1620,7 +1620,7 @@ export async function fetchNineFifteenCandleHistory(
   const days = Math.min(Math.max(Math.round(daysRequested), 30), NINE_FIFTEEN_MAX_HISTORY_DAYS);
   const calendarLookback = calendarDaysForSessionLookback(ONE_YEAR_SESSION_ROWS);
 
-  const cacheKey = `nine-fifteen:session:v64:1y-live-consolidated-rsi915-916-breakout-closest`;
+  const cacheKey = `nine-fifteen:session:v65:1y-live-consolidated-rsi915-916-breakout-closest`;
   if (force) invalidateNineFifteenCache();
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_MS) {

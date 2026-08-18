@@ -637,7 +637,7 @@ function BreakoutBacktestSection({
   historyLabel: string;
 }) {
   const winPctDelta = breakout.winPct - breakout.baseWinPct;
-  const stopFromLabel = breakout.stopActiveFromIst?.slice(0, 5) ?? "12:00";
+  const stopFromLabel = breakout.stopActiveFromIst?.slice(0, 5) ?? "11:00";
   const title = `Breakout backtest — stop ±${breakout.stopMainPoints} main / ±${breakout.stopNearMissPoints} near-miss from ${stopFromLabel} IST (${historyLabel})`;
 
   return (
