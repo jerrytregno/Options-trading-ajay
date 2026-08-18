@@ -98,6 +98,8 @@ export interface NineFifteenCandleRow {
    * (CE stops below entry, PE stops above). Null when the day is not a trade day.
    */
   breakoutStopHit?: NineFifteenTargetHit | null;
+  /** Breakout backtest Tuesday only: first ±10 touch from 9:16 entry. */
+  breakoutTuesdayTargetHit?: NineFifteenTargetHit | null;
   /** Stop distance used for this row's band — main 70 · near-miss 70. */
   breakoutStopPoints?: number | null;
   /** Closest approach to tiered profit target over the full 9:16–15:30 session. */

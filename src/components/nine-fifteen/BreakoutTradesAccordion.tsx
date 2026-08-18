@@ -798,9 +798,10 @@ export function BreakoutTradesAccordion({
       <p className="nf-loss-accordion-hint text-muted text-sm">
         Expand a day to load that session’s Nifty 50 1-min candles (9:15–15:30). Entry, initial target, and
         stop levels are overlaid on the price chart; RSI(14) sits below it. A second chart shows how many index
-        points Nifty was from the fixed entry target (±25 main · ±20 near-miss) at each minute (0 = target
-        touched). Hover either chart for details. Blue vertical = stop active from {stopLabel} IST (
-        {stopTuesdayLabel} IST on Tuesday); red vertical = stop exit minute (when applicable).
+        points Nifty was from the entry profit target (±25 main · ±20 near-miss · ±10 on Tuesday) at each
+        minute (0 = target touched). Hover either chart for details. Blue vertical = stop active from{" "}
+        {stopLabel} IST ({stopTuesdayLabel} IST on Tuesday); red vertical = stop exit minute (when
+        applicable).
       </p>
       {trades.map((trade) => (
         <BreakoutDayAccordionItem key={`${kind}-${trade.date}`} trade={trade} kind={kind} />

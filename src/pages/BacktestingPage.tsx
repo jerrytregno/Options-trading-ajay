@@ -650,10 +650,11 @@ function BreakoutBacktestSection({
       </p>
       <p className="nf-cepe-steps text-muted">
         <strong>Identical to the live backtest above:</strong> the 9:15 bar picks the direction, entry is
-        the <strong>9:16:00 Kite open</strong>, UP → CE and DOWN → PE, and the index targets are the same
-        tiered ones (main <strong>±25 → ±20@10:01 → ±15@11:01</strong>, near-miss{" "}
-        <strong>±20 → ±10@10:01</strong>). <strong>The one addition</strong> is a stop measured from the
-        9:16 entry price that stays fixed all day: <strong>±{breakout.stopMainPoints}</strong> on the main
+        the <strong>9:16:00 Kite open</strong>, UP → CE and DOWN → PE. On other weekdays the index
+        targets are tiered (main <strong>±25 → ±20@10:01 → ±15@11:01</strong>, near-miss{" "}
+        <strong>±20 → ±10@10:01</strong>). On <strong>Tuesday</strong> both bands use a flat{" "}
+        <strong>±10</strong> from the 9:16 entry with no tiering. <strong>The one addition</strong> is a stop
+        measured from the 9:16 entry price that stays fixed all day: <strong>±{breakout.stopMainPoints}</strong> on the main
         band and <strong>±{breakout.stopNearMissPoints}</strong> on the near-miss band. The stop is only
         checked from <strong>{stopFromLabel} IST</strong> onward (
         <strong>{stopTuesdayLabel} IST on Tuesday</strong>) — adverse moves before that time do not
