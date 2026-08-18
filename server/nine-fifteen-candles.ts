@@ -77,8 +77,6 @@ export const NINE_FIFTEEN_BREAKOUT_STOP_MAIN = 70;
 export const NINE_FIFTEEN_BREAKOUT_STOP_NEAR_MISS = 70;
 /** Breakout stops are only checked from this IST minute onward (11:00). */
 export const NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE = 11 * 60;
-/** Second breakout study: same rules, stop scanned from 15:00 IST. */
-export const NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_1500_MINUTE = 15 * 60;
 
 type BreakoutStopConfig = {
   stopMainPoints: number;
@@ -91,12 +89,6 @@ const BREAKOUT_STOP_TIGHT: BreakoutStopConfig = {
   stopMainPoints: NINE_FIFTEEN_BREAKOUT_STOP_MAIN,
   stopNearMissPoints: NINE_FIFTEEN_BREAKOUT_STOP_NEAR_MISS,
   stopActiveFromMins: NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE,
-};
-
-const BREAKOUT_STOP_1500: BreakoutStopConfig = {
-  stopMainPoints: NINE_FIFTEEN_BREAKOUT_STOP_MAIN,
-  stopNearMissPoints: NINE_FIFTEEN_BREAKOUT_STOP_NEAR_MISS,
-  stopActiveFromMins: NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_1500_MINUTE,
 };
 
 /** Follow backtest exits: entry ± N from Kite bars ≥9:16 (not 9:15-open rules). */
@@ -807,16 +799,6 @@ function parseSessionRows(raw: unknown[]): NineFifteenCandleRow[] {
             NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE,
           )
         : null;
-    const breakoutStopHit1500 =
-      breakoutSide && breakoutStopPoints
-        ? firstAdverseStopHitFromKite(
-            entryPx,
-            sessionCandles,
-            breakoutSide,
-            breakoutStopPoints,
-            NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_1500_MINUTE,
-          )
-        : null;
     const breakoutClosestToTarget =
       breakoutSide && breakoutBand
         ? closestApproachToTieredProfitTarget(entryPx, sessionCandles, breakoutSide, breakoutBand)
@@ -878,7 +860,6 @@ function parseSessionRows(raw: unknown[]): NineFifteenCandleRow[] {
       rsi915: rsi915 != null ? Number(rsi915.toFixed(2)) : null,
       rsi916: rsi916 != null ? Number(rsi916.toFixed(2)) : null,
       breakoutStopHit,
-      breakoutStopHit1500,
       breakoutStopPoints,
       breakoutClosestToTarget,
     });
@@ -1619,11 +1600,6 @@ function buildFollowBacktestBlock(
     liveConsolidatedFollow: buildLiveConsolidatedFollowStats(rows),
     liveConsolidatedFilterStats: computeLiveConsolidatedFilterStats(rows),
     breakout: buildBreakoutStats(rows, BREAKOUT_STOP_TIGHT, (row) => row.breakoutStopHit ?? null),
-    breakoutAt1500: buildBreakoutStats(
-      rows,
-      BREAKOUT_STOP_1500,
-      (row) => row.breakoutStopHit1500 ?? null,
-    ),
   };
 }
 
@@ -1644,7 +1620,7 @@ export async function fetchNineFifteenCandleHistory(
   const days = Math.min(Math.max(Math.round(daysRequested), 30), NINE_FIFTEEN_MAX_HISTORY_DAYS);
   const calendarLookback = calendarDaysForSessionLookback(ONE_YEAR_SESSION_ROWS);
 
-  const cacheKey = `nine-fifteen:session:v66:1y-live-consolidated-rsi915-916-breakout-closest`;
+  const cacheKey = `nine-fifteen:session:v67:1y-live-consolidated-rsi915-916-breakout-closest`;
   if (force) invalidateNineFifteenCache();
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_MS) {
@@ -1699,7 +1675,6 @@ export async function fetchNineFifteenCandleHistory(
     liveConsolidatedFollow: block1y.liveConsolidatedFollow,
     liveConsolidatedFilterStats: block1y.liveConsolidatedFilterStats,
     breakout: block1y.breakout,
-    breakoutAt1500: block1y.breakoutAt1500,
   };
 
   cache.set(cacheKey, { at: Date.now(), data: result });

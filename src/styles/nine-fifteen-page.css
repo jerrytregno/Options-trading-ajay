@@ -859,6 +859,42 @@
   cursor: crosshair;
 }
 
+.nf-day-chart-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+.nf-day-chart-wrap--gap {
+  margin-top: 0;
+}
+
+.nf-day-chart-gap-label {
+  fill: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.nf-day-chart-gap-zero {
+  stroke: #4ade80;
+  stroke-width: 1.25;
+  stroke-dasharray: 4 3;
+  opacity: 0.85;
+}
+
+.nf-day-chart-gap-line {
+  stroke: #38bdf8;
+  stroke-width: 1.5;
+}
+
+.nf-day-chart-gap-dot {
+  fill: #38bdf8;
+  stroke: var(--background, #0f172a);
+  stroke-width: 1.5;
+}
+
 .nf-wins-block {
   margin-top: 1.25rem;
   padding-top: 1rem;

@@ -98,8 +98,6 @@ export interface NineFifteenCandleRow {
    * (CE stops below entry, PE stops above). Null when the day is not a trade day.
    */
   breakoutStopHit?: NineFifteenTargetHit | null;
-  /** Breakout backtest with stop active from 15:00 IST. */
-  breakoutStopHit1500?: NineFifteenTargetHit | null;
   /** Stop distance used for this row's band — main 70 · near-miss 70. */
   breakoutStopPoints?: number | null;
   /** Closest approach to tiered profit target over the full 9:16–15:30 session. */
@@ -236,8 +234,6 @@ export interface NineFifteenCandlesResult {
   liveConsolidatedFilterStats: NineFifteenFollowFilterStats;
   /** Backtest-only stop-loss study (±70 main / ±70 near-miss) — live bot has no stop. */
   breakout: NineFifteenBreakoutStats;
-  /** Same breakout study with stop scanned from 15:00 IST instead of 11:00. */
-  breakoutAt1500: NineFifteenBreakoutStats;
 }
 
 export interface NineFifteenFollowBacktestBlock {
@@ -251,7 +247,6 @@ export interface NineFifteenFollowBacktestBlock {
   liveConsolidatedFollow: NineFifteenCePeStrategyStats;
   liveConsolidatedFilterStats: NineFifteenFollowFilterStats;
   breakout: NineFifteenBreakoutStats;
-  breakoutAt1500: NineFifteenBreakoutStats;
 }
 
 export interface NineFifteenFollowFilterStats {

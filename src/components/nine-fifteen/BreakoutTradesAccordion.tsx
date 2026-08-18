@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useState, type MouseEvent } from "react";
 import { ChevronDown, RefreshCw } from "lucide-react";
 import type { NineFifteenBreakoutTrade } from "@/types/nine-fifteen";
 import { formatWeekdayFromDateKey } from "@/lib/market-time";
+import { computeGapToTargetSeries } from "@/lib/breakout-target-gap";
 import { rsiAtBarIndex } from "@/lib/rsi";
 import { cn, formatNumber } from "@/lib/utils";
 
@@ -375,6 +376,233 @@ function BreakoutSessionMinuteChart({
   );
 }
 
+function BreakoutTargetGapChart({
+  candles,
+  entryPrice,
+  side,
+  band,
+  stopActiveFromIst,
+  stopExitTimeIst,
+}: {
+  candles: MinuteCandle[];
+  entryPrice: number | null;
+  side: "CE" | "PE";
+  band: NineFifteenBreakoutTrade["band"];
+  stopActiveFromIst: string;
+  stopExitTimeIst?: string | null;
+}) {
+  const gradId = useId().replace(/:/g, "");
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const width = 920;
+  const padL = 52;
+  const padR = 12;
+  const padT = 20;
+  const padB = 28;
+  const plotH = 112;
+  const height = padT + plotH + padB;
+  const plotW = width - padL - padR;
+
+  const gapByIndex = useMemo(() => {
+    if (entryPrice == null) return candles.map(() => null as number | null);
+    const series = computeGapToTargetSeries(candles, entryPrice, side, band);
+    const byMins = new Map(series.map((p) => [p.mins, p.gapPts]));
+    return candles.map((c) => {
+      const mins = minutesFromIstLabel(istHmFromCandleTime(c.time));
+      return mins != null ? (byMins.get(mins) ?? null) : null;
+    });
+  }, [candles, entryPrice, side, band]);
+
+  const targetPtsByIndex = useMemo(() => {
+    if (entryPrice == null) return candles.map(() => null as number | null);
+    const series = computeGapToTargetSeries(candles, entryPrice, side, band);
+    const byMins = new Map(series.map((p) => [p.mins, p.targetPoints]));
+    return candles.map((c) => {
+      const mins = minutesFromIstLabel(istHmFromCandleTime(c.time));
+      return mins != null ? (byMins.get(mins) ?? null) : null;
+    });
+  }, [candles, entryPrice, side, band]);
+
+  const { yMax, candleW } = useMemo(() => {
+    const gaps = gapByIndex.filter((g): g is number => g != null);
+    const maxGap = gaps.length > 0 ? Math.max(...gaps) : 10;
+    const pad = Math.max(2, maxGap * 0.08);
+    return {
+      yMax: maxGap + pad,
+      candleW: Math.max(1.2, plotW / Math.max(candles.length, 1)),
+    };
+  }, [gapByIndex, candles.length, plotW]);
+
+  const yScale = (gap: number) => padT + ((yMax - gap) / (yMax || 1)) * plotH;
+  const xScale = (i: number) => padL + i * candleW + candleW / 2;
+
+  const verticalAtIst = (istTime: string | null | undefined): number | null => {
+    const minute = istTime ? minutesFromIstLabel(istTime) : null;
+    if (minute == null) return null;
+    const idx = candles.findIndex((c) => {
+      const mins = minutesFromIstLabel(istHmFromCandleTime(c.time));
+      return mins != null && mins >= minute;
+    });
+    return idx >= 0 ? xScale(idx) : null;
+  };
+
+  const stopActiveX = verticalAtIst(stopActiveFromIst);
+  const stopExitX = verticalAtIst(stopExitTimeIst);
+
+  const linePath = useMemo(() => {
+    const parts: string[] = [];
+    for (let i = 0; i < gapByIndex.length; i += 1) {
+      const gap = gapByIndex[i];
+      if (gap == null) continue;
+      const cmd = parts.length === 0 ? "M" : "L";
+      parts.push(`${cmd}${xScale(i).toFixed(2)},${yScale(gap).toFixed(2)}`);
+    }
+    return parts.join(" ");
+  }, [gapByIndex, candleW, yMax, plotH]);
+
+  const tickIdx = [0, Math.floor(candles.length / 3), Math.floor((candles.length * 2) / 3), candles.length - 1].filter(
+    (v, i, arr) => v >= 0 && arr.indexOf(v) === i,
+  );
+
+  const handleChartMouseMove = (e: MouseEvent<SVGSVGElement>) => {
+    const svg = e.currentTarget;
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return;
+    const svgPt = pt.matrixTransform(ctm.inverse());
+    const i = Math.floor((svgPt.x - padL) / candleW);
+    if (i >= 0 && i < candles.length && gapByIndex[i] != null) setHoverIndex(i);
+    else setHoverIndex(null);
+  };
+
+  const hoverGap = hoverIndex != null ? gapByIndex[hoverIndex] : null;
+  const hoverTargetPts = hoverIndex != null ? targetPtsByIndex[hoverIndex] : null;
+  const hoverX = hoverIndex != null ? xScale(hoverIndex) : null;
+  const tipX =
+    hoverX != null ? Math.min(Math.max(hoverX + 10, padL + 4), width - padR - 176) : 0;
+  const tipY = padT + 4;
+
+  if (entryPrice == null) return null;
+
+  return (
+    <svg
+      className="nf-day-chart-svg nf-day-chart-svg--gap"
+      viewBox={`0 0 ${width} ${height}`}
+      role="img"
+      aria-label="Distance from tiered profit target over the session"
+      onMouseMove={handleChartMouseMove}
+      onMouseLeave={() => setHoverIndex(null)}
+    >
+      <defs>
+        <linearGradient id={`nf-breakout-gap-grid-${gradId}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="currentColor" stopOpacity="0.06" />
+          <stop offset="100%" stopColor="currentColor" stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+
+      <rect x={padL} y={padT} width={plotW} height={plotH} fill={`url(#nf-breakout-gap-grid-${gradId})`} />
+
+      <text x={padL} y={padT - 6} className="nf-day-chart-gap-label">
+        Pts from target (0 = tiered target touched)
+      </text>
+
+      {[0, 0.5, 1].map((t) => {
+        const y = padT + plotH * t;
+        const gap = yMax - t * yMax;
+        return (
+          <g key={t}>
+            <line x1={padL} y1={y} x2={padL + plotW} y2={y} className="nf-day-chart-grid" />
+            <text x={padL - 6} y={y + 3} textAnchor="end" className="nf-day-chart-axis">
+              {gap.toFixed(0)}
+            </text>
+          </g>
+        );
+      })}
+
+      <line
+        x1={padL}
+        y1={yScale(0)}
+        x2={padL + plotW}
+        y2={yScale(0)}
+        className="nf-day-chart-gap-zero"
+      />
+      <text x={padL + plotW - 4} y={yScale(0) - 4} textAnchor="end" className="nf-day-chart-level-label">
+        Target hit (0 pts)
+      </text>
+
+      {linePath && <path d={linePath} className="nf-day-chart-gap-line" fill="none" />}
+
+      {stopActiveX != null && (
+        <line
+          x1={stopActiveX}
+          y1={padT}
+          x2={stopActiveX}
+          y2={padT + plotH}
+          className="nf-day-chart-switch-x"
+        />
+      )}
+      {stopExitX != null && (
+        <line
+          x1={stopExitX}
+          y1={padT}
+          x2={stopExitX}
+          y2={padT + plotH}
+          className="nf-day-chart-stop-exit-x"
+        />
+      )}
+
+      {hoverX != null && (
+        <line
+          x1={hoverX}
+          y1={padT}
+          x2={hoverX}
+          y2={padT + plotH}
+          className="nf-day-chart-crosshair"
+        />
+      )}
+
+      {hoverIndex != null && hoverGap != null && hoverX != null && (
+        <>
+          <circle
+            cx={hoverX}
+            cy={yScale(hoverGap)}
+            r={3.5}
+            className="nf-day-chart-gap-dot"
+          />
+          <g className="nf-chart-hover-tip" transform={`translate(${tipX}, ${tipY})`}>
+            <rect x={0} y={0} width={176} height={44} rx={4} className="nf-chart-hover-tip-bg" />
+            <text x={8} y={14} className="nf-chart-hover-tip-text">
+              {istHmFromCandleTime(candles[hoverIndex].time)} IST
+            </text>
+            <text x={8} y={28} className="nf-chart-hover-tip-text">
+              {formatNumber(hoverGap, 2)} pts from target
+            </text>
+            <text x={8} y={40} className="nf-chart-hover-tip-text">
+              Active target ±{hoverTargetPts ?? "—"}
+            </text>
+          </g>
+        </>
+      )}
+
+      {tickIdx.map((i) => (
+        <text key={i} x={xScale(i)} y={height - 8} textAnchor="middle" className="nf-day-chart-axis">
+          {istHmFromCandleTime(candles[i].time)}
+        </text>
+      ))}
+
+      <rect
+        x={padL}
+        y={padT}
+        width={plotW}
+        height={plotH}
+        fill="transparent"
+        className="nf-day-chart-hover-layer"
+      />
+    </svg>
+  );
+}
+
 function BreakoutDayAccordionItem({
   trade,
   kind,
@@ -520,7 +748,7 @@ function BreakoutDayAccordionItem({
           Stop active from {stopActiveLabel} IST (blue line)
           {trade.stopHit?.timeIst && <> · Exit at {trade.stopHit.timeIst} (red line)</>}
           {" · "}
-          Full session 1-min candles (9:15–15:30) · hover chart for RSI
+          Full session 1-min candles (9:15–15:30) · hover charts for RSI and gap-to-target
         </div>
 
         {loading && (
@@ -533,16 +761,28 @@ function BreakoutDayAccordionItem({
           <div className="nf-loss-day-status">No Kite minute candles for this session.</div>
         )}
         {!loading && !error && candles && candles.length > 0 && (
-          <div className="nf-day-chart-wrap">
-            <BreakoutSessionMinuteChart
-              candles={candles}
-              entryPrice={entry}
-              side={trade.side}
-              stopPoints={trade.stopPoints}
-              targetPoints={trade.targetPoints}
-              stopActiveFromIst={stopActiveFromIst}
-              stopExitTimeIst={trade.stopHit?.timeIst}
-            />
+          <div className="nf-day-chart-stack">
+            <div className="nf-day-chart-wrap">
+              <BreakoutSessionMinuteChart
+                candles={candles}
+                entryPrice={entry}
+                side={trade.side}
+                stopPoints={trade.stopPoints}
+                targetPoints={trade.targetPoints}
+                stopActiveFromIst={stopActiveFromIst}
+                stopExitTimeIst={trade.stopHit?.timeIst}
+              />
+            </div>
+            <div className="nf-day-chart-wrap nf-day-chart-wrap--gap">
+              <BreakoutTargetGapChart
+                candles={candles}
+                entryPrice={entry}
+                side={trade.side}
+                band={trade.band}
+                stopActiveFromIst={stopActiveFromIst}
+                stopExitTimeIst={trade.stopHit?.timeIst}
+              />
+            </div>
           </div>
         )}
       </div>
@@ -565,9 +805,10 @@ export function BreakoutTradesAccordion({
     <div className="nf-loss-accordion">
       <p className="nf-loss-accordion-hint text-muted text-sm">
         Expand a day to load that session’s Nifty 50 1-min candles (9:15–15:30). Entry, initial target, and
-        stop levels are overlaid; RSI(14) is shown below the price pane. Hover the chart to see time, Nifty
-        close, and RSI. Blue vertical = stop active from {stopActiveFromIst.slice(0, 5)} IST; red vertical =
-        stop exit minute (when applicable).
+        stop levels are overlaid on the price chart; RSI(14) sits below it. A second chart shows how many index
+        points Nifty was from the tiered profit target at each minute (0 = target touched). Hover either chart
+        for details. Blue vertical = stop active from {stopActiveFromIst.slice(0, 5)} IST; red vertical = stop
+        exit minute (when applicable).
       </p>
       {trades.map((trade) => (
         <BreakoutDayAccordionItem
