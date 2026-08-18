@@ -147,7 +147,7 @@ export interface NineFifteenBreakoutStats {
   label: string;
   stopMainPoints: number;
   stopNearMissPoints: number;
-  /** First IST time the adverse stop is scanned (11:00:00 or 15:00:00 depending on variant). */
+  /** First IST time the adverse stop is scanned (e.g. 12:01:00). */
   stopActiveFromIst: string;
   sampleDays: number;
   tradeDays: number;
