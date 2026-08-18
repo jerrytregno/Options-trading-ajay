@@ -380,14 +380,14 @@ function BreakoutTargetGapChart({
   candles,
   entryPrice,
   side,
-  band,
+  targetPoints,
   stopActiveFromIst,
   stopExitTimeIst,
 }: {
   candles: MinuteCandle[];
   entryPrice: number | null;
   side: "CE" | "PE";
-  band: NineFifteenBreakoutTrade["band"];
+  targetPoints: number;
   stopActiveFromIst: string;
   stopExitTimeIst?: string | null;
 }) {
@@ -404,23 +404,13 @@ function BreakoutTargetGapChart({
 
   const gapByIndex = useMemo(() => {
     if (entryPrice == null) return candles.map(() => null as number | null);
-    const series = computeGapToTargetSeries(candles, entryPrice, side, band);
+    const series = computeGapToTargetSeries(candles, entryPrice, side, targetPoints);
     const byMins = new Map(series.map((p) => [p.mins, p.gapPts]));
     return candles.map((c) => {
       const mins = minutesFromIstLabel(istHmFromCandleTime(c.time));
       return mins != null ? (byMins.get(mins) ?? null) : null;
     });
-  }, [candles, entryPrice, side, band]);
-
-  const targetPtsByIndex = useMemo(() => {
-    if (entryPrice == null) return candles.map(() => null as number | null);
-    const series = computeGapToTargetSeries(candles, entryPrice, side, band);
-    const byMins = new Map(series.map((p) => [p.mins, p.targetPoints]));
-    return candles.map((c) => {
-      const mins = minutesFromIstLabel(istHmFromCandleTime(c.time));
-      return mins != null ? (byMins.get(mins) ?? null) : null;
-    });
-  }, [candles, entryPrice, side, band]);
+  }, [candles, entryPrice, side, targetPoints]);
 
   const { yMax, candleW } = useMemo(() => {
     const gaps = gapByIndex.filter((g): g is number => g != null);
@@ -477,7 +467,6 @@ function BreakoutTargetGapChart({
   };
 
   const hoverGap = hoverIndex != null ? gapByIndex[hoverIndex] : null;
-  const hoverTargetPts = hoverIndex != null ? targetPtsByIndex[hoverIndex] : null;
   const hoverX = hoverIndex != null ? xScale(hoverIndex) : null;
   const tipX =
     hoverX != null ? Math.min(Math.max(hoverX + 10, padL + 4), width - padR - 176) : 0;
@@ -490,7 +479,7 @@ function BreakoutTargetGapChart({
       className="nf-day-chart-svg nf-day-chart-svg--gap"
       viewBox={`0 0 ${width} ${height}`}
       role="img"
-      aria-label="Distance from tiered profit target over the session"
+      aria-label={`Distance from fixed ±${targetPoints} profit target over the session`}
       onMouseMove={handleChartMouseMove}
       onMouseLeave={() => setHoverIndex(null)}
     >
@@ -504,7 +493,7 @@ function BreakoutTargetGapChart({
       <rect x={padL} y={padT} width={plotW} height={plotH} fill={`url(#nf-breakout-gap-grid-${gradId})`} />
 
       <text x={padL} y={padT - 6} className="nf-day-chart-gap-label">
-        Pts from target (0 = tiered target touched)
+        Pts from target ±{targetPoints} (0 = target touched)
       </text>
 
       {[0, 0.5, 1].map((t) => {
@@ -579,7 +568,7 @@ function BreakoutTargetGapChart({
               {formatNumber(hoverGap, 2)} pts from target
             </text>
             <text x={8} y={40} className="nf-chart-hover-tip-text">
-              Active target ±{hoverTargetPts ?? "—"}
+              Target ±{targetPoints}
             </text>
           </g>
         </>
@@ -778,7 +767,7 @@ function BreakoutDayAccordionItem({
                 candles={candles}
                 entryPrice={entry}
                 side={trade.side}
-                band={trade.band}
+                targetPoints={trade.targetPoints}
                 stopActiveFromIst={stopActiveFromIst}
                 stopExitTimeIst={trade.stopHit?.timeIst}
               />
@@ -806,9 +795,9 @@ export function BreakoutTradesAccordion({
       <p className="nf-loss-accordion-hint text-muted text-sm">
         Expand a day to load that session’s Nifty 50 1-min candles (9:15–15:30). Entry, initial target, and
         stop levels are overlaid on the price chart; RSI(14) sits below it. A second chart shows how many index
-        points Nifty was from the tiered profit target at each minute (0 = target touched). Hover either chart
-        for details. Blue vertical = stop active from {stopActiveFromIst.slice(0, 5)} IST; red vertical = stop
-        exit minute (when applicable).
+        points Nifty was from the fixed entry target (±25 main · ±20 near-miss) at each minute (0 = target
+        touched). Hover either chart for details. Blue vertical = stop active from {stopActiveFromIst.slice(0, 5)}{" "}
+        IST; red vertical = stop exit minute (when applicable).
       </p>
       {trades.map((trade) => (
         <BreakoutDayAccordionItem
