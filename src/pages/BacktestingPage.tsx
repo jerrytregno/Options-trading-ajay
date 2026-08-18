@@ -1125,6 +1125,13 @@ export default function BacktestingPage() {
                     historyLabel="last 1 year"
                   />
                 )}
+
+                {data.breakoutAt1500 && (
+                  <BreakoutBacktestSection
+                    breakout={data.breakoutAt1500}
+                    historyLabel="last 1 year"
+                  />
+                )}
               </div>
             )}
           </>
