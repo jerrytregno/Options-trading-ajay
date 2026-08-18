@@ -93,6 +93,77 @@ export interface NineFifteenCandleRow {
   rsi915?: number | null;
   /** Wilder RSI(14) at the 9:16 bar close (includes 9:15 bar in lookback). */
   rsi916?: number | null;
+  /**
+   * Breakout backtest only: first adverse touch of the fixed stop from the 9:16 entry
+   * (CE stops below entry, PE stops above). Null when the day is not a trade day.
+   */
+  breakoutStopHit?: NineFifteenTargetHit | null;
+  /** Stop distance used for this row's band — main 70 · near-miss 70. */
+  breakoutStopPoints?: number | null;
+  /** Closest approach to tiered profit target over the full 9:16–15:30 session. */
+  breakoutClosestToTarget?: NineFifteenBreakoutTargetApproach | null;
+}
+
+/**
+ * Breakout backtest (stop-loss study — backtest only, never used by the live bot).
+ * Same 9:16 entry and same tiered index targets as the live backtest, plus a fixed adverse
+ * stop measured from the entry price: main band ±70, near-miss band ±70.
+ */
+export interface NineFifteenBreakoutTargetApproach {
+  timeIst: string;
+  /** Bar extreme in trade direction (high for CE · low for PE). */
+  indexPrice: number;
+  /** Tiered target distance active at that minute (±25/±20 main · ±20/±10 near-miss). */
+  targetPoints: number;
+  targetIndexPrice: number;
+  /** Index points still needed to reach target (0 if touched on that bar). */
+  gapToTargetPts: number;
+}
+
+export interface NineFifteenBreakoutTrade {
+  date: string;
+  side: "CE" | "PE";
+  band: "main" | "near_miss";
+  /** 9:15 close − open that produced the signal. */
+  change: number;
+  entry: NineFifteenTradeEntry | null;
+  /** Index target at entry (main 25 · near-miss 20) — tightens later in the day. */
+  targetPoints: number;
+  /** Fixed adverse stop distance from entry (main 70 · near-miss 70). */
+  stopPoints: number;
+  /** Tiered target touch, if the day ever reached it. */
+  targetHit: NineFifteenTargetHit | null;
+  /** Adverse stop touch, if the day ever reached it. */
+  stopHit: NineFifteenTargetHit | null;
+  /**
+   * Minute in the session when Nifty came closest to the tiered profit target (9:16–15:30).
+   */
+  closestToTarget: NineFifteenBreakoutTargetApproach | null;
+  /** `open` = neither level touched, trade rides to 15:30. */
+  outcome: "target" | "stop" | "open";
+}
+
+export interface NineFifteenBreakoutStats {
+  label: string;
+  stopMainPoints: number;
+  stopNearMissPoints: number;
+  /** First IST time the adverse stop is scanned (11:00:00 for both breakout variants). */
+  stopActiveFromIst: string;
+  sampleDays: number;
+  tradeDays: number;
+  /** Existing backtest with no stop-loss — baseline for comparison. */
+  baseWins: number;
+  baseLosses: number;
+  baseWinPct: number;
+  /** With the stop applied. */
+  wins: number;
+  stopped: number;
+  openAtClose: number;
+  winPct: number;
+  /** Base wins the stop turned into losses (stop touched before the target). */
+  missedWins: NineFifteenBreakoutTrade[];
+  /** Base losses that hit the stop — exited early instead of riding to 15:30. */
+  stoppedLosses: NineFifteenBreakoutTrade[];
 }
 
 /** Max favorable excursion after 9:16 entry (one Kite minute bar). */
@@ -111,7 +182,15 @@ export interface NineFifteenTradeEntry {
 export interface NineFifteenTargetHit {
   timeIst: string;
   levelLabel: string;
+  /** Theoretical index level touched (entry ± points). */
   indexPrice: number;
+  /**
+   * Breakout stop only: actual candle extreme at exit (CE = bar low · PE = bar high).
+   * May be beyond the stop level when the 1-min bar overshoots.
+   */
+  exitIndexPrice?: number;
+  /** Breakout stop only: exitIndexPrice − indexPrice (signed index points). */
+  exitVsStopPts?: number;
 }
 
 export interface NineFifteenLevelSummary {
@@ -153,6 +232,8 @@ export interface NineFifteenCandlesResult {
    */
   liveConsolidatedFollow: NineFifteenCePeStrategyStats;
   liveConsolidatedFilterStats: NineFifteenFollowFilterStats;
+  /** Backtest-only stop-loss study (±70 main / ±70 near-miss) — live bot has no stop. */
+  breakout: NineFifteenBreakoutStats;
 }
 
 export interface NineFifteenFollowBacktestBlock {
@@ -165,6 +246,7 @@ export interface NineFifteenFollowBacktestBlock {
   nearMissFollowFilterStats: NineFifteenFollowFilterStats;
   liveConsolidatedFollow: NineFifteenCePeStrategyStats;
   liveConsolidatedFilterStats: NineFifteenFollowFilterStats;
+  breakout: NineFifteenBreakoutStats;
 }
 
 export interface NineFifteenFollowFilterStats {

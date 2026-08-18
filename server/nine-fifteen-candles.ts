@@ -1,4 +1,7 @@
 import type {
+  NineFifteenBreakoutStats,
+  NineFifteenBreakoutTargetApproach,
+  NineFifteenBreakoutTrade,
   NineFifteenCandleRow,
   NineFifteenCandlesResult,
   NineFifteenCePeFailureTrade,
@@ -66,6 +69,27 @@ export const NINE_FIFTEEN_NEAR_MISS_SWITCH_MINUTE = 10 * 60 + 1;
 export const NINE_FIFTEEN_FOLLOW_BACKTEST_TARGET = NINE_FIFTEEN_BACKTEST_TARGET_25;
 /** Live floor: enter when |Δ| ≥ 11 (main ≥15 + near-miss band). */
 export const NINE_FIFTEEN_LIVE_MIN_ABS_DIFF = NINE_FIFTEEN_NEAR_MISS_MIN_ABS_DIFF;
+/**
+ * Breakout backtest stop-loss — fixed from the 9:16 price, never tightened.
+ * Backtest study only; the live 9:16 bot has no stop-loss.
+ */
+export const NINE_FIFTEEN_BREAKOUT_STOP_MAIN = 70;
+export const NINE_FIFTEEN_BREAKOUT_STOP_NEAR_MISS = 70;
+/** Breakout stops are only checked from this IST minute onward (11:00). */
+export const NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE = 11 * 60;
+
+type BreakoutStopConfig = {
+  stopMainPoints: number;
+  stopNearMissPoints: number;
+  /** First IST minute-of-day when the adverse stop can trigger. */
+  stopActiveFromMins: number;
+};
+
+const BREAKOUT_STOP_TIGHT: BreakoutStopConfig = {
+  stopMainPoints: NINE_FIFTEEN_BREAKOUT_STOP_MAIN,
+  stopNearMissPoints: NINE_FIFTEEN_BREAKOUT_STOP_NEAR_MISS,
+  stopActiveFromMins: NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE,
+};
 
 /** Follow backtest exits: entry ± N from Kite bars ≥9:16 (not 9:15-open rules). */
 function isEntryBasedFollowTarget(targetPoints: number): boolean {
@@ -457,6 +481,127 @@ function tieredIndexTargetHitsFromKite(
   };
 }
 
+function makeAdverseStopHitFromKiteBar(
+  c: MinuteCandle,
+  entryPrice: number,
+  stopPoints: number,
+  tradeSide: "CE" | "PE",
+): NineFifteenTargetHit {
+  const stopLevel =
+    tradeSide === "CE" ? entryPrice - stopPoints : entryPrice + stopPoints;
+  const exitIndexPrice = tradeSide === "CE" ? c.low : c.high;
+  const exitVsStopPts = exitIndexPrice - stopLevel;
+  const direction = tradeSide === "CE" ? "down" : "up";
+  return {
+    ...makeTargetHitFromKiteBar(c, entryPrice, stopPoints, direction),
+    exitIndexPrice,
+    exitVsStopPts: Number(exitVsStopPts.toFixed(2)),
+  };
+}
+
+/**
+ * Breakout backtest: first bar that moves `stopPoints` against the trade from the 9:16 entry.
+ * A CE buy stops out below entry, a PE buy above it.
+ */
+function firstAdverseStopHitFromKite(
+  entryPrice: number,
+  sessionCandles: MinuteCandle[],
+  tradeSide: "CE" | "PE",
+  stopPoints: number,
+  activeFromMins: number = BACKTEST_EXIT_START_MINUTES,
+): NineFifteenTargetHit | null {
+  const ordered = [...sessionCandles].sort((a, b) => a.mins - b.mins);
+  for (const c of ordered) {
+    if (!kiteCandleInExitWindow(c)) continue;
+    if (c.mins < activeFromMins) continue;
+    if (tradeSide === "CE" && c.low <= entryPrice - stopPoints) {
+      return makeAdverseStopHitFromKiteBar(c, entryPrice, stopPoints, "CE");
+    }
+    if (tradeSide === "PE" && c.high >= entryPrice + stopPoints) {
+      return makeAdverseStopHitFromKiteBar(c, entryPrice, stopPoints, "PE");
+    }
+  }
+  return null;
+}
+
+/** Tiered profit target for breakout study (matches live backtest exits). */
+function breakoutProfitTargetPointsAtMinute(band: "main" | "near_miss", mins: number): number {
+  if (band === "near_miss") {
+    return mins >= NINE_FIFTEEN_NEAR_MISS_SWITCH_MINUTE
+      ? NINE_FIFTEEN_NEAR_MISS_TARGET_AFTER
+      : NINE_FIFTEEN_NEAR_MISS_TARGET;
+  }
+  return indexTargetPointsForMinute(mins);
+}
+
+/**
+ * Full session (9:16–15:30): minute whose high/low came closest to the tiered profit target.
+ */
+function closestApproachToTieredProfitTarget(
+  entryPrice: number,
+  sessionCandles: MinuteCandle[],
+  tradeSide: "CE" | "PE",
+  band: "main" | "near_miss",
+): NineFifteenBreakoutTargetApproach | null {
+  let best: NineFifteenBreakoutTargetApproach | null = null;
+
+  const ordered = [...sessionCandles].sort((a, b) => a.mins - b.mins);
+  for (const c of ordered) {
+    if (!kiteCandleInExitWindow(c)) continue;
+
+    const targetPoints = breakoutProfitTargetPointsAtMinute(band, c.mins);
+    const targetIndexPrice =
+      tradeSide === "CE" ? entryPrice + targetPoints : entryPrice - targetPoints;
+    const extreme = tradeSide === "CE" ? c.high : c.low;
+    const gapToTargetPts =
+      tradeSide === "CE"
+        ? Math.max(0, targetIndexPrice - extreme)
+        : Math.max(0, extreme - targetIndexPrice);
+    const roundedGap = Number(gapToTargetPts.toFixed(2));
+
+    if (
+      best == null ||
+      roundedGap < best.gapToTargetPts ||
+      (roundedGap === best.gapToTargetPts && c.mins < minutesFromIstTime(best.timeIst))
+    ) {
+      best = {
+        timeIst: formatIstHms(c.mins * 60),
+        indexPrice: extreme,
+        targetPoints,
+        targetIndexPrice,
+        gapToTargetPts: roundedGap,
+      };
+    }
+  }
+
+  return best;
+}
+
+function minutesFromIstTime(timeIst: string): number {
+  const m = /^(\d{1,2}):(\d{2})/.exec(timeIst.trim());
+  if (!m) return 0;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+/** Band from the 9:15 bar — mirrors liveExitModeForRow but runs before the row exists. */
+function breakoutBandForChange(
+  direction: NineFifteenDirection,
+  change: number,
+): "main" | "near_miss" | null {
+  if (direction !== "up" && direction !== "down") return null;
+  const abs = Math.abs(change);
+  if (abs >= NINE_FIFTEEN_FOLLOW_MIN_ABS_DIFF) return "main";
+  if (abs >= NINE_FIFTEEN_NEAR_MISS_MIN_ABS_DIFF) return "near_miss";
+  return null;
+}
+
+function breakoutStopPointsForBand(
+  band: "main" | "near_miss",
+  config: BreakoutStopConfig = BREAKOUT_STOP_TIGHT,
+): number {
+  return band === "near_miss" ? config.stopNearMissPoints : config.stopMainPoints;
+}
+
 /** Best move in trade direction after entry — time = Kite bar open when that bar's high/low set a new MFE. */
 function maxFavorableMoveFromKiteExitWindow(
   entryPrice: number,
@@ -637,6 +782,28 @@ function parseSessionRows(raw: unknown[]): NineFifteenCandleRow[] {
       NINE_SIXTEEN_INDEX_TARGET_15_START_MINUTE,
     );
 
+    const direction = directionFromOhlc(bar915.open, bar915.close);
+    const breakoutBand = breakoutBandForChange(direction, change);
+    const breakoutSide: "CE" | "PE" | null =
+      breakoutBand == null ? null : direction === "down" ? "PE" : "CE";
+    const breakoutStopPoints = breakoutBand
+      ? breakoutStopPointsForBand(breakoutBand, BREAKOUT_STOP_TIGHT)
+      : null;
+    const breakoutStopHit =
+      breakoutSide && breakoutStopPoints
+        ? firstAdverseStopHitFromKite(
+            entryPx,
+            sessionCandles,
+            breakoutSide,
+            breakoutStopPoints,
+            NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_MINUTE,
+          )
+        : null;
+    const breakoutClosestToTarget =
+      breakoutSide && breakoutBand
+        ? closestApproachToTieredProfitTarget(entryPx, sessionCandles, breakoutSide, breakoutBand)
+        : null;
+
     const prevDayClose = prevDayCloseByDate.get(date) ?? null;
     const gapFromPrevClose =
       prevDayClose !== null ? bar915.open - prevDayClose : null;
@@ -664,7 +831,7 @@ function parseSessionRows(raw: unknown[]): NineFifteenCandleRow[] {
       low: bar915.low,
       change,
       changePct,
-      direction: directionFromOhlc(bar915.open, bar915.close),
+      direction,
       ...minuteLevels,
       sessionHigh,
       sessionLow,
@@ -692,6 +859,9 @@ function parseSessionRows(raw: unknown[]): NineFifteenCandleRow[] {
       switch25Then15After1101Down: switch25_15.down,
       rsi915: rsi915 != null ? Number(rsi915.toFixed(2)) : null,
       rsi916: rsi916 != null ? Number(rsi916.toFixed(2)) : null,
+      breakoutStopHit,
+      breakoutStopPoints,
+      breakoutClosestToTarget,
     });
   }
 
@@ -1107,6 +1277,90 @@ function targetPointsForLiveMode(mode: "main" | "near_miss"): number {
   return mode === "near_miss" ? NINE_FIFTEEN_NEAR_MISS_TARGET : NINE_FIFTEEN_FOLLOW_BACKTEST_TARGET;
 }
 
+/**
+ * Breakout backtest: race the tiered target against the fixed adverse stop on the same day.
+ * When both levels fall inside one 1-min bar the stop wins — minute OHLC cannot tell us which
+ * side was touched first, so the pessimistic read keeps the study honest.
+ */
+function buildBreakoutTrade(
+  row: NineFifteenCandleRow,
+  config: BreakoutStopConfig,
+  stopHitForRow: (row: NineFifteenCandleRow) => NineFifteenTargetHit | null,
+): NineFifteenBreakoutTrade | null {
+  const band = liveExitModeForRow(row);
+  if (!band) return null;
+
+  const side: "CE" | "PE" = row.direction === "down" ? "PE" : "CE";
+  const targetPoints = targetPointsForLiveMode(band);
+  const targetHit = targetHitForRow(row, targetPoints, side);
+  const stopHit = stopHitForRow(row);
+  const stopFirst =
+    stopHit != null && (targetHit == null || stopHit.timeIst <= targetHit.timeIst);
+
+  return {
+    date: row.date,
+    side,
+    band,
+    change: row.change,
+    entry: row.entryAtLive916 ?? null,
+    targetPoints,
+    stopPoints: breakoutStopPointsForBand(band, config),
+    targetHit,
+    stopHit,
+    closestToTarget: row.breakoutClosestToTarget ?? null,
+    outcome: stopFirst ? "stop" : targetHit ? "target" : "open",
+  };
+}
+
+function buildBreakoutStats(
+  rows: NineFifteenCandleRow[],
+  config: BreakoutStopConfig,
+  stopHitForRow: (row: NineFifteenCandleRow) => NineFifteenTargetHit | null,
+): NineFifteenBreakoutStats {
+  const trades = rows
+    .map((row) => buildBreakoutTrade(row, config, stopHitForRow))
+    .filter((trade): trade is NineFifteenBreakoutTrade => trade !== null);
+
+  const tradeDays = trades.length;
+  const wins = trades.filter((t) => t.outcome === "target").length;
+  const stopped = trades.filter((t) => t.outcome === "stop").length;
+  const openAtClose = trades.filter((t) => t.outcome === "open").length;
+  // Baseline = the existing backtest, where a day counts as a win whenever the target was
+  // ever touched, no matter how far the index went against the trade first.
+  const baseWins = trades.filter((t) => t.targetHit != null).length;
+  const baseLosses = tradeDays - baseWins;
+
+  const byDateDesc = (a: NineFifteenBreakoutTrade, b: NineFifteenBreakoutTrade) =>
+    b.date.localeCompare(a.date);
+
+  return {
+    label:
+      `Breakout: same 9:16 entry and tiered targets, plus a fixed stop from entry — ` +
+      `main ±${config.stopMainPoints} · near-miss ±${config.stopNearMissPoints}` +
+      (config.stopActiveFromMins > BACKTEST_EXIT_START_MINUTES
+        ? ` · stop active from ${formatIstHms(config.stopActiveFromMins * 60)} IST`
+        : ""),
+    stopMainPoints: config.stopMainPoints,
+    stopNearMissPoints: config.stopNearMissPoints,
+    stopActiveFromIst: formatIstHms(config.stopActiveFromMins * 60),
+    sampleDays: rows.length,
+    tradeDays,
+    baseWins,
+    baseLosses,
+    baseWinPct: tradeDays > 0 ? (baseWins / tradeDays) * 100 : 0,
+    wins,
+    stopped,
+    openAtClose,
+    winPct: tradeDays > 0 ? (wins / tradeDays) * 100 : 0,
+    missedWins: trades
+      .filter((t) => t.outcome === "stop" && t.targetHit != null)
+      .sort(byDateDesc),
+    stoppedLosses: trades
+      .filter((t) => t.outcome === "stop" && t.targetHit == null)
+      .sort(byDateDesc),
+  };
+}
+
 export function computeLiveConsolidatedFilterStats(
   rows: NineFifteenCandleRow[],
 ): NineFifteenFollowFilterStats {
@@ -1260,7 +1514,8 @@ function buildCePeGuideForTarget(
 
   const liveExitNote =
     `Live bot: |Δ|≥15 → index ±25 until 10:01, ±20 from 10:01, ±15 from 11:01 · ` +
-    `11≤|Δ|<15 → ±20 until 10:01 then ±10 · P&L +5% 10:01–11:00 / +3% from 11:01.`;
+    `11≤|Δ|<15 → ±20 until 10:01 then ±10 · ` +
+    `P&L +10% 9:16–10:00 / +5% 10:01–11:00 / +3% 11:01–12:00 / +1% from 12:01.`;
   const entryRule =
     `Backtest mirrors live: enter at 9:16:00 Kite open when |9:15 Δ| ≥ ${NINE_FIFTEEN_LIVE_MIN_ABS_DIFF}. ` +
     `|Δ|≥${NINE_FIFTEEN_FOLLOW_MIN_ABS_DIFF}: win on entry ±25 before 10:01 / ±20 from 10:01 / ±15 from 11:01. ` +
@@ -1344,6 +1599,7 @@ function buildFollowBacktestBlock(
     ),
     liveConsolidatedFollow: buildLiveConsolidatedFollowStats(rows),
     liveConsolidatedFilterStats: computeLiveConsolidatedFilterStats(rows),
+    breakout: buildBreakoutStats(rows, BREAKOUT_STOP_TIGHT, (row) => row.breakoutStopHit ?? null),
   };
 }
 
@@ -1364,7 +1620,7 @@ export async function fetchNineFifteenCandleHistory(
   const days = Math.min(Math.max(Math.round(daysRequested), 30), NINE_FIFTEEN_MAX_HISTORY_DAYS);
   const calendarLookback = calendarDaysForSessionLookback(ONE_YEAR_SESSION_ROWS);
 
-  const cacheKey = `nine-fifteen:session:v52:1y-live-consolidated-rsi915-916`;
+  const cacheKey = `nine-fifteen:session:v63:1y-live-consolidated-rsi915-916-breakout-closest`;
   if (force) invalidateNineFifteenCache();
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_MS) {
@@ -1418,6 +1674,7 @@ export async function fetchNineFifteenCandleHistory(
     nearMissFollowFilterStats: block1y.nearMissFollowFilterStats,
     liveConsolidatedFollow: block1y.liveConsolidatedFollow,
     liveConsolidatedFilterStats: block1y.liveConsolidatedFilterStats,
+    breakout: block1y.breakout,
   };
 
   cache.set(cacheKey, { at: Date.now(), data: result });

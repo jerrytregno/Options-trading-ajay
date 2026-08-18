@@ -13,6 +13,7 @@ import { useKite } from "@/contexts/kite-context";
 import {
   NINE_FIFTEEN_TIME_CHECKPOINTS,
   NSE_SESSIONS_ONE_YEAR,
+  type NineFifteenBreakoutStats,
   type NineFifteenCePeGuide,
   type NineFifteenCePeFailureTrade,
   type NineFifteenAltTargetAfterTime,
@@ -23,6 +24,7 @@ import {
 import { cn, formatNumber } from "@/lib/utils";
 import { formatWeekdayFromDateKey } from "@/lib/market-time";
 import { LossTradesAccordion } from "@/components/nine-fifteen/LossTradesAccordion";
+import { BreakoutTradesAccordion } from "@/components/nine-fifteen/BreakoutTradesAccordion";
 import "@/styles/nine-fifteen-page.css";
 
 const BACKTEST_HISTORY_DAYS = 365;
@@ -627,6 +629,139 @@ function FollowStrategyWinsPanel({
   );
 }
 
+function BreakoutBacktestSection({
+  breakout,
+  historyLabel,
+}: {
+  breakout: NineFifteenBreakoutStats;
+  historyLabel: string;
+}) {
+  const winPctDelta = breakout.winPct - breakout.baseWinPct;
+  const stopFromLabel = breakout.stopActiveFromIst?.slice(0, 5) ?? "11:00";
+  const title = `Breakout backtest — stop ±${breakout.stopMainPoints} main / ±${breakout.stopNearMissPoints} near-miss from ${stopFromLabel} IST (${historyLabel})`;
+
+  return (
+    <div className="card nf-cepe-guide">
+      <h2 className="card-title">{title}</h2>
+      <p className="nf-cepe-rule">
+        Backtest study only. The live 9:16 bot has no stop-loss and is not affected by anything in this
+        section.
+      </p>
+      <p className="nf-cepe-steps text-muted">
+        <strong>Identical to the live backtest above:</strong> the 9:15 bar picks the direction, entry is
+        the <strong>9:16:00 Kite open</strong>, UP → CE and DOWN → PE, and the index targets are the same
+        tiered ones (main <strong>±25 → ±20@10:01 → ±15@11:01</strong>, near-miss{" "}
+        <strong>±20 → ±10@10:01</strong>). <strong>The one addition</strong> is a stop measured from the
+        9:16 entry price that stays fixed all day: <strong>±{breakout.stopMainPoints}</strong> on the main
+        band and <strong>±{breakout.stopNearMissPoints}</strong> on the near-miss band. The stop is only
+        checked from <strong>{stopFromLabel} IST</strong> onward — adverse moves before that time do not
+        trigger an exit. A CE buy is stopped when the index trades{" "}
+        <strong>{breakout.stopMainPoints} points below</strong> entry; a PE buy when it trades{" "}
+        <strong>{breakout.stopMainPoints} points above</strong>. Whichever active level the index touches
+        first ends the trade. When a single 1-min candle covers both levels the stop is counted first,
+        because minute OHLC cannot show which side was touched earlier.
+      </p>
+
+      <div className="card nf-filter-stats">
+        <h3 className="nf-filter-stats-title">
+          {breakout.tradeDays} trades over {breakout.sampleDays} NSE sessions (Kite)
+        </h3>
+        <p className="nf-filter-stats-source text-muted">
+          Same trade days as the consolidated live backtest — only the exit differs.
+        </p>
+        <div className="nf-filter-stats-grid">
+          <div>
+            <span className="nf-filter-stat-label">Trades taken</span>
+            <span className="nf-filter-stat-value">{breakout.tradeDays}</span>
+          </div>
+          <div>
+            <span className="nf-filter-stat-label">Target hit first</span>
+            <span className="nf-filter-stat-value text-up">{breakout.wins}</span>
+            <span className="nf-filter-stat-hint text-muted">
+              {formatNumber(breakout.winPct, 2)}% of trades
+            </span>
+          </div>
+          <div>
+            <span className="nf-filter-stat-label">Stopped out</span>
+            <span className="nf-filter-stat-value text-down">{breakout.stopped}</span>
+            <span className="nf-filter-stat-hint text-muted">
+              {breakout.missedWins.length} were wins · {breakout.stoppedLosses.length} were losses anyway
+            </span>
+          </div>
+          <div>
+            <span className="nf-filter-stat-label">Still open at 15:30</span>
+            <span className="nf-filter-stat-value">{breakout.openAtClose}</span>
+            <span className="nf-filter-stat-hint text-muted">Neither level touched</span>
+          </div>
+          <div>
+            <span className="nf-filter-stat-label">Win rate with stop</span>
+            <span className="nf-filter-stat-value">{formatNumber(breakout.winPct, 2)}%</span>
+          </div>
+          <div>
+            <span className="nf-filter-stat-label">Win rate without stop</span>
+            <span className="nf-filter-stat-value">{formatNumber(breakout.baseWinPct, 2)}%</span>
+            <span
+              className={cn(
+                "nf-filter-stat-hint",
+                winPctDelta >= 0 ? "text-up" : "text-down",
+              )}
+            >
+              {winPctDelta >= 0 ? "+" : "−"}
+              {formatNumber(Math.abs(winPctDelta), 2)} pts from the stop
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="nf-failures-block">
+        <h3 className="nf-failures-title">Winning trades missed because of the stop</h3>
+        <p className="nf-failures-intro text-muted">
+          These days did eventually reach their index target, so the backtest above counts them as wins.
+          But the index first moved {breakout.stopMainPoints} points (main) or{" "}
+          {breakout.stopNearMissPoints} points (near-miss) against the trade{" "}
+          <strong>from {stopFromLabel} IST onward</strong>, so the breakout rule would have exited at a
+          loss before the target arrived. <strong>Exit index</strong> is the actual Nifty price on the stop
+          minute (bar low for CE · bar high for PE). <strong>Exit − stop</strong> is the gap from the stop
+          level (entry ±{breakout.stopMainPoints} or ±{breakout.stopNearMissPoints}) in index points.
+          Each row also shows when Nifty came nearest to the tiered profit target during the session,
+          with the exact Nifty price and points remaining to the target level. Expand for the full-day
+          1-min chart.
+        </p>
+        {breakout.missedWins.length === 0 ? (
+          <p className="text-muted text-sm">No winning trade was stopped out.</p>
+        ) : (
+          <BreakoutTradesAccordion
+            trades={breakout.missedWins}
+            kind="missed-win"
+            stopActiveFromIst={breakout.stopActiveFromIst}
+          />
+        )}
+      </div>
+
+      <div className="nf-failures-block">
+        <h3 className="nf-failures-title">Losing trades that hit the stop</h3>
+        <p className="nf-failures-intro text-muted">
+          These days never reached their target, so they are losses either way. The breakout rule would have
+          cut them at the minute shown. <strong>Exit index</strong> is the actual Nifty price on that minute;
+          <strong> Exit − stop</strong> shows how far beyond the stop level (entry ±{breakout.stopMainPoints}{" "}
+          or ±{breakout.stopNearMissPoints}) the index moved. Rows show when Nifty came nearest to the
+          profit target during the session (time · Nifty price · pts from target). Expand for the full-day
+          1-min chart.
+        </p>
+        {breakout.stoppedLosses.length === 0 ? (
+          <p className="text-muted text-sm">No losing trade hit the stop.</p>
+        ) : (
+          <BreakoutTradesAccordion
+            trades={breakout.stoppedLosses}
+            kind="stopped-loss"
+            stopActiveFromIst={breakout.stopActiveFromIst}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CePeStrategyTable({
   guide,
   totalDays,
@@ -983,6 +1118,13 @@ export default function BacktestingPage() {
                   showHourlyWinBreakdown
                   showAlt20After1010OnLoss
                 />
+
+                {data.breakout && (
+                  <BreakoutBacktestSection
+                    breakout={data.breakout}
+                    historyLabel="last 1 year"
+                  />
+                )}
               </div>
             )}
           </>

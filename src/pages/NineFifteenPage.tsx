@@ -164,7 +164,10 @@ export default function NineFifteenPage() {
                       <strong>10:01–11:00 IST:</strong> unrealised ≥ <strong>+5%</strong> of (entry premium × qty)
                     </li>
                     <li>
-                      <strong>From 11:01 IST:</strong> unrealised ≥ <strong>+3%</strong> of (entry premium × qty)
+                      <strong>11:01–12:00 IST:</strong> unrealised ≥ <strong>+3%</strong> of (entry premium × qty)
+                    </li>
+                    <li>
+                      <strong>From 12:01 IST:</strong> unrealised ≥ <strong>+1%</strong> of (entry premium × qty)
                     </li>
                     <li>No P&amp;L % exit before 9:16 (entry)</li>
                     <li>
@@ -214,7 +217,8 @@ export default function NineFifteenPage() {
               </ol>
               <p className="nf-live-rules-foot text-muted">
                 Example after 10:01: Nifty +20 from fill exits even if option P&amp;L is under +5%; or +5% P&amp;L
-                exits even if Nifty has not reached ±20. Same OR logic from 11:01 with ±15 / +3%. Split example: entered
+                exits even if Nifty has not reached ±20. Same OR logic from 11:01 with ±15 / +3%, and from 12:01 the
+                P&amp;L leg eases to +1% while the index leg stays ±15. Split example: entered
                 75 lots as 25+25+25 at 9:16 → on target, exits as 25+25+25 SELL orders fired together, not one after
                 another.
               </p>

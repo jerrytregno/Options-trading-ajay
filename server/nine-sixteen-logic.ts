@@ -33,8 +33,12 @@ export const NINE_SIXTEEN_PNL_MORNING_EXIT_END_MINUTE = 10 * 60;
 export const NINE_SIXTEEN_PNL_EARLY_TARGET_PCT = 5;
 export const NINE_SIXTEEN_PNL_EARLY_EXIT_START_MINUTE = 10 * 60 + 1;
 export const NINE_SIXTEEN_PNL_EARLY_EXIT_END_MINUTE = 11 * 60;
-/** +3% P&L exit from 11:01 AM IST onward. */
+/** +3% P&L exit: 11:01 AM through 12:00 PM IST (inclusive). */
 export const NINE_SIXTEEN_PNL_EXIT_START_MINUTE = 11 * 60 + 1;
+export const NINE_SIXTEEN_PNL_EXIT_END_MINUTE = 12 * 60;
+/** +1% P&L exit from 12:01 PM IST onward. */
+export const NINE_SIXTEEN_PNL_FINAL_TARGET_PCT = 1;
+export const NINE_SIXTEEN_PNL_FINAL_EXIT_START_MINUTE = 12 * 60 + 1;
 /** From 3:00 PM IST — exit if Nifty is within this many index points of the ±target level (unused in live bot). */
 export const NINE_SIXTEEN_NEAR_TARGET_EXIT_START_MINUTE = 15 * 60;
 export const NINE_SIXTEEN_NEAR_TARGET_MAX_DISTANCE = 50;
@@ -438,17 +442,24 @@ export function isPnlEarlyExitWindowActive(nowMs = Date.now()): boolean {
   return mod >= NINE_SIXTEEN_PNL_EARLY_EXIT_START_MINUTE && mod <= NINE_SIXTEEN_PNL_EARLY_EXIT_END_MINUTE;
 }
 
-/** From 11:01 IST — +3% of entry cost. */
+/** 11:01–12:00 IST — +3% of entry cost. */
 export function isPnlLateExitWindowActive(nowMs = Date.now()): boolean {
-  return istMinuteOfDay(nowMs) >= NINE_SIXTEEN_PNL_EXIT_START_MINUTE;
+  const mod = istMinuteOfDay(nowMs);
+  return mod >= NINE_SIXTEEN_PNL_EXIT_START_MINUTE && mod <= NINE_SIXTEEN_PNL_EXIT_END_MINUTE;
 }
 
-/** Any P&L % exit window (morning, early, or late). */
+/** From 12:01 IST — +1% of entry cost. */
+export function isPnlFinalExitWindowActive(nowMs = Date.now()): boolean {
+  return istMinuteOfDay(nowMs) >= NINE_SIXTEEN_PNL_FINAL_EXIT_START_MINUTE;
+}
+
+/** Any P&L % exit window (morning, early, late, or final). */
 export function isPnlExitWindowActive(nowMs = Date.now()): boolean {
   return (
     isPnlMorningExitWindowActive(nowMs) ||
     isPnlEarlyExitWindowActive(nowMs) ||
-    isPnlLateExitWindowActive(nowMs)
+    isPnlLateExitWindowActive(nowMs) ||
+    isPnlFinalExitWindowActive(nowMs)
   );
 }
 
@@ -456,11 +467,17 @@ export function activePnlTargetPct(nowMs = Date.now()): number | null {
   if (isPnlMorningExitWindowActive(nowMs)) return NINE_SIXTEEN_PNL_MORNING_TARGET_PCT;
   if (isPnlEarlyExitWindowActive(nowMs)) return NINE_SIXTEEN_PNL_EARLY_TARGET_PCT;
   if (isPnlLateExitWindowActive(nowMs)) return NINE_SIXTEEN_PNL_TARGET_PCT;
+  if (isPnlFinalExitWindowActive(nowMs)) return NINE_SIXTEEN_PNL_FINAL_TARGET_PCT;
   return null;
 }
 
 export function getPnlExitScheduleLabel(): string {
-  return `9:16–10:00 +${NINE_SIXTEEN_PNL_MORNING_TARGET_PCT}% · 10:01–11:00 +${NINE_SIXTEEN_PNL_EARLY_TARGET_PCT}% · 11:01+ +${NINE_SIXTEEN_PNL_TARGET_PCT}%`;
+  return (
+    `9:16–10:00 +${NINE_SIXTEEN_PNL_MORNING_TARGET_PCT}% · ` +
+    `10:01–11:00 +${NINE_SIXTEEN_PNL_EARLY_TARGET_PCT}% · ` +
+    `11:01–12:00 +${NINE_SIXTEEN_PNL_TARGET_PCT}% · ` +
+    `12:01+ +${NINE_SIXTEEN_PNL_FINAL_TARGET_PCT}%`
+  );
 }
 
 function pnlExitStartMinuteOfDay(): number {
