@@ -130,10 +130,10 @@ export default function NineFifteenPage() {
             <div className="nf-live-rules-col">
               <h3 className="nf-live-rules-heading">Exit (live) — whichever fires first</h3>
               <p className="nf-live-rules-lead text-muted">
-                On every Kite websocket tick (REST fallback if WS drops): exit if <strong>either</strong> the index
-                rule <strong>or</strong> the option P&amp;L % rule is met — not both required. Split entry orders are
-                one single position, so <strong>all lots exit together</strong> (see step 4). Then EOD force
-                square-off. Exit checks start the moment the entry fills and are{" "}
+                On every Kite websocket tick (REST fallback if WS drops): exit if <strong>any</strong> of the index
+                rule, the option P&amp;L % rule, or the 12:01 adverse hard exit is met — not all required. Split entry
+                orders are one single position, so <strong>all lots exit together</strong> (see step 5). Then EOD
+                force square-off. Exit checks start the moment the entry fills and are{" "}
                 <strong>never paused</strong> — the 9:16 speed-ups only pause position sync, not the exit rules.
               </p>
               <ol className="nf-live-rules-list">
@@ -158,7 +158,12 @@ export default function NineFifteenPage() {
                   <strong>2. Option P&amp;L %</strong> (independent of index — either exits the trade)
                   <ul className="nf-live-rules-sublist">
                     <li>
-                      <strong>9:16–10:00 IST:</strong> unrealised ≥ <strong>+10%</strong> of (entry premium × qty)
+                      <strong>Tuesday (all day):</strong> flat <strong>+5%</strong> of (entry premium × qty), armed{" "}
+                      <strong>from the 9:16 fill</strong> — the 10/5/3 tiers below do not apply, for both CE and PE
+                    </li>
+                    <li>
+                      <strong>Mon, Wed–Fri · 9:16–10:00 IST:</strong> unrealised ≥ <strong>+10%</strong> of (entry
+                      premium × qty)
                     </li>
                     <li>
                       <strong>10:01–11:00 IST:</strong> unrealised ≥ <strong>+5%</strong> of (entry premium × qty)
@@ -174,7 +179,27 @@ export default function NineFifteenPage() {
                   </ul>
                 </li>
                 <li>
-                  <strong>3. End of day</strong>
+                  <strong>3. Hard exit — adverse move (every day, from 12:01 PM IST)</strong>
+                  <ul className="nf-live-rules-sublist">
+                    <li>
+                      From <strong>12:01 PM</strong>, if the trade is still open the bot tracks Nifty against the{" "}
+                      <strong>entry spot</strong> (same anchor as rule 1)
+                    </li>
+                    <li>
+                      <strong>CE BUY:</strong> spot ≤ entry spot <strong>− 70</strong> → immediate square-off
+                    </li>
+                    <li>
+                      <strong>PE BUY:</strong> spot ≥ entry spot <strong>+ 70</strong> → immediate square-off
+                    </li>
+                    <li>
+                      Checked <strong>before</strong> the ±25/±20/±15 target, so it overrides it — the target still
+                      fires normally when the move is in favour
+                    </li>
+                    <li>Only counts moves against the traded direction; a favourable 70-pt move never triggers it</li>
+                  </ul>
+                </li>
+                <li>
+                  <strong>4. End of day</strong>
                   <ul className="nf-live-rules-sublist">
                     <li>
                       <strong>3:25 PM IST</strong> → force square-off if still open
@@ -182,7 +207,7 @@ export default function NineFifteenPage() {
                   </ul>
                 </li>
                 <li>
-                  <strong>4. Exiting a split (multi-order) position</strong>
+                  <strong>5. Exiting a split (multi-order) position</strong>
                   <ul className="nf-live-rules-sublist">
                     <li>
                       All 9:16 split orders are the <strong>same strike + expiry</strong>, so Zerodha holds them as{" "}
@@ -214,9 +239,11 @@ export default function NineFifteenPage() {
               </ol>
               <p className="nf-live-rules-foot text-muted">
                 Example after 10:01: Nifty +20 from fill exits even if option P&amp;L is under +5%; or +5% P&amp;L
-                exits even if Nifty has not reached ±20. Same OR logic from 11:01 with ±15 / +3%. Split example: entered
-                75 lots as 25+25+25 at 9:16 → on target, exits as 25+25+25 SELL orders fired together, not one after
-                another.
+                exits even if Nifty has not reached ±20. Same OR logic from 11:01 with ±15 / +3%. Hard-exit example:
+                CE BUY filled with Nifty at 24,000 → after 12:01, Nifty at 23,930 (−70) squares off immediately even
+                though the +20/+25 target was never reached; a PE BUY does the same at 24,070 (+70). Split example:
+                entered 75 lots as 25+25+25 at 9:16 → on target, exits as 25+25+25 SELL orders fired together, not one
+                after another.
               </p>
             </div>
           </div>

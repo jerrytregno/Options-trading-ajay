@@ -30,6 +30,8 @@ import {
   getNineSixteenSpotPollMs,
   shouldExitNineSixteen,
   shouldExitOnPnlTarget,
+  shouldHardExitOnAdverseMove,
+  NINE_SIXTEEN_ADVERSE_EXIT_POINTS,
   type NineSixteenExitMode,
 } from "./nine-sixteen-logic.js";
 import { legLabel, type TradeLeg } from "../src/lib/trade-calculations.js";
@@ -1709,6 +1711,15 @@ async function checkAndMaybeExit(accessToken: string, _dateIst: string): Promise
   // Exit on whichever fires first: tiered index target OR option P&L % (not both required).
   const spot = lastSpot ?? 0;
   if (leg && entrySpot > 0 && spot > 0) {
+    if (shouldHardExitOnAdverseMove(spot, entrySpot, leg, NINE_SIXTEEN_ADVERSE_EXIT_POINTS)) {
+      const adverseMove = Math.abs(spot - entrySpot);
+      await squareOff(
+        accessToken,
+        `Hard exit · Nifty ${adverseMove.toFixed(2)} pts against ${legLabel(leg)} after 12:01 · spot ${spot.toFixed(2)} (from entry spot ${entrySpot.toFixed(2)})`,
+      );
+      return true;
+    }
+
     const indexTarget = activeIndexTargetPoints(exitMode);
     if (shouldExitNineSixteen(spot, entrySpot, leg, indexTarget)) {
       await squareOff(

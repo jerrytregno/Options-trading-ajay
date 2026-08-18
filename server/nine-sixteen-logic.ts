@@ -1,5 +1,5 @@
 import type { ParsedCandle } from "../src/lib/candles.js";
-import { getIndianMarketContext } from "../src/lib/market-time.js";
+import { getIndianMarketContext, getIstWeekdayShort } from "../src/lib/market-time.js";
 import type { TradeLeg } from "../src/lib/trade-calculations.js";
 import type { NineFifteenDirection } from "../src/types/nine-fifteen.js";
 
@@ -35,6 +35,11 @@ export const NINE_SIXTEEN_PNL_EARLY_EXIT_START_MINUTE = 10 * 60 + 1;
 export const NINE_SIXTEEN_PNL_EARLY_EXIT_END_MINUTE = 11 * 60;
 /** +3% P&L exit from 11:01 AM IST onward. */
 export const NINE_SIXTEEN_PNL_EXIT_START_MINUTE = 11 * 60 + 1;
+/** Tuesday only: flat +5% P&L target, armed from the 9:16 entry (no time tiers). */
+export const NINE_SIXTEEN_TUESDAY_PNL_TARGET_PCT = 5;
+/** From 12:01 PM IST — hard exit once Nifty runs this far against the traded direction. */
+export const NINE_SIXTEEN_ADVERSE_EXIT_POINTS = 70;
+export const NINE_SIXTEEN_ADVERSE_EXIT_START_MINUTE = 12 * 60 + 1;
 /** From 3:00 PM IST — exit if Nifty is within this many index points of the ±target level (unused in live bot). */
 export const NINE_SIXTEEN_NEAR_TARGET_EXIT_START_MINUTE = 15 * 60;
 export const NINE_SIXTEEN_NEAR_TARGET_MAX_DISTANCE = 50;
@@ -392,10 +397,11 @@ export function activeIndexTargetPoints(
 }
 
 export function getIndexExitScheduleLabel(mode: NineSixteenExitMode = "main"): string {
+  const adverse = `12:01+ hard −${NINE_SIXTEEN_ADVERSE_EXIT_POINTS} against`;
   if (mode === "near_miss") {
-    return `±${NINE_SIXTEEN_NEAR_MISS_INDEX_TARGET} · 10:01+ ±${NINE_SIXTEEN_NEAR_MISS_INDEX_TARGET_AFTER}`;
+    return `±${NINE_SIXTEEN_NEAR_MISS_INDEX_TARGET} · 10:01+ ±${NINE_SIXTEEN_NEAR_MISS_INDEX_TARGET_AFTER} · ${adverse}`;
   }
-  return `±${NINE_SIXTEEN_INDEX_TARGET} · 10:01+ ±${NINE_SIXTEEN_INDEX_TARGET_20} · 11:01+ ±${NINE_SIXTEEN_INDEX_TARGET_15}`;
+  return `±${NINE_SIXTEEN_INDEX_TARGET} · 10:01+ ±${NINE_SIXTEEN_INDEX_TARGET_20} · 11:01+ ±${NINE_SIXTEEN_INDEX_TARGET_15} · ${adverse}`;
 }
 
 /**
@@ -416,6 +422,29 @@ export function shouldExitNineSixteen(
 
 export function getNineSixteenPnlTargetPct(): number {
   return NINE_SIXTEEN_PNL_TARGET_PCT;
+}
+
+/** True from 12:01 PM IST — the adverse-move hard exit is armed. */
+export function isAdverseExitWindowActive(nowMs = Date.now()): boolean {
+  return istMinuteOfDay(nowMs) >= NINE_SIXTEEN_ADVERSE_EXIT_START_MINUTE;
+}
+
+/**
+ * From 12:01 PM IST — hard exit when Nifty has run `points` against the traded direction,
+ * measured from the entry spot. Overrides the ±20/±25 profit target, which only fires in favour.
+ */
+export function shouldHardExitOnAdverseMove(
+  spot: number,
+  entrySpot: number,
+  leg: TradeLeg,
+  points = NINE_SIXTEEN_ADVERSE_EXIT_POINTS,
+  nowMs = Date.now(),
+): boolean {
+  if (!isAdverseExitWindowActive(nowMs)) return false;
+  if (spot <= 0 || entrySpot <= 0) return false;
+  if (leg === "CE_BUY") return spot <= entrySpot - points;
+  if (leg === "PE_BUY") return spot >= entrySpot + points;
+  return false;
 }
 
 function istMinuteOfDay(nowMs = Date.now()): number {
@@ -443,8 +472,16 @@ export function isPnlLateExitWindowActive(nowMs = Date.now()): boolean {
   return istMinuteOfDay(nowMs) >= NINE_SIXTEEN_PNL_EXIT_START_MINUTE;
 }
 
-/** Any P&L % exit window (morning, early, or late). */
+/** Tuesday sessions run the flat +5% target instead of the tiered 10/5/3 schedule. */
+export function isTuesdayIst(nowMs = Date.now()): boolean {
+  return getIstWeekdayShort(new Date(nowMs)) === "Tue";
+}
+
+/** Any P&L % exit window (morning, early, or late; Tuesday is one window from entry). */
 export function isPnlExitWindowActive(nowMs = Date.now()): boolean {
+  if (isTuesdayIst(nowMs)) {
+    return istMinuteOfDay(nowMs) >= NINE_SIXTEEN_PNL_MORNING_EXIT_START_MINUTE;
+  }
   return (
     isPnlMorningExitWindowActive(nowMs) ||
     isPnlEarlyExitWindowActive(nowMs) ||
@@ -453,13 +490,21 @@ export function isPnlExitWindowActive(nowMs = Date.now()): boolean {
 }
 
 export function activePnlTargetPct(nowMs = Date.now()): number | null {
+  if (isTuesdayIst(nowMs)) {
+    return istMinuteOfDay(nowMs) >= NINE_SIXTEEN_PNL_MORNING_EXIT_START_MINUTE
+      ? NINE_SIXTEEN_TUESDAY_PNL_TARGET_PCT
+      : null;
+  }
   if (isPnlMorningExitWindowActive(nowMs)) return NINE_SIXTEEN_PNL_MORNING_TARGET_PCT;
   if (isPnlEarlyExitWindowActive(nowMs)) return NINE_SIXTEEN_PNL_EARLY_TARGET_PCT;
   if (isPnlLateExitWindowActive(nowMs)) return NINE_SIXTEEN_PNL_TARGET_PCT;
   return null;
 }
 
-export function getPnlExitScheduleLabel(): string {
+export function getPnlExitScheduleLabel(nowMs = Date.now()): string {
+  if (isTuesdayIst(nowMs)) {
+    return `Tue · +${NINE_SIXTEEN_TUESDAY_PNL_TARGET_PCT}% from entry`;
+  }
   return `9:16–10:00 +${NINE_SIXTEEN_PNL_MORNING_TARGET_PCT}% · 10:01–11:00 +${NINE_SIXTEEN_PNL_EARLY_TARGET_PCT}% · 11:01+ +${NINE_SIXTEEN_PNL_TARGET_PCT}%`;
 }
 

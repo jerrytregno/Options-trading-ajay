@@ -86,6 +86,11 @@ export function getIndianMarketContext(date = new Date()) {
   };
 }
 
+/** Short IST weekday name (`Mon`–`Sun`) for the NSE session date. */
+export function getIstWeekdayShort(date = new Date()): string {
+  return getIstParts(date).weekday;
+}
+
 /** Weekday name for an IST calendar date key `YYYY-MM-DD` (NSE session dates). */
 export function formatWeekdayFromDateKey(dateKey: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return "—";
