@@ -6,20 +6,18 @@ import {
   type ReactNode,
 } from "react";
 import {
-  createUserWithEmailAndPassword,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   type User,
 } from "firebase/auth";
 import { getFirebaseAuth, getMissingFirebaseEnvKeys } from "@/lib/firebase";
-import { authNotAllowedMessage, isAllowedAuthEmail } from "@/lib/auth-allowed";
+import { authFailedMessage, isAllowedAuthEmail } from "@/lib/auth-allowed";
 
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -61,19 +59,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = async (email: string, password: string) => {
     assertFirebaseReady();
-    const cred = await signInWithEmailAndPassword(getFirebaseAuth(), email, password);
-    const allowed = await enforceAllowedUser(cred.user);
-    if (!allowed) {
-      throw new Error(authNotAllowedMessage());
+    // Bad password, unknown account and unlisted account all surface the same message.
+    let allowed: User | null = null;
+    try {
+      const cred = await signInWithEmailAndPassword(getFirebaseAuth(), email, password);
+      allowed = await enforceAllowedUser(cred.user);
+    } catch {
+      throw new Error(authFailedMessage());
     }
-  };
-
-  const signUp = async (email: string, password: string) => {
-    assertFirebaseReady();
-    const cred = await createUserWithEmailAndPassword(getFirebaseAuth(), email, password);
-    const allowed = await enforceAllowedUser(cred.user);
     if (!allowed) {
-      throw new Error(authNotAllowedMessage());
+      throw new Error(authFailedMessage());
     }
   };
 
@@ -83,7 +78,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut }}>
+    <AuthContext.Provider value={{ user, loading, signIn, signOut }}>
       {children}
     </AuthContext.Provider>
   );

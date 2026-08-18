@@ -11,8 +11,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<LoginPage />} />
-      <Route path="/signup" element={<Navigate to="/" replace />} />
-      <Route path="/login" element={<Navigate to="/?tab=signin" replace />} />
+      <Route path="/login" element={<Navigate to="/" replace />} />
       <Route path="/dashboard" element={<Navigate to="/dashboard/nine-fifteen" replace />} />
       <Route path="/dashboard/nine-fifteen" element={<NineFifteenPage />} />
       <Route path="/dashboard/backtesting" element={<BacktestingPage />} />
