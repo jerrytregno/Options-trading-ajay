@@ -37,6 +37,10 @@ export const NINE_SIXTEEN_PNL_EARLY_EXIT_END_MINUTE = 11 * 60;
 export const NINE_SIXTEEN_PNL_EXIT_START_MINUTE = 11 * 60 + 1;
 /** Tuesday only: flat +5% P&L target, armed from the 9:16 entry (no time tiers). */
 export const NINE_SIXTEEN_TUESDAY_PNL_TARGET_PCT = 5;
+/** Tuesday only: flat ±10 index band from the 9:16 fill spot — replaces the main and near-miss tiers. */
+export const NINE_SIXTEEN_TUESDAY_INDEX_TARGET = 10;
+/** Tuesday only: the ±10 band may only exit when the position is this far in profit. */
+export const NINE_SIXTEEN_TUESDAY_INDEX_MIN_PROFIT_PCT = 3;
 /** From 12:01 PM IST — hard exit once Nifty runs this far against the traded direction. */
 export const NINE_SIXTEEN_ADVERSE_EXIT_POINTS = 70;
 export const NINE_SIXTEEN_ADVERSE_EXIT_START_MINUTE = 12 * 60 + 1;
@@ -378,6 +382,7 @@ export function isNear915EntryThreshold(change: number, minAbsDiff = NINE_SIXTEE
 
 /**
  * Live index exit target by IST clock + entry mode:
+ * · Tuesday: flat ±10 all session, both modes
  * · main: ±25 until 10:01 · ±20 from 10:01 · ±15 from 11:01
  * · near_miss: ±20 until 10:01 · ±10 from 10:01
  * (from Nifty spot at fill)
@@ -386,6 +391,7 @@ export function activeIndexTargetPoints(
   mode: NineSixteenExitMode = "main",
   nowMs = Date.now(),
 ): number {
+  if (isTuesdayIst(nowMs)) return NINE_SIXTEEN_TUESDAY_INDEX_TARGET;
   const mod = istMinuteOfDay(nowMs);
   if (mode === "near_miss") {
     if (mod >= NINE_SIXTEEN_NEAR_MISS_SWITCH_MINUTE) return NINE_SIXTEEN_NEAR_MISS_INDEX_TARGET_AFTER;
@@ -396,8 +402,14 @@ export function activeIndexTargetPoints(
   return NINE_SIXTEEN_INDEX_TARGET;
 }
 
-export function getIndexExitScheduleLabel(mode: NineSixteenExitMode = "main"): string {
+export function getIndexExitScheduleLabel(
+  mode: NineSixteenExitMode = "main",
+  nowMs = Date.now(),
+): string {
   const adverse = `12:01+ hard −${NINE_SIXTEEN_ADVERSE_EXIT_POINTS} against`;
+  if (isTuesdayIst(nowMs)) {
+    return `Tue · flat ±${NINE_SIXTEEN_TUESDAY_INDEX_TARGET} from fill (only if P&L ≥ +${NINE_SIXTEEN_TUESDAY_INDEX_MIN_PROFIT_PCT}%) · ${adverse}`;
+  }
   if (mode === "near_miss") {
     return `±${NINE_SIXTEEN_NEAR_MISS_INDEX_TARGET} · 10:01+ ±${NINE_SIXTEEN_NEAR_MISS_INDEX_TARGET_AFTER} · ${adverse}`;
   }
@@ -566,6 +578,23 @@ export function shouldExitOnPnlTarget(
   const target = computePnlTargetAmount(entryPrice, quantity, pct);
   if (target == null) return false;
   return unrealisedPnl >= target;
+}
+
+/**
+ * Tuesday only: the ±10 band must also clear this profit floor before it books an exit, so a band
+ * touch never closes at a loss. Unknown P&L (no option LTP yet) holds the position.
+ * The +5% P&L exit is separate and still fires on its own.
+ */
+export function meetsTuesdayIndexProfitFloor(
+  unrealisedPnl: number | null | undefined,
+  entryPrice: number,
+  quantity: number,
+  minPct = NINE_SIXTEEN_TUESDAY_INDEX_MIN_PROFIT_PCT,
+): boolean {
+  if (unrealisedPnl == null || unrealisedPnl <= 0) return false;
+  const floor = computePnlTargetAmount(entryPrice, quantity, minPct);
+  if (floor == null) return false;
+  return unrealisedPnl >= floor;
 }
 
 export function isPastNineSixteenForceExit(nowMs = Date.now()): boolean {

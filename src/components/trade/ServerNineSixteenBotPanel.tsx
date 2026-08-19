@@ -214,7 +214,7 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
           <div>
             <h2 className="pat-title">Server 9:16 bot (Lightsail)</h2>
             <p className="pat-sub">
-              Runs on the server — WS 9:00–16:00 · open@9:15:00–15 · close before 9:16 · enter@9:16 if |Δ| ≥ 11 · |Δ|≥15 main exits · 11≤|Δ|&lt;15 near-miss ±20→±10@10:01 · UP→CE, DOWN→PE
+              Runs on the server — WS 9:00–16:00 · open@9:15:00–15 · close before 9:16 · enter@9:16 if |Δ| ≥ 11 · |Δ|≥15 main band · 11≤|Δ|&lt;15 near-miss band · UP→CE, DOWN→PE
             </p>
           </div>
         </div>
@@ -557,10 +557,10 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
       )}
 
       <p className="pat-idle-note text-muted">
-        Entry: |Δ| ≥ 11 (skip under 11) · |Δ| ≥ 15 → main ±25/±20@10:01/±15@11:01 · 11 ≤ |Δ| &lt; 15 → near-miss
-        ±20 then ±10@10:01 · WS 9:00–16:00 · open@9:15:00–15 · close before 9:16 · order@9:16 · UP→CE, DOWN→PE
-        (ATM). Auto exit: WS ticks · {status.indexExitSchedule ?? `±${indexTargetPts} from fill spot`} · fallback
-        poll {spotPollSec}s if WS down · P&L{" "}
+        Entry: |Δ| ≥ 11 (skip under 11) · |Δ| ≥ 15 → main band · 11 ≤ |Δ| &lt; 15 → near-miss band · WS 9:00–16:00 ·
+        open@9:15:00–15 · close before 9:16 · order@9:16 · UP→CE, DOWN→PE (ATM). Auto exit: WS ticks ·{" "}
+        {status.indexExitSchedule ?? `±${indexTargetPts} from fill spot`} · fallback poll {spotPollSec}s if WS down ·
+        P&L{" "}
         {status.pnlExitSchedule ?? "9:16–10:00 +10% · 10:01–11:00 +5% · 11:01+ +3%"}.
         {!status.enabled && inPosition && <> Re-enable auto exit to let the bot square off at target.</>}
         {lastLiveAt && inPosition && (
