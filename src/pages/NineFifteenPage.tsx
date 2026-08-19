@@ -62,10 +62,6 @@ export default function NineFifteenPage() {
                     <li>
                       11 ≤ |Δ| &lt; 15 → same CE/PE · <strong>near-miss</strong> exits (±20 → ±10@10:01)
                     </li>
-                    <li>
-                      On <strong>Tuesdays</strong> the side is picked the same way, but both bands are replaced by a
-                      flat <strong>±10</strong> (see exit rule 1)
-                    </li>
                   </ul>
                 </li>
                 <li>
@@ -135,8 +131,7 @@ export default function NineFifteenPage() {
               <h3 className="nf-live-rules-heading">Exit (live) — whichever fires first</h3>
               <p className="nf-live-rules-lead text-muted">
                 On every Kite websocket tick (REST fallback if WS drops): exit if <strong>any</strong> of the index
-                rule, the option P&amp;L % rule, or the 12:01 adverse hard exit is met — not all required (on Tuesday
-                the ±10 band additionally needs P&amp;L ≥ +3%, so it never exits at a loss). Split entry
+                rule, the option P&amp;L % rule, or the 12:01 adverse hard exit is met — not all required. Split entry
                 orders are one single position, so <strong>all lots exit together</strong> (see step 5). Then EOD
                 force square-off. Exit checks start the moment the entry fills and are{" "}
                 <strong>never paused</strong> — the 9:16 speed-ups only pause position sync, not the exit rules.
@@ -150,33 +145,26 @@ export default function NineFifteenPage() {
                       premium
                     </li>
                     <li>
-                      <strong>Tuesday (all day):</strong> flat <strong>±10</strong> from the fill spot, live from{" "}
-                      <strong>9:16:00</strong> and unchanged all session — same for CE and PE, and it replaces both
-                      bands below (no 10:01 / 11:01 step-downs)
+                      <strong>Main</strong> (|Δ| ≥ 15): until <strong>10:01</strong> ±25 · from 10:01 ±20 · from 11:01
+                      ±15
                     </li>
                     <li>
-                      <strong>Tuesday profit floor:</strong> the ±10 band only exits when unrealised P&amp;L is{" "}
-                      <strong>≥ +3%</strong> of (entry premium × qty). If the band is touched while P&amp;L is negative,
-                      flat, or under +3%, the position is <strong>held</strong> — it keeps waiting for +3% at the band,
-                      the +5% target, the 12:01 adverse hard exit, or EOD. Mon and Wed–Fri bands have no such floor
+                      <strong>Near-miss</strong> (11 ≤ |Δ| &lt; 15): until <strong>10:01</strong> ±20 · from 10:01 ±10
                     </li>
-                    <li>
-                      <strong>Mon, Wed–Fri · Main</strong> (|Δ| ≥ 15): until <strong>10:01</strong> ±25 · from 10:01
-                      ±20 · from 11:01 ±15
-                    </li>
-                    <li>
-                      <strong>Mon, Wed–Fri · Near-miss</strong> (11 ≤ |Δ| &lt; 15): until <strong>10:01</strong> ±20 ·
-                      from 10:01 ±10
-                    </li>
+                    <li>Same bands every weekday, Tuesday included — only the P&amp;L % targets differ on Tuesday</li>
                   </ul>
                 </li>
                 <li>
                   <strong>2. Option P&amp;L %</strong> (independent of index — either exits the trade)
                   <ul className="nf-live-rules-sublist">
                     <li>
-                      <strong>Tuesday (all day):</strong> flat <strong>+5%</strong> of (entry premium × qty), armed{" "}
-                      <strong>from the 9:16 fill</strong> — the 10/5/3 tiers below do not apply, for both CE and PE.
-                      This exits on its own, whether or not the ±10 band was ever touched
+                      <strong>Tuesday · 9:16–10:00 IST:</strong> unrealised ≥ <strong>+5%</strong> of (entry premium ×
+                      qty)
+                    </li>
+                    <li>
+                      <strong>Tuesday · from 10:01 IST:</strong> unrealised ≥ <strong>+1%</strong> of (entry premium ×
+                      qty) — exits on the first tick that prints +1%, and holds this target for the rest of the session
+                      (no 11:01 step). The 10/5/3 tiers below do not apply on Tuesday
                     </li>
                     <li>
                       <strong>Mon, Wed–Fri · 9:16–10:00 IST:</strong> unrealised ≥ <strong>+10%</strong> of (entry
@@ -257,9 +245,9 @@ export default function NineFifteenPage() {
               <p className="nf-live-rules-foot text-muted">
                 Example after 10:01 (Mon, Wed–Fri): Nifty +20 from fill exits even if option P&amp;L is under +5%; or
                 +5% P&amp;L exits even if Nifty has not reached ±20. Same OR logic from 11:01 with ±15 / +3%. Tuesday
-                example: CE filled at ₹100 × 75 (cost ₹7,500) → Nifty +10 with P&amp;L +₹250 (+3.3%) exits; Nifty +10
-                with P&amp;L +₹100 (+1.3%) or −₹200 holds; P&amp;L +₹400 (+5.3%) exits even if Nifty never reached +10.
-                Hard-exit example:
+                example: CE filled at ₹100 × 75 (cost ₹7,500) → before 10:00 it needs +₹375 (+5%); from 10:01 the
+                target drops to +₹75 (+1%), so the first tick at +₹75 or better exits — the ±20 / ±15 bands still run
+                alongside it. Hard-exit example:
                 CE BUY filled with Nifty at 24,000 → after 12:01, Nifty at 23,930 (−70) squares off immediately even
                 though the +20/+25 target was never reached; a PE BUY does the same at 24,070 (+70). Split example:
                 entered 75 lots as 25+25+25 at 9:16 → on target, exits as 25+25+25 SELL orders fired together, not one

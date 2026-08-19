@@ -31,10 +31,7 @@ import {
   shouldExitNineSixteen,
   shouldExitOnPnlTarget,
   shouldHardExitOnAdverseMove,
-  meetsTuesdayIndexProfitFloor,
-  isTuesdayIst,
   NINE_SIXTEEN_ADVERSE_EXIT_POINTS,
-  NINE_SIXTEEN_TUESDAY_INDEX_MIN_PROFIT_PCT,
   type NineSixteenExitMode,
 } from "./nine-sixteen-logic.js";
 import { legLabel, type TradeLeg } from "../src/lib/trade-calculations.js";
@@ -204,8 +201,6 @@ let phase: NineSixteenBotPhase = enabled ? "waiting" : "off";
 let message = enabled ? "Server bot waiting for Kite websocket 9:15 ticks" : "Server bot disabled";
 let open915 = 0;
 let entrySpot = 0;
-/** One log per day when the Tuesday band is held back by the profit floor. */
-let tuesdayBandHoldLogged = false;
 let exitMode: NineSixteenExitMode = "main";
 let leg: TradeLeg | null = null;
 let tradingsymbol: string | null = null;
@@ -739,7 +734,6 @@ function finishDay(dateIst: string, note: string, type: NineSixteenBotStatus["lo
   entryPrice = 0;
   positionLotSize = 0;
   entrySpot = 0;
-  tuesdayBandHoldLogged = false;
   exitMode = "main";
   open915 = 0;
   leg = null;
@@ -1728,23 +1722,11 @@ async function checkAndMaybeExit(accessToken: string, _dateIst: string): Promise
 
     const indexTarget = activeIndexTargetPoints(exitMode);
     if (shouldExitNineSixteen(spot, entrySpot, leg, indexTarget)) {
-      // Tuesday: the band only books an exit in profit — otherwise hold and wait for +5% or EOD.
-      const profitFloorOk =
-        !isTuesdayIst() || meetsTuesdayIndexProfitFloor(unrealisedPnl, entryPrice, quantity);
-      if (profitFloorOk) {
-        await squareOff(
-          accessToken,
-          `Target hit · ±${indexTarget} · Nifty spot ${spot.toFixed(2)} (from entry spot ${entrySpot.toFixed(2)})`,
-        );
-        return true;
-      }
-      if (!tuesdayBandHoldLogged) {
-        tuesdayBandHoldLogged = true;
-        pushLog(
-          `Tue ±${indexTarget} band touched but P&L under +${NINE_SIXTEEN_TUESDAY_INDEX_MIN_PROFIT_PCT}% — holding (no exit at a loss)`,
-          "warning",
-        );
-      }
+      await squareOff(
+        accessToken,
+        `Target hit · ±${indexTarget} · Nifty spot ${spot.toFixed(2)} (from entry spot ${entrySpot.toFixed(2)})`,
+      );
+      return true;
     }
   }
 
@@ -1835,7 +1817,6 @@ async function mainLoop() {
       phase = "waiting";
       open915 = 0;
       entrySpot = 0;
-      tuesdayBandHoldLogged = false;
       exitMode = "main";
       leg = null;
       tradingsymbol = null;
