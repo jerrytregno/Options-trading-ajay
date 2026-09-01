@@ -47,11 +47,11 @@ export const NINE_SIXTEEN_TUESDAY_PNL_MORNING_TARGET_PCT = 5;
 export const NINE_SIXTEEN_TUESDAY_PNL_LATER_TARGET_PCT = 1;
 export const NINE_SIXTEEN_TUESDAY_PNL_SWITCH_MINUTE = 10 * 60 + 1;
 /**
- * From 9:55 AM IST on every day: hard exit when Nifty runs this far against the trade
- * direction, measured from the entry spot. Overrides the ±target wait.
+ * From 10:00 AM IST on every day: hard exit when Nifty runs this far against the trade
+ * direction, measured from the entry spot. Applies to both the 9:15 and 9:16 legs.
  */
 export const NINE_SIXTEEN_HARD_STOP_INDEX_POINTS = 30;
-export const NINE_SIXTEEN_HARD_STOP_START_MINUTE = 9 * 60 + 55;
+export const NINE_SIXTEEN_HARD_STOP_START_MINUTE = 10 * 60;
 /** From 3:00 PM IST — exit if Nifty is within this many index points of the ±target level (unused in live bot). */
 export const NINE_SIXTEEN_NEAR_TARGET_EXIT_START_MINUTE = 15 * 60;
 export const NINE_SIXTEEN_NEAR_TARGET_MAX_DISTANCE = 50;
@@ -614,13 +614,13 @@ export function getPnlExitScheduleLabel(nowMs = Date.now()): string {
   );
 }
 
-/** True from 9:55 AM IST — the ±30 adverse-move hard stop is scanning. */
+/** True from 10:00 AM IST — the ±30 adverse-move hard stop is scanning. */
 export function isHardStopWindowActive(nowMs = Date.now()): boolean {
   return istMinuteOfDay(nowMs) >= NINE_SIXTEEN_HARD_STOP_START_MINUTE;
 }
 
 /**
- * Hard exit from 9:55 AM IST when Nifty has run `stopPoints` against the planned direction,
+ * Hard exit from 10:00 AM IST when Nifty has run `stopPoints` against the planned direction,
  * measured from the entry spot: CE_BUY stops at entry − 30, PE_BUY at entry + 30.
  */
 export function shouldHardStopNineSixteen(
@@ -784,8 +784,8 @@ export function shouldExitOnTrailingPnl(lockedPct: number, pnlPct: number | null
  * 9:15 exit ladder
  *
  * Tighter and faster than the 9:16 one, because the trade is meant to be over inside the minute:
- * it arms at +3% instead of +5% and steps +2% instead of +5%, and it runs on option P&L alone —
- * no index target, no hard stop, and no pre-ladder loss stop.
+ * it arms at +3% instead of +5% and steps +2% instead of +5%, and it runs on option P&L plus the
+ * shared 10:00 IST ±30 Nifty hard stop from entry spot.
  * ------------------------------------------------------------------------------------------- */
 
 /** First rung. Nothing is locked until profit reaches this. */

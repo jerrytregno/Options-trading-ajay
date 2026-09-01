@@ -38,6 +38,12 @@ import {
   nineFifteenTargetPct,
   nineFifteenStopPct,
   getNineFifteenLadderLabel,
+  getHardStopScheduleLabel,
+  computeHardStopSpot,
+  shouldHardStopNineSixteen,
+  isHardStopWindowActive,
+  getHardStopStartLabel,
+  NINE_SIXTEEN_HARD_STOP_INDEX_POINTS,
   isReadyForNineFifteenPreResolve,
   isReadyForNineFifteenEntry,
   isPastNineFifteenEntryWindow,
@@ -1517,6 +1523,7 @@ async function finalizeEntryInPosition(
     "success",
   );
   pushLog(`P&L exit ${getPnlTrailScheduleLabel()}`, "info");
+  pushLog(getHardStopScheduleLabel(), "info");
   pushLog(
     optionInstrumentToken > 0
       ? `Exit websocket live · Nifty 50 + ${resolved.tradingsymbol}`
@@ -1854,6 +1861,7 @@ async function finalizeNineFifteenEntry(
     "success",
   );
   pushLog(getNineFifteenLadderLabel(), "info");
+  pushLog(getHardStopScheduleLabel(), "info");
   saveBotState(dateIst);
 }
 
@@ -2253,12 +2261,20 @@ async function refreshLiveQuotesInner(accessToken: string, dateIst: string) {
   saveBotState(dateIst);
 }
 
-/**
- * The 9:15 leg's exits: option P&L only.
- *
- * It deliberately ignores the index target and the 9:55 hard stop — those belong to the 9:16
- * trade, which is entered on a whole sealed candle and sized for a much longer hold.
- */
+async function maybeHardStopExit(accessToken: string, slotLabel: string): Promise<boolean> {
+  if (entrySpot <= 0 || lastSpot == null || lastSpot <= 0 || !leg) return false;
+  if (!shouldHardStopNineSixteen(lastSpot, entrySpot, leg)) return false;
+
+  const stopSpot = computeHardStopSpot(entrySpot, leg);
+  await squareOff(
+    accessToken,
+    `${slotLabel} hard stop at ${getHardStopStartLabel()} · Nifty ${lastSpot.toFixed(2)} is ` +
+      `${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} pts adverse from entry ${entrySpot.toFixed(2)} ` +
+      `(stop ${stopSpot.toFixed(2)})`,
+  );
+  return true;
+}
+
 async function checkAndMaybeExitNineFifteen(accessToken: string, dateIst: string): Promise<boolean> {
   // The main loop hands every pass to the position while one is open, so sealing the 9:15 close
   // has to happen here too — otherwise a leg held across 9:16:00 leaves the candle unrecorded.
@@ -2273,6 +2289,8 @@ async function checkAndMaybeExitNineFifteen(accessToken: string, dateIst: string
     await squareOff(accessToken, "End of day square-off");
     return true;
   }
+
+  if (await maybeHardStopExit(accessToken, "9:15")) return true;
 
   const legPnl = ownLegUnrealisedPnl(entryPrice, quantity, lastOptionPrice);
   const pnlPct = pnlPctOfEntryCost(legPnl, entryPrice, quantity);
@@ -2319,7 +2337,9 @@ async function checkAndMaybeExit(accessToken: string, _dateIst: string): Promise
     return true;
   }
 
-  // Trailing option P&L % only — no index target or hard stop.
+  if (await maybeHardStopExit(accessToken, "9:16")) return true;
+
+  // Trailing option P&L % — plus the 10:00 ±30 Nifty hard stop above.
   const legPnl = ownLegUnrealisedPnl(entryPrice, quantity, lastOptionPrice);
   const pnlPct = pnlPctOfEntryCost(legPnl, entryPrice, quantity);
   if (pnlPct == null) return false;
@@ -2888,10 +2908,11 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
     entrySpot: entrySpot > 0 ? entrySpot : null,
     exitMode: inTrade ? exitMode : null,
     indexExitSchedule: null,
-    hardStopSpot: null,
-    hardStopActive: false,
-    hardStopPoints: 0,
-    hardStopStartLabel: "",
+    hardStopSpot:
+      inTrade && entrySpot > 0 && leg ? computeHardStopSpot(entrySpot, leg) : null,
+    hardStopActive: inTrade && isHardStopWindowActive(),
+    hardStopPoints: NINE_SIXTEEN_HARD_STOP_INDEX_POINTS,
+    hardStopStartLabel: getHardStopStartLabel(),
     leg,
     tradingsymbol,
     targetSpot: null,

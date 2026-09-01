@@ -1,6 +1,5 @@
 /**
- * Manual sanity check for legacy 9:16 index / hard-stop helpers (no longer used live).
- * Live 9:16 exits are trailing option P&L only (+ check-916-trailing if added).
+ * Sanity check for 9:16 index / hard-stop helpers (hard stop is live on both 9:15 and 9:16 from 10:00).
  *
  * Run: npx tsx scripts/check-916-exit-rules.ts
  */
@@ -88,16 +87,16 @@ for (const [name, t, pnl, want] of pnlCases) {
   );
 }
 
-// Hard stop: ±30 from the fill spot, scanning only from 9:55 IST.
+// Hard stop: ±30 from the fill spot, scanning only from 10:00 IST.
 const cases: [string, number, "CE_BUY" | "PE_BUY", string, boolean][] = [
-  ["CE -29 @09:55", 23971, "CE_BUY", "09:55:00", false],
-  ["CE -30 @09:54", 23970, "CE_BUY", "09:54:59", false],
-  ["CE -30 @09:55", 23970, "CE_BUY", "09:55:00", true],
+  ["CE -29 @09:59", 23971, "CE_BUY", "09:59:59", false],
+  ["CE -30 @09:59", 23970, "CE_BUY", "09:59:59", false],
+  ["CE -30 @10:00", 23970, "CE_BUY", "10:00:00", true],
   ["CE -45 @10:30", 23955, "CE_BUY", "10:30:00", true],
   ["CE +30 @10:30", 24030, "CE_BUY", "10:30:00", false],
-  ["PE +30 @09:55", 24030, "PE_BUY", "09:55:00", true],
-  ["PE +29 @09:55", 24029, "PE_BUY", "09:55:00", false],
-  ["PE -30 @09:55", 23970, "PE_BUY", "09:55:00", false],
+  ["PE +30 @10:00", 24030, "PE_BUY", "10:00:00", true],
+  ["PE +29 @10:00", 24029, "PE_BUY", "10:00:00", false],
+  ["PE -30 @10:00", 23970, "PE_BUY", "10:00:00", false],
   ["CE -70 @14:00", 23930, "CE_BUY", "14:00:00", true],
 ];
 for (const [name, spot, leg, t, want] of cases) {

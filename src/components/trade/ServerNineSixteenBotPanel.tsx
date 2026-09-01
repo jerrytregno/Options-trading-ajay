@@ -628,7 +628,9 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
       <p className="pat-idle-note text-muted">
         <strong>9:15 trade</strong> (separate switch): the first Nifty tick from 9:15:00 is the open, and the
         last tick before 9:15:10 is read against it. Red → buy the ATM PE at market at 9:15:11; green or flat
-        → no trade. Exits are option P&amp;L only — no index target, no hard stop. Nothing locks until +
+        → no trade. Exits: option P&amp;L ladder plus a <strong>10:00 hard stop</strong> — if Nifty is{" "}
+        <strong>30 pts adverse</strong> from the entry spot (PE: spot ≥ entry + 30), the leg exits at
+        market. Nothing locks until +
         {nineFifteenArmPct}% prints, then every +{nineFifteenStepPct}% rung locks the stop there and moves the
         target one rung on (+{nineFifteenArmPct}→TP +{nineFifteenArmPct + nineFifteenStepPct}/SL +
         {nineFifteenArmPct} · +{nineFifteenArmPct + nineFifteenStepPct}→TP +
@@ -639,8 +641,10 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
         <strong>9:16 trade</strong>: red 9:15 candles only — a green close is skipped rather than bought as a
         CE. |Δ| ≥ 11 (skip under 11) · |Δ| ≥ 15 main band · 11–14 near-miss band (entry sizing only) · WS
         9:00–16:00 · open@9:15:00–15 · close before 9:16 · order@9:16 → PE (ATM). Skipped when the 9:15 leg
-        is still open at 9:16:00. Auto exit: trailing P&amp;L only — nothing locked until +{trailArmPct}% of
-        the premium paid, then each +{trailStepPct}% rung locks the stop and moves the target one rung higher
+        is still open at 9:16:00. Auto exit: trailing P&amp;L plus a <strong>10:00 hard stop</strong> — if
+        Nifty is <strong>30 pts adverse</strong> from the entry spot (PE: spot ≥ entry + 30; CE: spot ≤
+        entry − 30), the leg exits at market. Nothing locked until +{trailArmPct}% of the premium paid,
+        then each +{trailStepPct}% rung locks the stop and moves the target one rung higher
         (+{trailArmPct}→TP +{trailArmPct + trailStepPct}/SL +{trailArmPct} · +{trailArmPct + trailStepPct}→TP
         +{trailArmPct + 2 * trailStepPct}/SL +{trailArmPct + trailStepPct} · …). Hitting the target never
         exits — only slipping back below the locked rung does · 3:25 PM square-off if still open · WS tick

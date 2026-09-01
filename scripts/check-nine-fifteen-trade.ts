@@ -21,6 +21,9 @@ import {
   isReadyForNineFifteenEntry,
   isPastNineFifteenEntryWindow,
   isPastNineFifteenMinute,
+  shouldHardStopNineSixteen,
+  computeHardStopSpot,
+  getHardStopStartLabel,
 } from "../server/nine-sixteen-logic.js";
 
 let failures = 0;
@@ -169,6 +172,18 @@ check(
   decide915Entry(bar(24_800, 24_789)),
   { action: "enter", leg: "PE_BUY", exitMode: "near_miss" },
 );
+
+console.log("\n--- 10:00 hard stop (±30 from entry spot) ---");
+const entrySpot = 24_000;
+check("PE +30 @10:00 exits", shouldHardStopNineSixteen(24_030, entrySpot, "PE_BUY", undefined, ist(10, 0, 0)), true);
+check("PE +29 @10:00 holds", shouldHardStopNineSixteen(24_029, entrySpot, "PE_BUY", undefined, ist(10, 0, 0)), false);
+check("PE +30 @09:59 holds", shouldHardStopNineSixteen(24_030, entrySpot, "PE_BUY", undefined, ist(9, 59, 59)), false);
+check(
+  "PE stop level is entry + 30",
+  computeHardStopSpot(entrySpot, "PE_BUY"),
+  entrySpot + 30,
+);
+check("hard stop label", getHardStopStartLabel(), "10:00");
 
 console.log("\n--- both legs armed by default on a fresh load ---");
 {
