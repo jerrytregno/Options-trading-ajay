@@ -26,6 +26,7 @@ echo "==> npm run build"
 npm run build
 
 mkdir -p data
+rm -rf data/sensex-nine-fifteen-cache* data/sensex-nine-fifteen-cache-rows 2>/dev/null || true
 
 if pm2 describe "$PM2_NAME" >/dev/null 2>&1; then
   echo "==> pm2 restart $PM2_NAME"

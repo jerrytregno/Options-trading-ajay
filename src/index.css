@@ -278,6 +278,7 @@ button, input, select { font: inherit; }
 .spinner-sm { width: 1.5rem; height: 1.5rem; }
 .spinner-center { display: flex; align-items: center; justify-content: center; min-height: 10rem; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 0.8s linear infinite; }
 
 .grid-2 { display: grid; gap: 1.5rem; }
 .grid-3 { display: grid; gap: 1rem; }

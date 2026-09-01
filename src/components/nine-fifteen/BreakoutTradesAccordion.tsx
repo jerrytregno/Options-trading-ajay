@@ -5,6 +5,7 @@ import { formatWeekdayFromDateKey } from "@/lib/market-time";
 import { computeGapToTargetSeries } from "@/lib/breakout-target-gap";
 import { rsiAtBarIndex } from "@/lib/rsi";
 import { cn, formatNumber } from "@/lib/utils";
+import { useBacktestIndex } from "@/contexts/backtest-index-context";
 
 type MinuteCandle = {
   time: string;
@@ -42,14 +43,15 @@ function minutesFromIstLabel(label: string): number | null {
 
 function formatClosestToTargetLabel(
   approach: NonNullable<NineFifteenBreakoutTrade["closestToTarget"]>,
+  indexLabel: string,
 ): string {
   const time = approach.timeIst.slice(0, 8);
-  const nifty = formatNumber(approach.indexPrice, 2);
+  const spot = formatNumber(approach.indexPrice, 2);
   const target = formatNumber(approach.targetIndexPrice, 2);
   if (approach.gapToTargetPts <= 0) {
-    return `Nearest to target · ${time} IST · Nifty ${nifty} · target ±${approach.targetPoints} hit @ ${target}`;
+    return `Nearest to target · ${time} IST · ${indexLabel} ${spot} · target ±${approach.targetPoints} hit @ ${target}`;
   }
-  return `Nearest to target · ${time} IST · Nifty ${nifty} · ${formatNumber(approach.gapToTargetPts, 2)} pts from target ${target} (±${approach.targetPoints})`;
+  return `Nearest to target · ${time} IST · ${indexLabel} ${spot} · ${formatNumber(approach.gapToTargetPts, 2)} pts from target ${target} (±${approach.targetPoints})`;
 }
 
 function breakoutBandLabel(band: NineFifteenBreakoutTrade["band"]): string {
@@ -88,6 +90,7 @@ function BreakoutSessionMinuteChart({
   stopActiveFromIst: string;
   stopExitTimeIst?: string | null;
 }) {
+  const index = useBacktestIndex();
   const gradId = useId().replace(/:/g, "");
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const width = 920;
@@ -192,7 +195,7 @@ function BreakoutSessionMinuteChart({
       className="nf-day-chart-svg nf-day-chart-svg--rsi"
       viewBox={`0 0 ${width} ${height}`}
       role="img"
-      aria-label="Nifty 1-minute candles 9:15 to 15:30 with RSI"
+      aria-label={`${index.shortLabel} 1-minute candles 9:15 to 15:30 with RSI`}
       onMouseMove={handleChartMouseMove}
       onMouseLeave={() => setHoverIndex(null)}
     >
@@ -346,7 +349,7 @@ function BreakoutSessionMinuteChart({
             {istHmFromCandleTime(hoverCandle.time)} IST
           </text>
           <text x={8} y={28} className="nf-chart-hover-tip-text">
-            Nifty {formatNumber(hoverCandle.close, 2)}
+            {index.shortLabel} {formatNumber(hoverCandle.close, 2)}
           </text>
           <text
             x={8}
@@ -599,6 +602,7 @@ function BreakoutDayAccordionItem({
   trade: NineFifteenBreakoutTrade;
   kind: "missed-win" | "stopped-loss";
 }) {
+  const index = useBacktestIndex();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -611,9 +615,10 @@ function BreakoutDayAccordionItem({
     setError(null);
     void (async () => {
       try {
-        const res = await fetch(`/api/kite/nifty-session-minutes?date=${encodeURIComponent(trade.date)}`, {
-          credentials: "include",
-        });
+        const res = await fetch(
+          `/api/kite/index-session-minutes?date=${encodeURIComponent(trade.date)}&index=${index.key}`,
+          { credentials: "include" },
+        );
         const json = (await res.json()) as {
           data?: { candles?: MinuteCandle[] };
           error?: string;
@@ -679,7 +684,7 @@ function BreakoutDayAccordionItem({
               trade.closestToTarget.gapToTargetPts <= 0 ? "text-up" : "text-muted",
             )}
           >
-            {formatClosestToTargetLabel(trade.closestToTarget)}
+            {formatClosestToTargetLabel(trade.closestToTarget, index.shortLabel)}
           </span>
         )}
         {kind === "missed-win" && trade.targetHit && (
@@ -705,7 +710,7 @@ function BreakoutDayAccordionItem({
           {trade.closestToTarget ? (
             <>
               Nearest to profit target:{" "}
-              <strong>{trade.closestToTarget.timeIst}</strong> IST · Nifty{" "}
+              <strong>{trade.closestToTarget.timeIst}</strong> IST · {index.shortLabel}{" "}
               {formatNumber(trade.closestToTarget.indexPrice, 2)}
               {trade.closestToTarget.gapToTargetPts <= 0 ? (
                 <>
@@ -788,6 +793,8 @@ export function BreakoutTradesAccordion({
   stopActiveFromIst: string;
   stopActiveFromIstTuesday: string;
 }) {
+  const index = useBacktestIndex();
+  const sc = (points: number) => points * index.pointScale;
   if (trades.length === 0) return null;
 
   const stopLabel = stopActiveFromIst.slice(0, 5);
@@ -796,11 +803,12 @@ export function BreakoutTradesAccordion({
   return (
     <div className="nf-loss-accordion">
       <p className="nf-loss-accordion-hint text-muted text-sm">
-        Expand a day to load that session’s Nifty 50 1-min candles (9:15–15:30). Entry, initial target, and
-        stop levels are overlaid on the price chart; RSI(14) sits below it. A second chart shows how many index
-        points Nifty was from the entry profit target (±25 main · ±20 near-miss · ±10 on Tuesday) at each
-        minute (0 = target touched). Hover either chart for details. Blue vertical = stop active from{" "}
-        {stopLabel} IST ({stopTuesdayLabel} IST on Tuesday); red vertical = stop exit minute (when
+        Expand a day to load that session’s {index.label} 1-min candles (9:15–15:30). Entry, initial
+        target, and stop levels are overlaid on the price chart; RSI(14) sits below it. A second chart
+        shows how many index points {index.shortLabel} was from the entry profit target (±{sc(25)} main
+        · ±{sc(20)} near-miss · ±{sc(10)} on {index.expiryWeekday}) at each minute (0 = target touched).
+        Hover either chart for details. Blue vertical = stop active from {stopLabel} IST (
+        {stopTuesdayLabel} IST on {index.expiryWeekday}); red vertical = stop exit minute (when
         applicable).
       </p>
       {trades.map((trade) => (

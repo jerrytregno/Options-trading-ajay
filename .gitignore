@@ -56,3 +56,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# tsx compile cache (recreated on every `npx tsx scripts/...` run)
+/.tmp-tsx

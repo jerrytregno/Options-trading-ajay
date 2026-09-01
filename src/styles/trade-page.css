@@ -11,6 +11,61 @@
   margin-bottom: 1.25rem;
 }
 
+.trade-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.trade-net-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--foreground) 4%, transparent);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--foreground);
+  cursor: pointer;
+  user-select: none;
+}
+
+.trade-net-toggle input {
+  accent-color: var(--accent, #4ade80);
+  cursor: pointer;
+}
+
+.trade-charges-block {
+  grid-column: 1 / -1;
+  margin-top: 0.25rem;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--foreground) 3%, transparent);
+}
+
+.trade-charges-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.35rem 1rem;
+  margin-top: 0.5rem;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.trade-charges-grid > span:nth-child(odd) {
+  color: var(--muted);
+}
+
+.trade-charges-total {
+  font-weight: 700;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border);
+}
+
 .trade-page-error {
   margin: 0 0 1rem;
   font-size: 0.875rem;
@@ -40,6 +95,176 @@
   font-size: 1.375rem;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
+}
+
+.trade-summary-sub {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.trade-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.trade-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.trade-filter-chip:hover {
+  color: var(--foreground);
+  border-color: color-mix(in srgb, var(--foreground) 25%, transparent);
+}
+
+.trade-filter-chip.is-active {
+  color: var(--foreground);
+  border-color: color-mix(in srgb, var(--foreground) 40%, transparent);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+/* Separates the strategy chips from the date chips — they are two independent filters, not one
+   row of six mutually exclusive options. */
+.trade-filter-divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 0.15rem 0.35rem;
+  background: var(--border);
+}
+
+.trade-filter-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+
+.trade-source {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.trade-source--nine-sixteen {
+  color: #7dd3fc;
+  border-color: color-mix(in srgb, #7dd3fc 35%, transparent);
+  background: color-mix(in srgb, #7dd3fc 12%, transparent);
+}
+
+.trade-source--momentum-scalper {
+  color: #fcd34d;
+  border-color: color-mix(in srgb, #fcd34d 35%, transparent);
+  background: color-mix(in srgb, #fcd34d 12%, transparent);
+}
+
+.trade-broker-block {
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px dashed var(--border);
+}
+
+.trade-broker-block > .trade-detail-grid {
+  margin-top: 0.6rem;
+}
+
+.trade-broker-empty {
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px dashed var(--border);
+}
+
+.trade-fill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.75rem;
+}
+
+.trade-fill-line {
+  display: grid;
+  grid-template-columns: 3.25rem 5rem 1fr auto;
+  gap: 0.6rem;
+  align-items: center;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  padding: 0.3rem 0.55rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--foreground) 4%, transparent);
+}
+
+.trade-fill-side {
+  font-weight: 700;
+  font-size: 0.6875rem;
+  letter-spacing: 0.03em;
+}
+
+.trade-fill-side.is-buy {
+  color: var(--up, #4ade80);
+}
+
+.trade-fill-side.is-sell {
+  color: var(--down, #f87171);
+}
+
+.trade-fill-time,
+.trade-fill-order {
+  color: var(--muted);
+}
+
+.trade-fill-order {
+  font-size: 0.75rem;
+}
+
+.trade-delete-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px dashed var(--border);
+}
+
+.trade-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--down, #f87171);
+  border: 1px solid color-mix(in srgb, var(--down, #f87171) 35%, transparent);
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  background: transparent;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.trade-delete-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--down, #f87171) 12%, transparent);
+}
+
+.trade-delete-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .trade-empty {

@@ -8,6 +8,26 @@ export interface KiteProfile {
   order_types: string[];
 }
 
+/** Result of the most recent headless Zerodha login attempt on the server. */
+export interface KiteAutoLoginRun {
+  at: string;
+  ok: boolean;
+  attempts: number;
+  userId?: string;
+  error?: string;
+}
+
+export interface KiteAutoLoginStatus {
+  /** KITE_AUTO_LOGIN_ENABLED=1 on the server. */
+  enabled: boolean;
+  /** All credentials needed for a headless login are present. */
+  configured: boolean;
+  /** IST time of the daily refresh, e.g. "07:40". */
+  refreshAtIst: string;
+  running: boolean;
+  lastRun: KiteAutoLoginRun | null;
+}
+
 export interface OptionGreeks {
   delta: number;
   gamma: number;

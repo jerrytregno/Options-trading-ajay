@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Check, Copy, ExternalLink, Unplug, CheckCircle2, AlertCircle } from "lucide-react";
+import { Check, Copy, ExternalLink, Unplug, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useAuth } from "@/contexts/auth-context";
 import { useKite } from "@/contexts/kite-context";
@@ -9,12 +9,24 @@ import { KITE_IP_WHITELIST_HELP, type TradingIpInfo } from "@/lib/kite-trading-i
 
 export default function SettingsPage() {
   const { user } = useAuth();
-  const { connected, configured, profile, loginUrl, disconnect } = useKite();
+  const { connected, configured, profile, loginUrl, autoLogin, disconnect, autoLoginNow } = useKite();
   const [searchParams] = useSearchParams();
   const kiteStatus = searchParams.get("kite");
   const errorMessage = searchParams.get("message");
   const [tradingIpInfo, setTradingIpInfo] = useState<TradingIpInfo | null>(null);
   const [ipCopied, setIpCopied] = useState(false);
+  const [autoLoginBusy, setAutoLoginBusy] = useState(false);
+  const [autoLoginError, setAutoLoginError] = useState<string | null>(null);
+
+  const runAutoLogin = useCallback(async () => {
+    setAutoLoginBusy(true);
+    setAutoLoginError(null);
+    try {
+      setAutoLoginError(await autoLoginNow());
+    } finally {
+      setAutoLoginBusy(false);
+    }
+  }, [autoLoginNow]);
 
   const loadTradingIp = useCallback(async () => {
     try {
@@ -61,6 +73,88 @@ export default function SettingsPage() {
       )}
       {kiteStatus === "error" && errorMessage && (
         <div className="alert alert-error flex gap-2"><AlertCircle size={16} /> {decodeURIComponent(errorMessage)}</div>
+      )}
+
+      {autoLogin?.enabled && (
+        <div className={cn("card mb-4 trading-ip-card", !autoLogin.configured && "trading-ip-card-warn")}>
+          <div className="flex-between flex-wrap gap-3 mb-3">
+            <div>
+              <h3 className="card-title">Daily Kite login</h3>
+              <p className="card-desc">
+                Zerodha clears every access token by 07:30 IST. The server logs in again at{" "}
+                {autoLogin.refreshAtIst} IST so the 9:16 bot and this app are connected before the open.
+              </p>
+            </div>
+            <span
+              className={`badge ${
+                !autoLogin.configured
+                  ? "badge-danger"
+                  : autoLogin.running
+                    ? "badge-warning"
+                    : autoLogin.lastRun && !autoLogin.lastRun.ok
+                      ? "badge-danger"
+                      : "badge-success"
+              }`}
+            >
+              {!autoLogin.configured
+                ? "Credentials missing"
+                : autoLogin.running
+                  ? "Logging in…"
+                  : autoLogin.lastRun?.ok
+                    ? "Armed"
+                    : autoLogin.lastRun
+                      ? "Last run failed"
+                      : "Armed"}
+            </span>
+          </div>
+
+          {!autoLogin.configured && (
+            <div className="alert alert-error mb-3" style={{ fontSize: "0.8125rem" }}>
+              Set <code>KITE_USER_ID</code>, <code>KITE_PASSWORD</code> and <code>KITE_TOTP_SECRET</code>{" "}
+              in <code>.env</code> on the server, then restart it.{" "}
+              <strong>Zerodha app 2FA alone is not enough</strong> — enable{" "}
+              <strong>External TOTP</strong> in the Kite app (Profile → Manage → Enable external TOTP)
+              and copy the setup key into <code>KITE_TOTP_SECRET</code>.
+            </div>
+          )}
+          {autoLoginError && (
+            <div className="alert alert-error mb-3" style={{ fontSize: "0.8125rem" }}>
+              {autoLoginError}
+            </div>
+          )}
+
+          <div className="trading-ip-row">
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              disabled={autoLoginBusy || !autoLogin.configured}
+              onClick={() => void runAutoLogin()}
+            >
+              <RefreshCw size={14} className={autoLoginBusy ? "spin" : undefined} />
+              {autoLoginBusy ? "Refreshing…" : "Refresh token now"}
+            </button>
+          </div>
+
+          <p className="text-muted mt-3" style={{ fontSize: "0.8125rem" }}>
+            {autoLogin.lastRun ? (
+              autoLogin.lastRun.ok ? (
+                <>
+                  Last refresh succeeded at{" "}
+                  {new Date(autoLogin.lastRun.at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}
+                  {autoLogin.lastRun.userId ? ` as ${autoLogin.lastRun.userId}` : ""}.
+                </>
+              ) : (
+                <>
+                  Last refresh failed at{" "}
+                  {new Date(autoLogin.lastRun.at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} after{" "}
+                  {autoLogin.lastRun.attempts} attempts — {autoLogin.lastRun.error}
+                </>
+              )
+            ) : (
+              <>No refresh has run since the server started.</>
+            )}
+          </p>
+        </div>
       )}
 
       {tradingIpInfo && (

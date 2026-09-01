@@ -24,13 +24,19 @@ rsync -avz --delete --progress \
   --exclude node_modules \
   --exclude dist \
   --exclude .git \
+  --exclude .tmp-tsx \
   --exclude .env.local \
   --exclude .env \
   --exclude data/kite-session.json \
   --exclude data/bot-trade-logs.json \
+  --exclude 'data/*nine-fifteen-cache*' \
   --exclude data/nine-sixteen-capture.json \
   --exclude data/nine-sixteen-state.json \
   --exclude 'data/nine-sixteen-ran-*.json' \
+  --exclude data/momentum-scalper-state.json \
+  --exclude data/momentum-scalper-claim.json \
+  --exclude 'data/momentum-scalper-ran-*.json' \
+  --exclude data/broker-fills \
   --exclude data/ticks \
   . "$HOST:$REMOTE_DIR/"
 

@@ -20,16 +20,32 @@ import {
   msUntilNextEntryPhase,
   build915BarFromCaptured,
   computePnlTargetAmount,
-  getNineSixteenPnlTargetPct,
   getPnlExitStartLabel,
-  getPnlExitScheduleLabel,
-  activePnlTargetPct,
-  isPnlExitWindowActive,
-  activeIndexTargetPoints,
-  getIndexExitScheduleLabel,
+  getPnlTrailScheduleLabel,
+  pnlPctOfEntryCost,
+  nextLockedPnlPct,
+  trailingPnlTargetPct,
+  trailingPnlStopPct,
+  shouldExitOnTrailingPnl,
+  ownLegUnrealisedPnl,
+  ownPositionSync,
+  isPlausiblePnlPct,
+  NINE_SIXTEEN_PNL_TRAIL_ARM_PCT,
+  NINE_SIXTEEN_PNL_TRAIL_STEP_PCT,
   getNineSixteenSpotPollMs,
-  shouldExitNineSixteen,
-  shouldExitOnPnlTarget,
+  decideNineFifteenEntry,
+  evaluateNineFifteenExit,
+  nineFifteenTargetPct,
+  nineFifteenStopPct,
+  getNineFifteenLadderLabel,
+  isReadyForNineFifteenPreResolve,
+  isReadyForNineFifteenEntry,
+  isPastNineFifteenEntryWindow,
+  isPastNineFifteenSignalRead,
+  isPastNineFifteenMinute,
+  msUntilNineFifteenEntry,
+  NINE_FIFTEEN_TRAIL_ARM_PCT,
+  NINE_FIFTEEN_TRAIL_STEP_PCT,
   type NineSixteenExitMode,
 } from "./nine-sixteen-logic.js";
 import { legLabel, type TradeLeg } from "../src/lib/trade-calculations.js";
@@ -109,6 +125,9 @@ export interface RawTickRow {
   changePts: number | null;
 }
 
+/** The day runs up to two trades: the 9:15:11 leg, then the 9:16:00 one. */
+export type NineSixteenTradeSlot = "nine-fifteen" | "nine-sixteen";
+
 export type NineSixteenBotPhase =
   | "off"
   | "waiting"
@@ -134,6 +153,13 @@ export interface NineSixteenBotStatus {
   exitMode: NineSixteenExitMode | null;
   /** Human-readable index exit schedule for this trade. */
   indexExitSchedule: string | null;
+  /** Nifty level that triggers the adverse hard stop. */
+  hardStopSpot: number | null;
+  /** True once the clock is past the hard-stop start time and it is scanning. */
+  hardStopActive: boolean;
+  hardStopPoints: number;
+  /** IST time the hard stop starts scanning, e.g. "09:55". */
+  hardStopStartLabel: string;
   leg: TradeLeg | null;
   tradingsymbol: string | null;
   targetSpot: number | null;
@@ -144,12 +170,41 @@ export interface NineSixteenBotStatus {
   unrealisedPnl: number | null;
   /** Nifty index points still needed to hit exit target (0 = target touched). */
   niftyPointsToTarget: number | null;
-  /** Unrealised P&L needed to hit +% exit. */
+  /** Unrealised P&L needed to reach the next trailing take-profit rung. */
   pnlTargetAmount: number | null;
   pnlTargetPct: number;
   pnlExitActive: boolean;
   pnlExitStartLabel: string;
   pnlExitSchedule?: string;
+  /** Live P&L as a % of the premium paid at entry. */
+  pnlPct: number | null;
+  /** Highest +5% rung reached so far (0 until the ladder arms at +5%). */
+  pnlLockedPct: number;
+  /** Trailing stop rung — null until the ladder arms. */
+  pnlStopPct: number | null;
+  /** Unrealised P&L level that trips the trailing stop. */
+  pnlStopAmount: number | null;
+  /** True once profit has touched +5% and the trailing stop is live. */
+  pnlTrailArmed: boolean;
+  pnlTrailArmPct: number;
+  pnlTrailStepPct: number;
+  /** The 9:15 leg — armed, read and settled independently of the 9:16 one. */
+  nineFifteenEnabled: boolean;
+  /** Which of the day's two trades is open, or which one is next. */
+  tradeSlot: NineSixteenTradeSlot;
+  /** Last Nifty print before 9:15:10 — the read that decides red or green. */
+  nineFifteenMarkPrice: number | null;
+  nineFifteenMarkAt: string | null;
+  /** Mark minus the 9:15 open. Negative is red, which is the only side that trades. */
+  nineFifteenMarkChange: number | null;
+  /** True once the 9:15 attempt is over for the day, however it ended. */
+  nineFifteenSettled: boolean;
+  nineFifteenNote: string | null;
+  /** True when a 9:15 leg outlived its minute, which cancels the 9:16 trade for the day. */
+  nineFifteenBlocked916: boolean;
+  nineFifteenLadder: string;
+  nineFifteenTrailArmPct: number;
+  nineFifteenTrailStepPct: number;
   sessionConnected: boolean;
   sessionAgeHours: number | null;
   updatedAt: string;
@@ -184,6 +239,14 @@ interface PersistedBotState {
   entryPrice: number;
   /** Lot size of the open leg — split exits need it after a restart. */
   lotSize?: number;
+  /** Highest trailing P&L rung locked before the restart. */
+  lockedPnlPct?: number;
+  /** Contract this bot bought today, so a restart does not adopt another bot's leg. */
+  ownedSymbol?: string;
+  /** Which of the day's two trades this leg is, so the right exit ladder resumes. */
+  tradeSlot?: NineSixteenTradeSlot;
+  /** True once the 9:15 attempt is over, so a restart does not re-fire it. */
+  nineFifteenSettled?: boolean;
 }
 
 interface PersistedCaptureState {
@@ -194,14 +257,44 @@ interface PersistedCaptureState {
   low: number | null;
 }
 
-let enabled = process.env.NINE_SIXTEEN_BOT_ENABLED === "1";
-let phase: NineSixteenBotPhase = enabled ? "waiting" : "off";
-let message = enabled ? "Server bot waiting for Kite websocket 9:15 ticks" : "Server bot disabled";
+/** 9:16 entries are armed on startup; disable in the UI if you only want the websocket monitor. */
+let enabled = true;
+/**
+ * The 9:15 leg is armed on startup alongside 9:16. Each can be turned off independently in the UI.
+ */
+let nineFifteenEnabled = true;
+/** Which of the day's two trades the open position belongs to. */
+let tradeSlot: NineSixteenTradeSlot = "nine-sixteen";
+/** Sealed from the last tick strictly before 9:15:10 — the read that decides red or green. */
+let nineFifteenMarkPrice: number | null = null;
+let nineFifteenMarkAtLabel: string | null = null;
+/** Set once the 9:15 attempt is over — traded, skipped or failed — so it runs at most once a day. */
+let nineFifteenSettled = false;
+/** Short description of how the 9:15 attempt went, for the panel. */
+let nineFifteenNote: string | null = null;
+/** True once a 9:15 leg has been held past 9:16:00 — the 9:16 trade stands down for the day. */
+let nineFifteenOverranMinute = false;
+let nineFifteenBurstInFlight = false;
+let nineFifteenTimer: ReturnType<typeof setTimeout> | null = null;
+let nineFifteenTimerDate: string | null = null;
+/** The trading day the 9:15 fields above belong to. */
+let nineFifteenDate: string | null = null;
+let monitorLoopStarted = false;
+let phase: NineSixteenBotPhase = "waiting";
+let message =
+  enabled || nineFifteenEnabled
+    ? "Server bot waiting for Kite websocket 9:15 ticks"
+    : "9:16 trading disabled — websocket monitor active";
 let open915 = 0;
 let entrySpot = 0;
 let exitMode: NineSixteenExitMode = "main";
 let leg: TradeLeg | null = null;
 let tradingsymbol: string | null = null;
+/**
+ * Contract this bot actually placed BUY orders in today. Momentum scalper trades the same ATM
+ * strikes, so this — not "an open MIS leg exists" — is the only proof a position is ours.
+ */
+let ownedSymbol: string | null = null;
 let quantity = 0;
 let entryPrice = 0;
 /** Lot size of the open Nifty MIS leg (for split exit sizing). */
@@ -209,6 +302,8 @@ let positionLotSize = 0;
 let lastSpot: number | null = null;
 let lastOptionPrice: number | null = null;
 let unrealisedPnl: number | null = null;
+/** Highest +5% P&L rung locked by the trailing ladder (0 = not armed yet). */
+let lockedPnlPct = 0;
 let capturedOpen915: number | null = null;
 let capturedClose915: number | null = null;
 let capturedHigh915: number | null = null;
@@ -235,6 +330,11 @@ let prewarmDoneDate: string | null = null;
 let prewarmInFlight = false;
 let lastPrewarmAttemptAt = 0;
 const PREWARM_RETRY_MS = 60_000;
+
+/** ATM PE resolved at 9:15:05, so the 9:15:11 order makes no REST call of its own. */
+let nineFifteenPreResolvedPe: ResolvedAtmOption | null = null;
+let nineFifteenPreResolvedDate: string | null = null;
+let nineFifteenPreResolveInFlight = false;
 
 /** ATM CE/PE resolved at 9:15:58 from the live websocket spot (zero REST at 9:16:00). */
 let preResolvedDate: string | null = null;
@@ -465,6 +565,10 @@ function saveBotState(dateIst: string) {
     quantity,
     entryPrice,
     lotSize: positionLotSize > 0 ? positionLotSize : undefined,
+    lockedPnlPct: lockedPnlPct > 0 ? lockedPnlPct : undefined,
+    ownedSymbol: ownedSymbol ?? undefined,
+    tradeSlot,
+    nineFifteenSettled: nineFifteenSettled || undefined,
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(payload, null, 2));
 }
@@ -484,7 +588,14 @@ function loadBotState(dateIst: string) {
     quantity = parsed.quantity;
     entryPrice = parsed.entryPrice;
     positionLotSize = parsed.lotSize ?? 0;
-    message = `In position · exit ${getIndexExitScheduleLabel(exitMode)} from ${entrySpot > 0 ? entrySpot.toFixed(2) : "—"}`;
+    lockedPnlPct = parsed.lockedPnlPct ?? 0;
+    ownedSymbol = parsed.ownedSymbol ?? parsed.tradingsymbol;
+    tradeSlot = parsed.tradeSlot ?? "nine-sixteen";
+    nineFifteenSettled = parsed.nineFifteenSettled ?? tradeSlot === "nine-fifteen";
+    message =
+      tradeSlot === "nine-fifteen"
+        ? `In 9:15 position · ${getNineFifteenLadderLabel()}`
+        : `In position · P&L trail ${getPnlTrailScheduleLabel()}`;
   } catch {
     /* ignore corrupt state */
   }
@@ -524,15 +635,39 @@ async function reconcilePositionWithKite(accessToken: string, dateIst: string) {
   }
 }
 
+/**
+ * True only for a position this bot actually opened. Momentum scalper trades the same ATM
+ * contracts, so an open MIS leg in our symbol is not automatically ours — claiming it made both
+ * bots manage (and square off) the same lots.
+ */
+function isOwnPosition(symbol: string): boolean {
+  return ownedSymbol != null && symbol === ownedSymbol;
+}
+
+let warnedForeignPosition = "";
+
 async function reconcilePositionWithKiteInner(accessToken: string, dateIst: string) {
   const open = await findOpenNiftyMisOption(accessToken);
 
+  if (open && !isOwnPosition(open.tradingsymbol)) {
+    // Someone else's leg (momentum scalper or a manual trade) — leave it completely alone.
+    if (warnedForeignPosition !== open.tradingsymbol) {
+      warnedForeignPosition = open.tradingsymbol;
+      pushLog(
+        `Ignoring ${open.tradingsymbol} · ${open.quantity} qty — not opened by the 9:16 bot`,
+        "info",
+      );
+    }
+    return;
+  }
+
   if (open) {
     tradingsymbol = open.tradingsymbol;
-    quantity = open.quantity;
-    entryPrice = open.average_price;
+    // Never take the broker's aggregate quantity — another bot may hold lots in this contract.
+    if (quantity <= 0) quantity = open.quantity;
+    if (entryPrice <= 0) entryPrice = open.average_price;
     lastOptionPrice = open.last_price;
-    unrealisedPnl = open.unrealised ?? open.pnl;
+    unrealisedPnl = ownLegUnrealisedPnl(entryPrice, quantity, open.last_price);
     leg = open.tradingsymbol.endsWith("PE") ? "PE_BUY" : "CE_BUY";
     phase = "in_position";
 
@@ -552,7 +687,7 @@ async function reconcilePositionWithKiteInner(accessToken: string, dateIst: stri
       }
     }
 
-    message = `In position · exit ${getIndexExitScheduleLabel(exitMode)} from ${entrySpot > 0 ? entrySpot.toFixed(2) : "pending"}`;
+    message = `In position · P&L trail ${getPnlTrailScheduleLabel()}`;
     saveBotState(dateIst);
     return;
   }
@@ -659,9 +794,7 @@ function hasRanToday(dateIst: string): boolean {
 }
 
 function computeTargetSpot(): number | null {
-  if (entrySpot <= 0 || !leg) return null;
-  const pts = activeIndexTargetPoints(exitMode);
-  return leg === "CE_BUY" ? entrySpot + pts : entrySpot - pts;
+  return null;
 }
 
 function sessionLogsCopy() {
@@ -685,10 +818,13 @@ async function persistTradeLog(
   const close =
     capturedClose915 != null && capturedClose915 > 0 ? capturedClose915 : null;
   const change = open != null && close != null ? close - open : null;
+  // Two trades can now land on the same day, and both buy the ATM PE — so the day's session-level
+  // outcomes are keyed by slot as well as status, or the second would overwrite the first.
   const id =
     status === "closed" && tradingsymbol
       ? makeBotTradeLogId(dateIst, tradingsymbol)
-      : makeSessionOutcomeLogId(dateIst, status);
+      : makeSessionOutcomeLogId(dateIst, `${tradeSlot}-${status}`);
+  const slotNote = tradeSlot === "nine-fifteen" ? `[9:15] ${note}` : note;
 
   try {
     await appendBotTradeLog({
@@ -700,8 +836,10 @@ async function persistTradeLog(
       tradingsymbol,
       quantity: quantity > 0 ? quantity : null,
       open915: open,
-      close915: close,
-      change915: change,
+      // The 9:15 leg is entered inside its own candle, so that candle has no close yet. Booking
+      // one would record a bar the trade was never taken on.
+      close915: tradeSlot === "nine-fifteen" ? null : close,
+      change915: tradeSlot === "nine-fifteen" ? null : change,
       entrySpot: entrySpot > 0 ? entrySpot : null,
       targetSpot: computeTargetSpot(),
       entryPrice: entryPrice > 0 ? entryPrice : null,
@@ -709,7 +847,7 @@ async function persistTradeLog(
       exitSpot: extra?.exitSpot ?? lastSpot,
       pnl: extra?.pnl ?? unrealisedPnl,
       exitReason: extra?.exitReason ?? (status === "skipped" || status === "no_entry" ? note : null),
-      message: note,
+      message: slotNote,
       logs: sessionLogsCopy(),
       createdAt: new Date().toISOString(),
       closedAt,
@@ -723,11 +861,17 @@ async function persistTradeLog(
   }
 }
 
-function finishDay(dateIst: string, note: string, type: NineSixteenBotStatus["logs"][number]["type"] = "info") {
+function finishDay(
+  dateIst: string,
+  note: string,
+  type: NineSixteenBotStatus["logs"][number]["type"] = "info",
+) {
   markRanToday(dateIst);
   phase = "done";
   message = note;
+  tradeSlot = "nine-sixteen";
   tradingsymbol = null;
+  ownedSymbol = null;
   quantity = 0;
   entryPrice = 0;
   positionLotSize = 0;
@@ -738,8 +882,10 @@ function finishDay(dateIst: string, note: string, type: NineSixteenBotStatus["lo
   lastSpot = null;
   lastOptionPrice = null;
   unrealisedPnl = null;
+  lockedPnlPct = 0;
   lastQuoteRefreshAt = 0;
   lastPositionSyncAt = 0;
+  warnedForeignPosition = "";
   clearCaptures(dateIst);
   try {
     if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
@@ -819,6 +965,12 @@ function handle915CaptureTick(tick: NiftyTick, dateIst: string) {
   const price = tick.lastPrice;
   if (!isIn915CloseTickWindow(tick.receivedAtMs)) return;
 
+  // Seal the ten-second read before this tick overwrites the running "last tick" — the read is
+  // the last print strictly before 9:15:10, so a tick landing at 9:15:10.4 must not become it.
+  if (isPastNineFifteenSignalRead(tick.receivedAtMs)) {
+    sealNineFifteenMark();
+  }
+
   lastTickBeforeClose = price;
   closeTickAtLabel = istClockLabel(tick.receivedAtMs);
   tickCount915 += 1;
@@ -850,7 +1002,9 @@ function handleBotTick(tick: NiftyTick) {
     secondHighSpot = secondHighSpot == null ? tick.lastPrice : Math.max(secondHighSpot, tick.lastPrice);
     secondLowSpot = secondLowSpot == null ? tick.lastPrice : Math.min(secondLowSpot, tick.lastPrice);
     recordRawTick(tick, "nifty");
-    if (phase !== "in_position" && phase !== "exiting") {
+    // The 9:15 leg trades inside the very candle it is reading, so capture keeps running while it
+    // is open — the 9:16 decision needs that candle's close either way.
+    if (tradeSlot === "nine-fifteen" || (phase !== "in_position" && phase !== "exiting")) {
       handle915CaptureTick(tick, dateIst);
     }
   }
@@ -872,6 +1026,28 @@ function handleBotTick(tick: NiftyTick) {
       );
     });
   }
+}
+
+/**
+ * Freeze the 9:15:10 read.
+ *
+ * Called from the tick handler and again from the 9:15:11 timer, because a minute quiet enough to
+ * print nothing after 9:15:10 would otherwise never seal one.
+ */
+function sealNineFifteenMark() {
+  if (nineFifteenMarkPrice != null) return;
+  if (!isPastNineFifteenSignalRead()) return;
+  if (lastTickBeforeClose == null || lastTickBeforeClose <= 0) return;
+  if (capturedOpen915 == null || capturedOpen915 <= 0) return;
+
+  nineFifteenMarkPrice = lastTickBeforeClose;
+  nineFifteenMarkAtLabel = closeTickAtLabel;
+  const change = nineFifteenMarkPrice - capturedOpen915;
+  pushLog(
+    `9:15:10 read · ${nineFifteenMarkPrice.toFixed(2)} vs open ${capturedOpen915.toFixed(2)} · ` +
+      `Δ ${change >= 0 ? "+" : ""}${change.toFixed(2)} (${change < 0 ? "red" : change > 0 ? "green" : "flat"})`,
+    change < 0 ? "success" : "info",
+  );
 }
 
 function seal915CloseFromTicks(dateIst: string) {
@@ -1043,6 +1219,40 @@ function maintainEntryReadiness(accessToken: string, dateIst: string) {
 }
 
 /**
+ * Resolve the ATM PE at 9:15:05, six seconds before the 9:15 order can go out.
+ *
+ * Only the put is resolved: the 9:15 trade has no long side, so warming the call would spend a
+ * chain lookup on a leg that can never be bought.
+ */
+async function preResolveNineFifteenPe(accessToken: string, dateIst: string) {
+  if (nineFifteenPreResolvedDate === dateIst || nineFifteenPreResolveInFlight) return;
+  const spot = lastSpot;
+  if (spot == null || spot <= 0) return;
+
+  nineFifteenPreResolveInFlight = true;
+  try {
+    void assertKiteEgressReady().catch(() => {
+      /* the entry re-checks and surfaces the real error */
+    });
+    const pe = await resolveAtmNiftyOption(accessToken, "PE_BUY", { spotPrice: spot });
+    if (!pe) {
+      pushLog("9:15 ATM PE pre-resolve incomplete · 9:15:11 will resolve live", "warning");
+      return;
+    }
+    nineFifteenPreResolvedPe = pe;
+    nineFifteenPreResolvedDate = dateIst;
+    pushLog(`9:15 ATM PE armed @ spot ${spot.toFixed(2)} · ${pe.tradingsymbol}`, "info");
+  } catch (err) {
+    pushLog(
+      `9:15 ATM PE pre-resolve failed · ${err instanceof Error ? err.message : "unknown"}`,
+      "warning",
+    );
+  } finally {
+    nineFifteenPreResolveInFlight = false;
+  }
+}
+
+/**
  * Cached route first — pre-warmed at 9:00 and refilled at 9:15:58, so this is normally free.
  * A cached "blocked" verdict lives 45s, longer than the whole entry window, so re-probe before
  * giving up in case the outbound IP just changed or recovered.
@@ -1191,19 +1401,75 @@ function weightedAverageFillPrice(
   return qty > 0 ? notional / qty : 0;
 }
 
-async function syncEntryFromMisPosition(
+/**
+ * Book the entry from this bot's own fills. The broker's net MIS position for the contract is
+ * deliberately not used — momentum scalper can hold lots in the same symbol, and inheriting its
+ * quantity made both bots manage (and square off) each other's legs.
+ */
+function applyOwnEntryFills(
+  symbol: string,
+  lotSize: number,
+  fills: { average_price: number; filled_quantity: number }[],
+): boolean {
+  const filledQty = fills.reduce(
+    (sum, fill) => sum + (fill.filled_quantity > 0 ? fill.filled_quantity : 0),
+    0,
+  );
+  const avgPrice = weightedAverageFillPrice(fills);
+  if (filledQty <= 0 || avgPrice <= 0) return false;
+
+  // Top-up rounds add to the leg we already hold rather than replacing it.
+  const priorQty = tradingsymbol === symbol ? quantity : 0;
+  const priorPrice = priorQty > 0 ? entryPrice : 0;
+
+  positionLotSize = lotSize;
+  tradingsymbol = symbol;
+  quantity = priorQty + filledQty;
+  entryPrice =
+    priorQty > 0 && priorPrice > 0
+      ? (priorPrice * priorQty + avgPrice * filledQty) / (priorQty + filledQty)
+      : avgPrice;
+  // Seed the mark at cost so P&L reads 0 until the first live tick, never a stale price.
+  lastOptionPrice = entryPrice;
+  unrealisedPnl = 0;
+  return true;
+}
+
+/**
+ * Fold a broker position read into our own book without inheriting anyone else's lots.
+ *
+ * `pos.quantity` is the net across every bot holding the contract, and `pos.average_price` is
+ * blended over all of the day's buys in that symbol — including round trips already closed. Taking
+ * either at face value booked an entry price this bot never paid (on 2026-08-25 it recorded 29.58,
+ * the blend of its own closed 6305 @ 39.17 and the scalper's open 8385 @ 22.37) and fed the
+ * trailing ladder a percentage computed from lots it did not own.
+ */
+function applyOwnPositionSync(pos: { quantity: number; average_price: number }) {
+  const next = ownPositionSync({ quantity, entryPrice }, pos);
+  quantity = next.quantity;
+  entryPrice = next.entryPrice;
+}
+
+/**
+ * Recovery-only sync: used when this bot placed orders but lost track of the fills (crash or a
+ * failed order lookup). Guarded by {@link isOwnPosition} so it can never claim a foreign leg.
+ */
+async function syncOwnEntryFromMisPosition(
   accessToken: string,
   symbol: string,
   lotSize: number,
 ): Promise<boolean> {
+  if (!isOwnPosition(symbol)) return false;
   const filled = await fetchMisPosition(accessToken, symbol, "MIS");
   if (!filled || filled.quantity <= 0 || filled.average_price <= 0) return false;
   positionLotSize = lotSize;
   tradingsymbol = symbol;
-  quantity = filled.quantity;
-  entryPrice = filled.average_price;
+  // Own fills are gone, so the broker is all we have — but if we still know our own quantity it
+  // caps what we adopt, and a good entry price is never replaced by the broker's daily blend.
+  quantity = quantity > 0 ? Math.min(quantity, filled.quantity) : filled.quantity;
+  if (entryPrice <= 0) entryPrice = filled.average_price;
   lastOptionPrice = filled.last_price;
-  unrealisedPnl = filled.unrealised ?? filled.pnl;
+  unrealisedPnl = ownLegUnrealisedPnl(entryPrice, quantity, filled.last_price);
   return true;
 }
 
@@ -1229,7 +1495,7 @@ async function finalizeEntryInPosition(
   }
 
   if (entrySpot <= 0) {
-    throw new Error("Nifty spot unavailable at entry — cannot set index exit from Nifty spot at 9:16:00");
+    pushLog("Nifty spot unavailable at entry — P&L trail exits only", "warning");
   }
 
   optionInstrumentToken =
@@ -1243,11 +1509,14 @@ async function finalizeEntryInPosition(
   }
 
   phase = "in_position";
-  message = `In position · WS exit ${getIndexExitScheduleLabel(exitMode)} from ${entrySpot.toFixed(2)} · P&L ${getPnlExitScheduleLabel()}`;
+  message = `In position · P&L trail ${getPnlTrailScheduleLabel()}`;
   pushLog(
-    `Entry filled on attempt ${attempt} · ${splitLabel} · ${quantity} qty @ ₹${entryPrice.toFixed(2)} · Nifty spot ${entrySpot.toFixed(2)} · index exit ${getIndexExitScheduleLabel(exitMode)} (${exitMode})`,
+    `Entry filled on attempt ${attempt} · ${splitLabel} · ${quantity} qty @ ₹${entryPrice.toFixed(2)}` +
+      (entrySpot > 0 ? ` · Nifty spot ${entrySpot.toFixed(2)}` : "") +
+      ` · ${exitMode} band (entry only)`,
     "success",
   );
+  pushLog(`P&L exit ${getPnlTrailScheduleLabel()}`, "info");
   pushLog(
     optionInstrumentToken > 0
       ? `Exit websocket live · Nifty 50 + ${resolved.tradingsymbol}`
@@ -1264,9 +1533,13 @@ async function squareOffAllSplitOrders(
   symbol: string,
   lotSize: number,
   round: number,
+  ownRemainingQty: number,
 ): Promise<{ average_price: number; filled_quantity: number }[]> {
-  const openQty = await fetchNetQty(accessToken, symbol);
-  if (openQty <= 0) return [];
+  const brokerQty = await fetchNetQty(accessToken, symbol);
+  if (brokerQty <= 0 || ownRemainingQty <= 0) return [];
+
+  // Momentum scalper may hold lots in this same contract — only ever sell our own.
+  const openQty = Math.min(brokerQty, ownRemainingQty);
 
   const working = round > 1 ? await pendingOrderQuantity(accessToken, symbol, "SELL") : 0;
   const qtyToSell = openQty - working;
@@ -1313,11 +1586,56 @@ async function squareOff(accessToken: string, reason: string) {
   }
 }
 
+/**
+ * Wrap up a closed trade.
+ *
+ * The 9:16 leg ends the day with it. The 9:15 leg only clears the decks: the 9:16 decision is
+ * still ahead, so the day is not marked as run and the 9:15 open/close captures it depends on
+ * are left untouched.
+ */
+function concludeTrade(
+  dateIst: string,
+  note: string,
+  type: NineSixteenBotStatus["logs"][number]["type"],
+) {
+  if (tradeSlot !== "nine-fifteen") {
+    finishDay(dateIst, note, type);
+    return;
+  }
+
+  pushLog(note, type);
+  nineFifteenSettled = true;
+  nineFifteenNote = note;
+  // Squaring off in "exiting" skips the exit checks, so this is the other place the overrun can
+  // be noticed: a leg that lived past 9:16:00 takes the 9:16 trade down with it.
+  if (isPastNineFifteenMinute()) nineFifteenOverranMinute = true;
+  tradeSlot = "nine-sixteen";
+  phase = "waiting";
+  tradingsymbol = null;
+  ownedSymbol = null;
+  quantity = 0;
+  entryPrice = 0;
+  positionLotSize = 0;
+  entrySpot = 0;
+  exitMode = "main";
+  leg = null;
+  lastOptionPrice = null;
+  unrealisedPnl = null;
+  lockedPnlPct = 0;
+  lastQuoteRefreshAt = 0;
+  lastPositionSyncAt = 0;
+  warnedForeignPosition = "";
+  optionInstrumentToken = 0;
+  if (niftyInstrumentToken > 0) setBotTickerInstruments([niftyInstrumentToken]);
+  saveBotState(dateIst);
+  message = `${note} · waiting for the 9:16:00 decision`;
+}
+
 async function squareOffInner(accessToken: string, reason: string) {
   const dateIst = getIndianMarketContext().dateIST;
   if (!tradingsymbol || quantity <= 0) {
     await persistTradeLog(dateIst, "closed", reason, { exitReason: reason, pnl: unrealisedPnl });
-    finishDay(dateIst, reason, "success");
+    concludeTrade(dateIst, reason, "success");
     return;
   }
 
@@ -1328,18 +1646,30 @@ async function squareOffInner(accessToken: string, reason: string) {
   const symbol = tradingsymbol;
   const lotSize = positionLotSize > 0 ? positionLotSize : 65;
 
-  let openQty = await fetchNetQty(accessToken, symbol);
-  if (openQty <= 0) {
+  const brokerQty = await fetchNetQty(accessToken, symbol);
+  if (brokerQty <= 0) {
     await persistTradeLog(dateIst, "closed", "Already flat", { exitReason: reason, pnl: unrealisedPnl });
-    finishDay(dateIst, "Already flat", "info");
+    concludeTrade(dateIst, "Already flat", "info");
     return;
   }
 
-  // Keep firing parallel SELL rounds until Kite shows flat — a stuck leg must never be abandoned.
+  // Track what *we* still owe, not the broker net — another bot's lots in this contract are none
+  // of our business and must survive our square-off.
+  let remainingQty = quantity;
+
+  // Keep firing parallel SELL rounds until our own leg is flat — a stuck leg must never be abandoned.
   const fills: { average_price: number; filled_quantity: number }[] = [];
-  for (let round = 1; round <= SQUARE_OFF_MAX_ROUNDS && openQty > 0; round += 1) {
+  for (let round = 1; round <= SQUARE_OFF_MAX_ROUNDS && remainingQty > 0; round += 1) {
     try {
-      fills.push(...(await squareOffAllSplitOrders(accessToken, symbol, lotSize, round)));
+      const roundFills = await squareOffAllSplitOrders(
+        accessToken,
+        symbol,
+        lotSize,
+        round,
+        remainingQty,
+      );
+      fills.push(...roundFills);
+      remainingQty -= roundFills.reduce((sum, fill) => sum + fill.filled_quantity, 0);
     } catch (err) {
       pushLog(
         `Exit round ${round} failed · ${err instanceof Error ? err.message : "unknown"}`,
@@ -1347,22 +1677,23 @@ async function squareOffInner(accessToken: string, reason: string) {
       );
     }
 
+    // A flat broker position means our leg is gone regardless of what the fill reports said.
     try {
-      openQty = await fetchNetQty(accessToken, symbol);
+      if ((await fetchNetQty(accessToken, symbol)) <= 0) remainingQty = 0;
     } catch {
-      openQty = 1; // unknown — assume still open and retry
+      /* unknown — trust our own fill accounting */
     }
 
-    if (openQty > 0 && round < SQUARE_OFF_MAX_ROUNDS) {
-      pushLog(`Exit incomplete · ${openQty} qty still open · retrying`, "warning");
+    if (remainingQty > 0 && round < SQUARE_OFF_MAX_ROUNDS) {
+      pushLog(`Exit incomplete · ${remainingQty} qty still open · retrying`, "warning");
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   }
 
-  if (openQty > 0) {
+  if (remainingQty > 0) {
     // Stay in position so the next tick retries; never mark the day done holding stock.
     phase = "in_position";
-    message = `EXIT FAILED · ${openQty} qty still open · retrying on next tick`;
+    message = `EXIT FAILED · ${remainingQty} qty still open · retrying on next tick`;
     pushLog(message, "error");
     saveBotState(dateIst);
     return;
@@ -1377,7 +1708,7 @@ async function squareOffInner(accessToken: string, reason: string) {
     pnl,
     exitReason: reason,
   });
-  finishDay(dateIst, `CLOSED · ${reason}`, "success");
+  concludeTrade(dateIst, `CLOSED · ${reason}`, "success");
 }
 
 /**
@@ -1419,8 +1750,8 @@ async function topUpEntryQuantity(
       transaction_type: "BUY",
       quantities: chunks,
     });
-    await awaitOrderFills(accessToken, placed.orderIds);
-    await syncEntryFromMisPosition(accessToken, resolved.tradingsymbol, resolved.lotSize);
+    const { fills } = await awaitOrderFills(accessToken, placed.orderIds);
+    applyOwnEntryFills(resolved.tradingsymbol, resolved.lotSize, fills);
   }
 }
 
@@ -1430,6 +1761,7 @@ function clearFailedEntryAttempt() {
   entryPrice = 0;
   lastOptionPrice = null;
   unrealisedPnl = null;
+  lockedPnlPct = 0;
 }
 
 function isRetryableEntryOrderError(message: string): boolean {
@@ -1444,10 +1776,227 @@ function entryRetryDelayMs() {
   return ENTRY_RETRY_DELAY_MS;
 }
 
+function resetNineFifteenForDay(dateIst: string) {
+  if (nineFifteenDate === dateIst) return;
+  nineFifteenDate = dateIst;
+  tradeSlot = "nine-sixteen";
+  nineFifteenMarkPrice = null;
+  nineFifteenMarkAtLabel = null;
+  nineFifteenSettled = false;
+  nineFifteenOverranMinute = false;
+  nineFifteenNote = null;
+  nineFifteenPreResolvedPe = null;
+  nineFifteenPreResolvedDate = null;
+  nineFifteenTimerDate = null;
+}
+
+/** Close the 9:15 attempt without touching the day — the 9:16 decision still gets its turn. */
+function settleNineFifteen(note: string, type: NineSixteenBotStatus["logs"][number]["type"]) {
+  nineFifteenSettled = true;
+  nineFifteenNote = note;
+  pushLog(note, type);
+  // A leg bought on the 9:15 rules keeps them. Re-labelling an open position here — which an
+  // error thrown after the fill would otherwise do — would hand it to the 9:16 index exits.
+  if (quantity > 0 && tradingsymbol) {
+    if (phase === "entering") phase = "in_position";
+    return;
+  }
+  if (phase === "entering") phase = "waiting";
+  tradeSlot = "nine-sixteen";
+  message = `${note} · waiting for 9:16:00`;
+}
+
+/** Attempt 1 uses the leg resolved at 9:15:05; retries re-resolve against the live spot. */
+async function resolveNineFifteenOption(
+  accessToken: string,
+  attempt: number,
+  dateIst: string,
+): Promise<ResolvedAtmOption | null> {
+  if (attempt === 1 && nineFifteenPreResolvedDate === dateIst && nineFifteenPreResolvedPe) {
+    return nineFifteenPreResolvedPe;
+  }
+  return resolveAtmNiftyOption(accessToken, "PE_BUY", {
+    spotPrice: lastSpot != null && lastSpot > 0 ? lastSpot : undefined,
+  });
+}
+
+async function finalizeNineFifteenEntry(
+  accessToken: string,
+  dateIst: string,
+  resolved: { tradingsymbol: string; instrumentToken: number; lotSize: number },
+  attempt: number,
+  splitLabel: string,
+) {
+  if (lastSpot != null && lastSpot > 0) entrySpot = lastSpot;
+
+  // The position is already live, so nothing past this point may throw its way out of being
+  // booked — a missing option token only costs the tick feed, which the quote poll covers.
+  phase = "in_position";
+  tradeSlot = "nine-fifteen";
+  try {
+    optionInstrumentToken =
+      resolved.instrumentToken > 0
+        ? resolved.instrumentToken
+        : ((await resolveInstrumentToken("NFO", resolved.tradingsymbol, accessToken)) ?? 0);
+  } catch {
+    optionInstrumentToken = 0;
+  }
+  if (niftyInstrumentToken > 0) {
+    setBotTickerInstruments(
+      optionInstrumentToken > 0 ? [niftyInstrumentToken, optionInstrumentToken] : [niftyInstrumentToken],
+    );
+  }
+
+  nineFifteenSettled = true;
+  message = `In 9:15 position · ${getNineFifteenLadderLabel()}`;
+  pushLog(
+    `9:15 entry filled on attempt ${attempt} · ${splitLabel} · ${quantity} qty @ ₹${entryPrice.toFixed(2)}`,
+    "success",
+  );
+  pushLog(getNineFifteenLadderLabel(), "info");
+  saveBotState(dateIst);
+}
+
+/**
+ * The 9:15 trade: read the minute ten seconds in and buy the ATM PE at 9:15:11 if it is red.
+ *
+ * Nothing in here ends the day. Whether it trades, skips or fails to fill, the 9:16 decision is
+ * still taken at 9:16:00 — the only thing that stops it is this leg still being open by then.
+ */
+async function tryEnterNineFifteen(accessToken: string, dateIst: string) {
+  sealNineFifteenMark();
+
+  const open = capturedOpen915;
+  if (open == null || open <= 0) {
+    settleNineFifteen("9:15 trade skipped · no open tick in 9:15:00–9:15:15", "warning");
+    return;
+  }
+  if (nineFifteenMarkPrice == null) {
+    settleNineFifteen("9:15 trade skipped · no Nifty tick before 9:15:10", "warning");
+    return;
+  }
+
+  const decision = decideNineFifteenEntry(open, nineFifteenMarkPrice);
+  if (decision.action === "skip") {
+    settleNineFifteen(`9:15 trade skipped · ${decision.reason}`, "info");
+    return;
+  }
+
+  phase = "entering";
+  tradeSlot = "nine-fifteen";
+  leg = "PE_BUY";
+  open915 = open;
+  clearFailedEntryAttempt();
+  message = "Placing 9:15:11 PE entry…";
+  pushLog(
+    `9:15 RED · ${decision.dropPts.toFixed(2)} pts below the open at the 10s mark → buying the ATM PE`,
+    "success",
+  );
+  await assertEgressReadyForEntry();
+
+  let attempt = 0;
+  let maxLotsCap: number | undefined;
+  let lastAttemptLots = 0;
+  let lastFailure = "";
+
+  while (!isPastNineFifteenEntryWindow()) {
+    attempt += 1;
+    try {
+      const resolved = await resolveNineFifteenOption(accessToken, attempt, dateIst);
+      if (!resolved) throw new Error("ATM PE not found");
+
+      const optionLtp = await fetchOptionLtp(accessToken, resolved.tradingsymbol);
+      if (optionLtp <= 0) throw new Error("Option LTP unavailable for sizing");
+
+      const sizing = await resolveEntryQuantity(accessToken, resolved.lotSize, optionLtp, {
+        maxLots: maxLotsCap,
+      });
+      if (sizing.lots <= 0 || sizing.quantity <= 0) {
+        lastFailure = `balance too low for 1 lot · need ~₹${Math.ceil(sizing.costPerLot)} · available ₹${Math.floor(sizing.availableBalance)}`;
+        break;
+      }
+
+      lastAttemptLots = sizing.lots;
+      const lotChunks = splitLotsIntoOrderChunks(sizing.lots);
+      const splitLabel = formatLotSplitLabel(lotChunks);
+      pushLog(
+        `9:15 entry attempt ${attempt} · PE ${resolved.tradingsymbol} @ ₹${optionLtp.toFixed(2)} · ${splitLabel}`,
+        attempt === 1 ? "success" : "info",
+      );
+
+      ownedSymbol = resolved.tradingsymbol;
+      const placed = await placeSplitMarketOrders(accessToken, {
+        tradingsymbol: resolved.tradingsymbol,
+        transaction_type: "BUY",
+        quantities: lotChunks.map((lots) => lots * resolved.lotSize),
+      });
+      for (const failure of placed.failures) {
+        pushLog(`9:15 entry order rejected · ${failure.message}`, "warning");
+      }
+
+      const { fills, failures: fillFailures } = await awaitOrderFills(accessToken, placed.orderIds);
+      if (fills.length === 0) {
+        throw fillFailures[0] ?? placed.failures[0] ?? new Error("All 9:15 entry orders failed");
+      }
+      clearKiteRejectedIp();
+      if (!applyOwnEntryFills(resolved.tradingsymbol, resolved.lotSize, fills)) {
+        throw new Error("9:15 entry orders reported no filled quantity");
+      }
+
+      await finalizeNineFifteenEntry(accessToken, dateIst, resolved, attempt, splitLabel);
+      return;
+    } catch (err) {
+      lastFailure = err instanceof Error ? err.message : "Entry failed";
+      if (isMarginRelatedOrderError(lastFailure) && lastAttemptLots > 0) {
+        maxLotsCap = lastAttemptLots - 1;
+      } else if (/REJECTED/i.test(lastFailure) && lastAttemptLots > 1) {
+        maxLotsCap = lastAttemptLots - 1;
+      }
+      pushLog(`9:15 entry attempt ${attempt} failed · ${lastFailure}`, "warning");
+      if (!isRetryableEntryOrderError(lastFailure) && !/LTP unavailable|ATM PE not found/i.test(lastFailure)) {
+        break;
+      }
+      if (isPastNineFifteenEntryWindow()) break;
+      await new Promise((resolve) => setTimeout(resolve, entryRetryDelayMs()));
+    }
+  }
+
+  // A BUY can fill even when the attempt around it threw, so never walk away from the claimed
+  // contract on the word of an exception alone — ask Kite before giving the slot up.
+  if (ownedSymbol) {
+    const symbol = ownedSymbol;
+    const adopted = await syncOwnEntryFromMisPosition(accessToken, symbol, positionLotSize || 0).catch(
+      () => false,
+    );
+    if (adopted && quantity > 0) {
+      await finalizeNineFifteenEntry(
+        accessToken,
+        dateIst,
+        { tradingsymbol: symbol, instrumentToken: 0, lotSize: positionLotSize },
+        attempt,
+        "recovered from Kite after a failed attempt",
+      );
+      return;
+    }
+    ownedSymbol = null;
+  }
+
+  clearFailedEntryAttempt();
+  leg = null;
+  settleNineFifteen(`9:15 trade not taken · ${lastFailure || "entry window closed"}`, "warning");
+}
+
 async function tryEnter(accessToken: string, dateIst: string) {
   phase = "entering";
   message = "Placing 9:16:00 entry…";
   clearFailedEntryAttempt();
+
+  if (nineFifteenOverranMinute) {
+    const note = "SKIPPED · the 9:15 trade was still open at 9:16:00";
+    await persistTradeLog(dateIst, "skipped", note, { exitReason: note });
+    finishDay(dateIst, note, "warning");
+    return;
+  }
 
   if (capturedOpen915 == null || capturedClose915 == null) {
     throw new Error("Missing captured 9:15 open/close — cannot enter");
@@ -1519,11 +2068,16 @@ async function tryEnter(accessToken: string, dateIst: string) {
         attempt === 1 ? "success" : "info",
       );
 
-      // Never double-buy: if Kite already shows an open Nifty MIS leg, adopt it instead.
+      // Never double-buy *our own* leg after a partially-completed attempt. A leg opened by
+      // momentum scalper is not a duplicate of ours, so it must not short-circuit this entry.
       const existingBeforeOrders = await findOpenNiftyMisOption(accessToken);
-      if (existingBeforeOrders && existingBeforeOrders.quantity > 0) {
+      if (
+        existingBeforeOrders &&
+        existingBeforeOrders.quantity > 0 &&
+        isOwnPosition(existingBeforeOrders.tradingsymbol)
+      ) {
         const existingSymbol = existingBeforeOrders.tradingsymbol;
-        if (!(await syncEntryFromMisPosition(accessToken, existingSymbol, resolved.lotSize))) {
+        if (!(await syncOwnEntryFromMisPosition(accessToken, existingSymbol, resolved.lotSize))) {
           throw new Error("Open MIS position on Kite but could not sync entry");
         }
         leg = existingSymbol.endsWith("PE") ? "PE_BUY" : "CE_BUY";
@@ -1532,12 +2086,14 @@ async function tryEnter(accessToken: string, dateIst: string) {
           dateIst,
           { ...resolved, tradingsymbol: existingSymbol, instrumentToken: 0 },
           attempt,
-          `adopted open Kite position (${quantity} qty)`,
+          `resumed own open position (${quantity} qty)`,
         );
         return;
       }
 
       const orderQuantities = lotChunks.map((lots) => lots * resolved.lotSize);
+      // Claim the contract before the first BUY leaves, so a crash mid-entry still recovers.
+      ownedSymbol = resolved.tradingsymbol;
       const placed = await placeSplitMarketOrders(accessToken, {
         tradingsymbol: resolved.tradingsymbol,
         transaction_type: "BUY",
@@ -1556,8 +2112,8 @@ async function tryEnter(accessToken: string, dateIst: string) {
 
       clearKiteRejectedIp();
 
-      if (!(await syncEntryFromMisPosition(accessToken, resolved.tradingsymbol, resolved.lotSize))) {
-        throw new Error("Split entry orders filled but MIS position missing on Kite");
+      if (!applyOwnEntryFills(resolved.tradingsymbol, resolved.lotSize, fills)) {
+        throw new Error("Split entry orders reported no filled quantity");
       }
 
       const rejectedCount = placed.failures.length + fillFailures.length;
@@ -1628,12 +2184,11 @@ async function refreshLiveQuotesInner(accessToken: string, dateIst: string) {
   const now = Date.now();
   const syncPosition = now - lastPositionSyncAt >= 5000;
 
-  if (syncPosition && tradingsymbol) {
+  if (syncPosition && tradingsymbol && isOwnPosition(tradingsymbol)) {
     try {
       const pos = await fetchMisPosition(accessToken, tradingsymbol, "MIS");
       if (pos) {
-        quantity = pos.quantity;
-        entryPrice = pos.average_price;
+        applyOwnPositionSync(pos);
         lastPositionSyncAt = now;
         synced = true;
       }
@@ -1698,40 +2253,101 @@ async function refreshLiveQuotesInner(accessToken: string, dateIst: string) {
   saveBotState(dateIst);
 }
 
-async function checkAndMaybeExit(accessToken: string, _dateIst: string): Promise<boolean> {
-  if (phase !== "in_position") return false;
+/**
+ * The 9:15 leg's exits: option P&L only.
+ *
+ * It deliberately ignores the index target and the 9:55 hard stop — those belong to the 9:16
+ * trade, which is entered on a whole sealed candle and sized for a much longer hold.
+ */
+async function checkAndMaybeExitNineFifteen(accessToken: string, dateIst: string): Promise<boolean> {
+  // The main loop hands every pass to the position while one is open, so sealing the 9:15 close
+  // has to happen here too — otherwise a leg held across 9:16:00 leaves the candle unrecorded.
+  if (isReadyToSeal915Close()) seal915CloseFromTicks(dateIst);
+
+  if (!nineFifteenOverranMinute && isPastNineFifteenMinute()) {
+    nineFifteenOverranMinute = true;
+    pushLog("9:15 leg still open at 9:16:00 · the 9:16 trade is skipped today", "warning");
+  }
 
   if (isPastNineSixteenForceExit()) {
     await squareOff(accessToken, "End of day square-off");
     return true;
   }
 
-  // Exit on whichever fires first: tiered index target OR option P&L % (not both required).
-  const spot = lastSpot ?? 0;
-  if (leg && entrySpot > 0 && spot > 0) {
-    const indexTarget = activeIndexTargetPoints(exitMode);
-    if (shouldExitNineSixteen(spot, entrySpot, leg, indexTarget)) {
-      await squareOff(
-        accessToken,
-        `Target hit · ±${indexTarget} · Nifty spot ${spot.toFixed(2)} (from entry spot ${entrySpot.toFixed(2)})`,
-      );
-      return true;
-    }
+  const legPnl = ownLegUnrealisedPnl(entryPrice, quantity, lastOptionPrice);
+  const pnlPct = pnlPctOfEntryCost(legPnl, entryPrice, quantity);
+  if (pnlPct == null) return false;
+  if (!isPlausiblePnlPct(pnlPct)) {
+    pushLog(
+      `Ignoring implausible 9:15 P&L reading ${pnlPct.toFixed(1)}% · ladder held at +${lockedPnlPct}%`,
+      "warning",
+    );
+    return false;
   }
 
-  const pnlPctActive = activePnlTargetPct();
-  if (
-    pnlPctActive != null &&
-    isPnlExitWindowActive() &&
-    unrealisedPnl != null &&
-    entryPrice > 0 &&
-    quantity > 0 &&
-    shouldExitOnPnlTarget(unrealisedPnl, entryPrice, quantity, pnlPctActive)
-  ) {
+  const previousLocked = lockedPnlPct;
+  const evaluation = evaluateNineFifteenExit(lockedPnlPct, pnlPct);
+  lockedPnlPct = evaluation.lockedPnlPct;
+  if (lockedPnlPct > previousLocked) {
+    pushLog(
+      `9:15 ladder → locked SL +${lockedPnlPct}% · next TP +${nineFifteenTargetPct(lockedPnlPct)}%` +
+        ` (P&L +${pnlPct.toFixed(2)}%)`,
+      "success",
+    );
+    saveBotState(dateIst);
+  }
+
+  if (!evaluation.exit) return false;
+
+  const entryAmount = entryPrice * quantity;
+  const reason =
+    `9:15 trailing stop hit · back to +${evaluation.exit.lockedPnlPct}%` +
+    ` (now ${pnlPct.toFixed(2)}% · ₹${Math.round(legPnl ?? 0)} on ₹${Math.round(entryAmount)})`;
+  await squareOff(accessToken, reason);
+  return true;
+}
+
+async function checkAndMaybeExit(accessToken: string, _dateIst: string): Promise<boolean> {
+  if (phase !== "in_position") return false;
+
+  if (tradeSlot === "nine-fifteen") {
+    return checkAndMaybeExitNineFifteen(accessToken, _dateIst);
+  }
+
+  if (isPastNineSixteenForceExit()) {
+    await squareOff(accessToken, "End of day square-off");
+    return true;
+  }
+
+  // Trailing option P&L % only — no index target or hard stop.
+  const legPnl = ownLegUnrealisedPnl(entryPrice, quantity, lastOptionPrice);
+  const pnlPct = pnlPctOfEntryCost(legPnl, entryPrice, quantity);
+  if (pnlPct == null) return false;
+  if (!isPlausiblePnlPct(pnlPct)) {
+    pushLog(
+      `Ignoring implausible P&L reading ${pnlPct.toFixed(1)}% · ladder held at +${lockedPnlPct}%`,
+      "warning",
+    );
+    return false;
+  }
+
+  const previousLocked = lockedPnlPct;
+  lockedPnlPct = nextLockedPnlPct(lockedPnlPct, pnlPct);
+  if (lockedPnlPct > previousLocked) {
+    pushLog(
+      `Trailing ladder → locked SL +${lockedPnlPct}% · next TP +${trailingPnlTargetPct(lockedPnlPct)}%` +
+        ` (P&L +${pnlPct.toFixed(2)}%)`,
+      "success",
+    );
+    saveBotState(_dateIst);
+  }
+
+  if (shouldExitOnTrailingPnl(lockedPnlPct, pnlPct)) {
     const entryAmount = entryPrice * quantity;
     await squareOff(
       accessToken,
-      `P&L target hit · +${pnlPctActive}% (₹${Math.round(unrealisedPnl)} on ₹${Math.round(entryAmount)})`,
+      `Trailing stop hit · fell below +${lockedPnlPct}% (now +${pnlPct.toFixed(2)}% · ` +
+        `₹${Math.round(legPnl ?? 0)} on ₹${Math.round(entryAmount)})`,
     );
     return true;
   }
@@ -1760,12 +2376,11 @@ async function tickInPosition(accessToken: string, dateIst: string) {
     if (Date.now() - lastQuoteRefreshAt >= pollMs) {
       await refreshLiveQuotes(accessToken, dateIst);
     }
-  } else if (Date.now() - lastPositionSyncAt >= 5000 && tradingsymbol) {
+  } else if (Date.now() - lastPositionSyncAt >= 5000 && tradingsymbol && isOwnPosition(tradingsymbol)) {
     try {
       const pos = await fetchMisPosition(accessToken, tradingsymbol, "MIS");
       if (pos) {
-        quantity = pos.quantity;
-        entryPrice = pos.average_price;
+        applyOwnPositionSync(pos);
         lastPositionSyncAt = Date.now();
         // No option tick feed (token unresolved) — positions LTP keeps the P&L exit alive.
         if (optionInstrumentToken <= 0 && pos.last_price > 0) {
@@ -1785,11 +2400,12 @@ async function tickInPosition(accessToken: string, dateIst: string) {
 }
 
 async function mainLoop() {
-  if (!enabled || loopBusy) return;
+  if (loopBusy) return;
   loopBusy = true;
 
   try {
     const ctx = getIndianMarketContext();
+    resetNineFifteenForDay(ctx.dateIST);
 
     if (ctx.sessionStatus === "closed_weekend") {
       haltBotTicker();
@@ -1809,6 +2425,8 @@ async function mainLoop() {
       exitMode = "main";
       leg = null;
       tradingsymbol = null;
+      ownedSymbol = null;
+      warnedForeignPosition = "";
       quantity = 0;
       clearCaptures(ctx.dateIST);
       message = "New session — waiting for Kite websocket 9:15 ticks";
@@ -1819,7 +2437,7 @@ async function mainLoop() {
     if (hasRanToday(ctx.dateIST) && phase !== "in_position" && phase !== "exiting") {
       phase = "done";
       if (isInBotWsHours() && sessionEarly?.accessToken) {
-        // Safety net: a stray open leg (manual order, failed exit) must still be managed.
+        // Safety net for a failed exit of *our* leg. Legs opened by another bot are skipped.
         let recoveredPosition = false;
         try {
           await reconcilePositionWithKite(sessionEarly.accessToken, ctx.dateIST);
@@ -1861,14 +2479,22 @@ async function mainLoop() {
         return;
       }
       await ensureNiftyTicker(session.accessToken, ctx.dateIST);
-      maintainEntryReadiness(session.accessToken, ctx.dateIST);
+      if (enabled) maintainEntryReadiness(session.accessToken, ctx.dateIST);
       phase = "waiting";
       const waitMs = msUntilNextEntryPhase(false);
-      message = isInBotWsHours()
-        ? isKiteTickerConnected()
-          ? "Websocket live · waiting for first Nifty tick in 9:15:00–9:15:15"
-          : `Connecting Kite websocket · ${Math.ceil(waitMs / 1000)}s`
-        : `Waiting to connect Kite websocket at 9:00:00 · ${Math.ceil(waitMs / 1000)}s`;
+      if (!enabled) {
+        message = isInBotWsHours()
+          ? isKiteTickerConnected()
+            ? "9:16 trading disabled · websocket live · waiting for 9:15 ticks"
+            : `9:16 trading disabled · connecting websocket · ${Math.ceil(waitMs / 1000)}s`
+          : `9:16 trading disabled · websocket connects at 9:00 · ${Math.ceil(waitMs / 1000)}s`;
+      } else {
+        message = isInBotWsHours()
+          ? isKiteTickerConnected()
+            ? "Websocket live · waiting for first Nifty tick in 9:15:00–9:15:15"
+            : `Connecting Kite websocket · ${Math.ceil(waitMs / 1000)}s`
+          : `Waiting to connect Kite websocket at 9:00:00 · ${Math.ceil(waitMs / 1000)}s`;
+      }
       return;
     }
 
@@ -1904,8 +2530,13 @@ async function mainLoop() {
       if (phase === "in_position") {
         await tickInPosition(session.accessToken, ctx.dateIST);
       } else if (phase !== "done") {
-        await persistTradeLog(ctx.dateIST, "no_entry", "NO ENTRY · Market closed");
-        finishDay(ctx.dateIST, "NO ENTRY · Market closed");
+        if (enabled) {
+          await persistTradeLog(ctx.dateIST, "no_entry", "NO ENTRY · Market closed");
+          finishDay(ctx.dateIST, "NO ENTRY · Market closed", "info");
+        } else {
+          phase = "done";
+          message = "9:16 trading disabled · market closed";
+        }
       }
       return;
     }
@@ -1916,13 +2547,37 @@ async function mainLoop() {
     }
 
     if (isPast916EntryWindow()) {
+      if (!enabled) {
+        await ensureNiftyTicker(session.accessToken, ctx.dateIST);
+        phase = "done";
+        message = isKiteTickerConnected()
+          ? "9:16 trading disabled · websocket live until 16:00"
+          : "9:16 trading disabled · keeping websocket until 16:00";
+        return;
+      }
       await persistTradeLog(ctx.dateIST, "no_entry", "NO ENTRY · Missed 9:16 entry window");
       finishDay(ctx.dateIST, "NO ENTRY · Missed 9:16 entry window", "warning");
       return;
     }
 
     await ensureNiftyTicker(session.accessToken, ctx.dateIST);
-    maintainEntryReadiness(session.accessToken, ctx.dateIST);
+    if (enabled) maintainEntryReadiness(session.accessToken, ctx.dateIST);
+
+    if (nineFifteenEnabled && !nineFifteenSettled) {
+      if (isReadyForNineFifteenPreResolve()) {
+        void preResolveNineFifteenPe(session.accessToken, ctx.dateIST).catch(() => {
+          /* logged inside */
+        });
+      }
+      // Backstop for the 9:15:11.000 timer — a poll that gets here first still enters on time.
+      if (isReadyForNineFifteenEntry()) {
+        await tryEnterNineFifteen(session.accessToken, ctx.dateIST);
+        return;
+      }
+      if (isPastNineFifteenEntryWindow()) {
+        settleNineFifteen("9:15 trade skipped · past the 9:15:20 entry window", "info");
+      }
+    }
 
     if (isReadyToSeal915Close()) {
       seal915CloseFromTicks(ctx.dateIST);
@@ -1934,12 +2589,12 @@ async function mainLoop() {
       capturedClose915 != null &&
       capturedClose915 > 0;
 
-    if (has915Ohlc && (isReadyFor916Entry() || phase === "entering") && !isPast916EntryWindow()) {
+    if (enabled && has915Ohlc && (isReadyFor916Entry() || phase === "entering") && !isPast916EntryWindow()) {
       await tryEnter(session.accessToken, ctx.dateIST);
       return;
     }
 
-    if (isReadyFor916Entry() && !has915Ohlc) {
+    if (enabled && isReadyFor916Entry() && !has915Ohlc) {
       const reason =
         capturedOpen915 == null || capturedOpen915 <= 0
           ? "NO ENTRY · No 9:15:00 open tick between 9:15:00–9:15:15"
@@ -1952,7 +2607,13 @@ async function mainLoop() {
 
     phase = "waiting";
     const waitMs = msUntilNextEntryPhase(has915Ohlc);
-    if (!isInBotWsHours()) {
+    if (!enabled) {
+      message = isKiteTickerConnected()
+        ? "9:16 trading disabled · websocket live · capturing 9:15 ticks"
+        : isInBotWsHours()
+          ? "9:16 trading disabled · connecting websocket"
+          : `9:16 trading disabled · websocket connects at 9:00 · ${Math.ceil(waitMs / 1000)}s`;
+    } else if (!isInBotWsHours()) {
       message = `Waiting to connect Kite websocket at 9:00:00 · ${Math.ceil(waitMs / 1000)}s`;
     } else if (capturedOpen915 == null || capturedOpen915 <= 0) {
       message = isKiteTickerConnected()
@@ -2057,6 +2718,74 @@ async function runEntryBurst() {
 }
 
 /**
+ * Fire the 9:15 entry the instant 9:15:11 arrives, rather than on the next 250ms poll.
+ *
+ * Errors are swallowed into a settled 9:15 attempt instead of the shared bot error handler: a
+ * failure on this leg must not leave the bot in a state that costs it the 9:16 trade.
+ */
+async function runNineFifteenEntryBurst() {
+  if (!nineFifteenEnabled || nineFifteenBurstInFlight || nineFifteenSettled) return;
+
+  // A poll iteration may already be mid-flight; wait it out so entry cannot fire twice.
+  for (let i = 0; i < 40 && loopBusy; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (loopBusy) {
+    pushLog("9:15:11 timer yielded to in-flight poll · entry continues on the poll loop", "warning");
+    return;
+  }
+
+  const ctx = getIndianMarketContext();
+  if (ctx.sessionStatus === "closed_weekend" || ctx.sessionStatus === "post_market") return;
+  if (phase === "in_position" || phase === "exiting" || phase === "done") return;
+  if (isPastNineFifteenEntryWindow() || hasRanToday(ctx.dateIST)) return;
+
+  const session = loadKiteSession();
+  if (!session?.accessToken) return;
+
+  nineFifteenBurstInFlight = true;
+  loopBusy = true;
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+
+  try {
+    await tryEnterNineFifteen(session.accessToken, ctx.dateIST);
+  } catch (err) {
+    settleNineFifteen(
+      `9:15 trade not taken · ${err instanceof Error ? err.message : "unknown error"}`,
+      "error",
+    );
+  } finally {
+    loopBusy = false;
+    nineFifteenBurstInFlight = false;
+    scheduleNext();
+  }
+}
+
+/** Same wall-clock re-arming as the 9:16:00 timer below, aimed at 9:15:11.000. */
+function armNineFifteenTimer() {
+  const ctx = getIndianMarketContext();
+  if (ctx.sessionStatus === "closed_weekend" || ctx.sessionStatus === "post_market") return;
+  if (nineFifteenSettled || nineFifteenBurstInFlight || hasRanToday(ctx.dateIST)) return;
+
+  const delay = msUntilNineFifteenEntry();
+  if (delay < 0 || delay > 10 * 60 * 1000) return;
+
+  if (nineFifteenTimer) clearTimeout(nineFifteenTimer);
+  nineFifteenTimer = setTimeout(() => {
+    nineFifteenTimer = null;
+    void runNineFifteenEntryBurst();
+  }, delay);
+
+  if (nineFifteenTimerDate !== ctx.dateIST) {
+    nineFifteenTimerDate = ctx.dateIST;
+    pushLog(`9:15:11.000 entry armed · T-${(delay / 1000).toFixed(1)}s`, "info");
+  }
+}
+
+/**
  * Aim a one-shot timer at 9:16:00.000 IST. Re-armed on every poll so the delay is recomputed
  * from the wall clock each time: one long setTimeout would drift under load and would not
  * follow an NTP correction, and by 9:15:59 the poll runs every 50ms so the final arm lands
@@ -2083,8 +2812,21 @@ function armEntryInstantTimer() {
 }
 
 function scheduleNext() {
-  if (!enabled) return;
-  armEntryInstantTimer();
+  if (!monitorLoopStarted) return;
+  if (enabled) {
+    armEntryInstantTimer();
+  } else if (entryTimer) {
+    clearTimeout(entryTimer);
+    entryTimer = null;
+    entryTimerDate = null;
+  }
+  if (nineFifteenEnabled) {
+    armNineFifteenTimer();
+  } else if (nineFifteenTimer) {
+    clearTimeout(nineFifteenTimer);
+    nineFifteenTimer = null;
+    nineFifteenTimerDate = null;
+  }
   if (timer) clearTimeout(timer);
   const has915Ohlc =
     capturedOpen915 != null &&
@@ -2108,19 +2850,6 @@ function scheduleNext() {
 function buildStatusSnapshot(): NineSixteenBotStatus {
   const ctx = getIndianMarketContext();
   const session = loadKiteSession();
-  const activePts = activeIndexTargetPoints(exitMode);
-  const targetSpot =
-    entrySpot > 0 && leg
-      ? leg === "CE_BUY"
-        ? entrySpot + activePts
-        : entrySpot - activePts
-      : null;
-
-  let niftyPointsToTarget: number | null = null;
-  if (targetSpot != null && lastSpot != null && lastSpot > 0 && leg) {
-    niftyPointsToTarget =
-      leg === "CE_BUY" ? Math.max(0, targetSpot - lastSpot) : Math.max(0, lastSpot - targetSpot);
-  }
 
   let pnl: number | null = null;
   if (entryPrice > 0 && lastOptionPrice != null && lastOptionPrice > 0 && quantity > 0) {
@@ -2129,12 +2858,22 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
     pnl = unrealisedPnl;
   }
 
-  const pnlTargetPct = activePnlTargetPct() ?? getNineSixteenPnlTargetPct();
-  const pnlExitActive = isPnlExitWindowActive();
-  const pnlTargetAmount =
-    entryPrice > 0 && quantity > 0 && activePnlTargetPct() != null
-      ? computePnlTargetAmount(entryPrice, quantity, activePnlTargetPct()!)
-      : null;
+  const pnlPct = pnlPctOfEntryCost(pnl, entryPrice, quantity);
+  // While the 9:15 leg is open the panel's P&L rows describe that ladder, not the 9:16 one.
+  const onNineFifteenLeg = tradeSlot === "nine-fifteen";
+  const pnlTargetPct = onNineFifteenLeg
+    ? nineFifteenTargetPct(lockedPnlPct)
+    : trailingPnlTargetPct(lockedPnlPct);
+  const pnlStopPct = onNineFifteenLeg
+    ? nineFifteenStopPct(lockedPnlPct)
+    : trailingPnlStopPct(lockedPnlPct);
+  const pnlTrailArmed = onNineFifteenLeg
+    ? lockedPnlPct >= NINE_FIFTEEN_TRAIL_ARM_PCT
+    : lockedPnlPct >= NINE_SIXTEEN_PNL_TRAIL_ARM_PCT;
+  const sizeKnown = entryPrice > 0 && quantity > 0;
+  const pnlTargetAmount = sizeKnown ? computePnlTargetAmount(entryPrice, quantity, pnlTargetPct) : null;
+  const pnlStopAmount =
+    sizeKnown && pnlStopPct != null ? computePnlTargetAmount(entryPrice, quantity, pnlStopPct) : null;
 
   const inTrade = phase === "in_position" || phase === "exiting";
 
@@ -2148,21 +2887,46 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
     wsConnected: isKiteTickerConnected(),
     entrySpot: entrySpot > 0 ? entrySpot : null,
     exitMode: inTrade ? exitMode : null,
-    indexExitSchedule: inTrade ? getIndexExitScheduleLabel(exitMode) : null,
+    indexExitSchedule: null,
+    hardStopSpot: null,
+    hardStopActive: false,
+    hardStopPoints: 0,
+    hardStopStartLabel: "",
     leg,
     tradingsymbol,
-    targetSpot,
+    targetSpot: null,
     lastSpot,
     entryPrice: entryPrice > 0 ? entryPrice : null,
     lastOptionPrice,
     quantity: quantity > 0 ? quantity : null,
     unrealisedPnl: pnl,
-    niftyPointsToTarget,
+    niftyPointsToTarget: null,
     pnlTargetAmount,
     pnlTargetPct,
-    pnlExitActive,
+    pnlExitActive: pnlTrailArmed,
     pnlExitStartLabel: getPnlExitStartLabel(),
-    pnlExitSchedule: getPnlExitScheduleLabel(),
+    pnlExitSchedule: getPnlTrailScheduleLabel(),
+    pnlPct,
+    pnlLockedPct: lockedPnlPct,
+    pnlStopPct,
+    pnlStopAmount,
+    pnlTrailArmed,
+    pnlTrailArmPct: onNineFifteenLeg ? NINE_FIFTEEN_TRAIL_ARM_PCT : NINE_SIXTEEN_PNL_TRAIL_ARM_PCT,
+    pnlTrailStepPct: onNineFifteenLeg ? NINE_FIFTEEN_TRAIL_STEP_PCT : NINE_SIXTEEN_PNL_TRAIL_STEP_PCT,
+    nineFifteenEnabled,
+    tradeSlot,
+    nineFifteenMarkPrice,
+    nineFifteenMarkAt: nineFifteenMarkAtLabel,
+    nineFifteenMarkChange:
+      nineFifteenMarkPrice != null && capturedOpen915 != null && capturedOpen915 > 0
+        ? nineFifteenMarkPrice - capturedOpen915
+        : null,
+    nineFifteenSettled,
+    nineFifteenNote,
+    nineFifteenBlocked916: nineFifteenOverranMinute,
+    nineFifteenLadder: getNineFifteenLadderLabel(),
+    nineFifteenTrailArmPct: NINE_FIFTEEN_TRAIL_ARM_PCT,
+    nineFifteenTrailStepPct: NINE_FIFTEEN_TRAIL_STEP_PCT,
     sessionConnected: Boolean(session),
     sessionAgeHours: session ? kiteSessionAgeHours(session) : null,
     updatedAt: new Date().toISOString(),
@@ -2178,6 +2942,33 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
 
 export function getNineSixteenBotStatus(): NineSixteenBotStatus {
   return buildStatusSnapshot();
+}
+
+/**
+ * True once the 9:16 bot can neither take nor hold a trade today. Momentum scalper hands off on
+ * this instead of a fixed clock time: past 9:16:30 the bot is either holding a leg or will never
+ * enter, so "not occupied" settles it — including when the 9:16 bot is disabled entirely.
+ */
+export function isNineSixteenSettledForDay(nowMs = Date.now()): boolean {
+  if (!isPast916EntryWindow(nowMs)) return false;
+  return !isNineSixteenBotOccupied();
+}
+
+/** True while the 9:16 bot is entering, holding, or exiting — momentum scalper must stand down. */
+export function isNineSixteenBotOccupied(): boolean {
+  if (phase === "entering" || phase === "in_position" || phase === "exiting") return true;
+  try {
+    const dateIst = getIndianMarketContext().dateIST;
+    if (!fs.existsSync(STATE_FILE)) return false;
+    const parsed = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as {
+      dateIST?: string;
+      phase?: NineSixteenBotPhase;
+    };
+    if (parsed.dateIST !== dateIst) return false;
+    return parsed.phase === "entering" || parsed.phase === "in_position" || parsed.phase === "exiting";
+  } catch {
+    return false;
+  }
 }
 
 export async function getNineSixteenBotStatusLive(): Promise<NineSixteenBotStatus> {
@@ -2240,38 +3031,85 @@ export async function getNineSixteenBotLiveTick(): Promise<NineSixteenBotLiveTic
 
 export function startNineSixteenLiveMonitor() {
   const ctx = getIndianMarketContext();
+  resetNineFifteenForDay(ctx.dateIST);
   loadBotState(ctx.dateIST);
   loadCaptures(ctx.dateIST);
 }
 
+export function startNineSixteenMonitorLoop() {
+  if (monitorLoopStarted) return;
+  monitorLoopStarted = true;
+  if (phase === "off") {
+    phase = "waiting";
+    message = enabled
+      ? "Server bot waiting for Kite websocket 9:15 ticks"
+      : "9:16 trading disabled — websocket monitor active";
+  }
+  scheduleNext();
+}
+
 export function setNineSixteenBotEnabled(next: boolean) {
   enabled = next;
+  startNineSixteenMonitorLoop();
   if (!enabled) {
-    if (timer) clearTimeout(timer);
-    timer = null;
     if (entryTimer) clearTimeout(entryTimer);
     entryTimer = null;
     entryTimerDate = null;
-    haltBotTicker(true);
     if (phase === "in_position" || phase === "exiting") {
-      message = `Auto exit paused · ${getIndexExitScheduleLabel(exitMode)} · P&L ${getPnlExitScheduleLabel()}`;
+      message = `9:16 trading disabled · still managing open position · ${getPnlTrailScheduleLabel()}`;
+      pushLog("9:16 trading disabled — open position still managed", "warning");
+    } else if (phase === "done") {
+      message = isKiteTickerConnected()
+        ? "9:16 trading disabled · websocket live until 16:00"
+        : "9:16 trading disabled · session complete";
+      pushLog("9:16 trading disabled — websocket monitor continues", "info");
     } else {
-      phase = "off";
-      message = "Server bot disabled";
+      phase = "waiting";
+      message = isKiteTickerConnected()
+        ? "9:16 trading disabled · websocket live"
+        : "9:16 trading disabled — websocket monitor active";
+      pushLog("9:16 trading disabled — websocket monitor continues", "info");
     }
+    scheduleNext();
     return;
   }
-  phase = "waiting";
-  message = "Server bot enabled — WS 9:00–16:00 · 9:16:00 entry";
-  pushLog("Server 9:16 bot enabled", "info");
+  if (phase === "off") phase = "waiting";
+  message = "9:16 trading enabled — WS 9:00–16:00 · 9:16:00 entry";
+  pushLog("9:16 trading enabled", "info");
+  scheduleNext();
+}
+
+export function setNineFifteenBotEnabled(next: boolean) {
+  nineFifteenEnabled = next;
+  startNineSixteenMonitorLoop();
+  if (!nineFifteenEnabled) {
+    if (nineFifteenTimer) clearTimeout(nineFifteenTimer);
+    nineFifteenTimer = null;
+    nineFifteenTimerDate = null;
+    pushLog(
+      tradeSlot === "nine-fifteen" && (phase === "in_position" || phase === "exiting")
+        ? "9:15 trading disabled — open 9:15 position still managed"
+        : "9:15 trading disabled",
+      "info",
+    );
+  } else {
+    pushLog("9:15 trading enabled — red at the 9:15:10 read buys the ATM PE at 9:15:11", "info");
+  }
   scheduleNext();
 }
 
 export function startNineSixteenBot() {
   startNineSixteenLiveMonitor();
-  if (!enabled) return;
-  pushLog("Server 9:16 bot started with app", "info");
-  scheduleNext();
+  startNineSixteenMonitorLoop();
+  if (nineFifteenEnabled && enabled) {
+    pushLog("9:15 and 9:16 trading enabled on startup", "info");
+  } else if (enabled) {
+    pushLog("9:16 trading enabled on startup", "info");
+  } else if (nineFifteenEnabled) {
+    pushLog("9:15 trading enabled on startup — red at 9:15:10 read buys the ATM PE at 9:15:11", "info");
+  } else {
+    pushLog("9:16 websocket monitor started (trading disabled)", "info");
+  }
 }
 
 export async function listBotTradeLogs() {

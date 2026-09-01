@@ -3,6 +3,7 @@ import { ChevronDown, RefreshCw } from "lucide-react";
 import type { NineFifteenCePeFailureTrade } from "@/types/nine-fifteen";
 import { formatWeekdayFromDateKey } from "@/lib/market-time";
 import { cn, formatNumber } from "@/lib/utils";
+import { useBacktestIndex } from "@/contexts/backtest-index-context";
 
 type MinuteCandle = {
   time: string;
@@ -60,6 +61,7 @@ function SessionMinuteChart({
   targetPoints: number;
   switchTarget?: SwitchTarget;
 }) {
+  const index = useBacktestIndex();
   const gradId = useId().replace(/:/g, "");
   const width = 920;
   const height = 280;
@@ -127,7 +129,7 @@ function SessionMinuteChart({
       className="nf-day-chart-svg"
       viewBox={`0 0 ${width} ${height}`}
       role="img"
-      aria-label="Nifty 1-minute candles 9:15 to 15:30"
+      aria-label={`${index.shortLabel} 1-minute candles 9:15 to 15:30`}
     >
       <defs>
         <linearGradient id={`nf-day-grid-${gradId}`} x1="0" y1="0" x2="0" y2="1">
@@ -221,6 +223,7 @@ function LossDayAccordionItem({
   switchTarget?: SwitchTarget;
   showAlt20After1010?: boolean;
 }) {
+  const index = useBacktestIndex();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -233,9 +236,10 @@ function LossDayAccordionItem({
     setError(null);
     void (async () => {
       try {
-        const res = await fetch(`/api/kite/nifty-session-minutes?date=${encodeURIComponent(trade.date)}`, {
-          credentials: "include",
-        });
+        const res = await fetch(
+          `/api/kite/index-session-minutes?date=${encodeURIComponent(trade.date)}&index=${index.key}`,
+          { credentials: "include" },
+        );
         const json = (await res.json()) as {
           data?: { candles?: MinuteCandle[] };
           error?: string;
@@ -380,13 +384,14 @@ export function LossTradesAccordion({
   showAlt20After1010?: boolean;
   switchTarget?: SwitchTarget;
 }) {
+  const index = useBacktestIndex();
   if (trades.length === 0) return null;
 
   return (
     <div className="nf-loss-accordion">
       <p className="nf-loss-accordion-hint text-muted text-sm">
-        Expand a loss day to load that session’s Nifty 50 1-min candles (9:15–15:30). Entry and target
-        levels are overlaid.
+        Expand a loss day to load that session’s {index.label} 1-min candles (9:15–15:30). Entry and
+        target levels are overlaid.
       </p>
       {trades.map((trade) => (
         <LossDayAccordionItem

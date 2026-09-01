@@ -1,6 +1,7 @@
 import { AlertTriangle, Clock } from "lucide-react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { ServerNineSixteenBotPanel } from "@/components/trade/ServerNineSixteenBotPanel";
+import { ServerMomentumScalperBotPanel } from "@/components/trade/ServerMomentumScalperBotPanel";
 import { useKite } from "@/contexts/kite-context";
 import "@/styles/nine-fifteen-page.css";
 
@@ -17,211 +18,170 @@ export default function NineFifteenPage() {
               9:15 Candle
             </h1>
             <p className="page-subtitle">
-              Live server bot — entry at 9:16 IST from the 9:15 bar · backtests live under Backtesting
+              Morning legs at 9:15 and 9:16 IST · Traps scans 10:30–12:00 & 13:45–15:10 · enable each bot separately on the panels
+              below
             </p>
           </div>
         </header>
 
         <div className="card nf-live-rules">
-          <h2 className="nf-live-rules-title">Live server bot — entry &amp; exit (today&apos;s trades)</h2>
+          <h2 className="nf-live-rules-title">Live strategies — entry &amp; exit rules</h2>
+          <p className="nf-live-rules-lead text-muted">
+            Two independent morning trades on the same server bot, plus Traps later in the session. Each has its
+            own enable switch. Historical 9:15-bar studies still live under <strong>Backtesting</strong>.
+          </p>
+
           <div className="nf-live-rules-grid">
+            {/* —— 9:15 trade —— */}
             <div className="nf-live-rules-col">
-              <h3 className="nf-live-rules-heading text-up">Entry (live)</h3>
+              <h3 className="nf-live-rules-heading text-down">9:15 trade · PE at 9:15:11</h3>
+              <p className="nf-live-rules-lead text-muted">
+                Short-only burst on the opening minute. Option P&amp;L exits only — no index target and no 30-pt
+                hard stop.
+              </p>
+              <h4 className="nf-live-rules-subheading">Entry</h4>
               <ol className="nf-live-rules-list">
                 <li>
-                  <strong>1. Capture 9:15 open/close from Kite websocket</strong>
+                  <strong>Capture the 9:15 open</strong> — first Nifty websocket tick from{" "}
+                  <strong>9:15:00</strong>.
+                </li>
+                <li>
+                  <strong>Read direction at 9:15:10</strong> — last tick strictly before 10 seconds vs that open.
                   <ul className="nf-live-rules-sublist">
                     <li>
-                      Connect at <strong>9:00:00</strong> and keep the websocket until{" "}
-                      <strong>16:00:00</strong> (Nifty 50 ticks)
+                      <strong>Red</strong> (any drop) → arm <strong>ATM PE</strong> market buy at{" "}
+                      <strong>9:15:11.000</strong>
                     </li>
                     <li>
-                      <strong>9:15:00 open</strong> = first tick received between <strong>9:15:00–9:15:15</strong>
-                    </li>
-                    <li>
-                      <strong>9:15:59 close</strong> = last tick received <strong>before 9:16:00</strong>
-                    </li>
-                    <li>
-                      Δ = <strong>close − open</strong>
+                      <strong>Green or flat</strong> → no 9:15 trade
                     </li>
                   </ul>
                 </li>
                 <li>
-                  <strong>2. Decide side + exit band (or skip)</strong>
-                  <ul className="nf-live-rules-sublist">
-                    <li>Flat (close = open) → <strong>no trade</strong></li>
-                    <li>
-                      |Δ| &lt; 11 → <strong>no trade</strong>
-                    </li>
-                    <li>
-                      Green, Δ ≥ +15 → <strong>CE BUY</strong> · main exits (±25 → ±20@10:01 → ±15@11:01)
-                    </li>
-                    <li>
-                      Red, Δ ≤ −15 → <strong>PE BUY</strong> · main exits
-                    </li>
-                    <li>
-                      11 ≤ |Δ| &lt; 15 → same CE/PE · <strong>near-miss</strong> exits (±20 → ±10@10:01)
-                    </li>
-                  </ul>
+                  <strong>Order window</strong> — retries until <strong>9:15:20</strong>; miss → no 9:15 leg
+                  today.
                 </li>
                 <li>
-                  <strong>3. Place order</strong>
-                  <ul className="nf-live-rules-sublist">
-                    <li>
-                      Time: fired by a dedicated <strong>9:16:00.000</strong> timer, not the polling loop (window
-                      until <strong>9:16:30</strong>; miss → no entry)
-                    </li>
-                    <li>
-                      Pre-warmed at <strong>9:00</strong> (instrument list, whitelisted IP route, balance) and{" "}
-                      <strong>9:15:58</strong> (ATM CE + PE strikes from the live tick) — so 9:16:00 is order
-                      placement only, with zero lookups
-                    </li>
-                    <li>
-                      Position sync with Zerodha pauses <strong>9:15:58–9:16:30</strong> so nothing competes with
-                      the order — a duplicate check still runs <strong>before every order</strong>, so an existing
-                      position is adopted instead of bought again
-                    </li>
-                    <li>
-                      Strike: <strong>ATM</strong> Nifty weekly (nearest expiry)
-                    </li>
-                    <li>
-                      Product: <strong>MIS</strong> market
-                    </li>
-                    <li>Size: max lots balance allows (from live LTP × lot size)</li>
-                    <li>
-                      Exchange limit: max <strong>25 lots per order</strong> — larger sizes split into parallel
-                      orders (e.g. 35 lots → 25+10 at the same time)
-                    </li>
-                    <li>
-                      Needs: bot on, Kite logged in before 9:15, whitelisted IP
-                    </li>
-                  </ul>
-                </li>
-                <li>
-                  <strong>4. Fallback entry retry (if order fails)</strong>
-                  <ul className="nf-live-rules-sublist">
-                    <li>
-                      Failed / rejected orders are <strong>not</strong> counted as entry — only a{" "}
-                      <strong>filled</strong> order starts the trade
-                    </li>
-                    <li>
-                      Until <strong>9:16:30</strong>, retry as fast as possible (~250ms between attempts): fresh{" "}
-                      <strong>ATM LTP</strong>, fresh <strong>balance</strong>, recompute lots, place again
-                    </li>
-                    <li>
-                      If Kite <strong>rejects</strong> and you had &gt;1 lot, next attempt caps lots at{" "}
-                      <strong>previous − 1</strong> (margin / sizing mismatch)
-                    </li>
-                    <li>
-                      Retries keep the same CE/PE and exit band from step 2 — the <strong>strike is re-checked
-                      against the live tick</strong> each attempt, so a fast move still gets the right ATM
-                    </li>
-                    <li>
-                      If the whitelisted-IP check fails from cache, it <strong>re-probes immediately</strong> rather
-                      than blocking the rest of the window
-                    </li>
-                    <li>
-                      If nothing fills by <strong>9:16:30</strong> → <strong>NO ENTRY</strong> for the day
-                    </li>
-                  </ul>
+                  ATM PE is pre-resolved at <strong>9:15:05</strong> so :11 is placement only.
                 </li>
               </ol>
-            </div>
-            <div className="nf-live-rules-col">
-              <h3 className="nf-live-rules-heading">Exit (live) — whichever fires first</h3>
-              <p className="nf-live-rules-lead text-muted">
-                On every Kite websocket tick (REST fallback if WS drops): exit if <strong>either</strong> the index
-                rule <strong>or</strong> the option P&amp;L % rule is met — not both required. Split entry orders are
-                one single position, so <strong>all lots exit together</strong> (see step 4). Then EOD force
-                square-off. Exit checks start the moment the entry fills and are{" "}
-                <strong>never paused</strong> — the 9:16 speed-ups only pause position sync, not the exit rules.
-              </p>
+              <h4 className="nf-live-rules-subheading">Exit (option P&amp;L % only)</h4>
               <ol className="nf-live-rules-list">
                 <li>
-                  <strong>1. Index target from Nifty spot at 9:16:00 fill</strong>
+                  <strong>No stop before +3%</strong> — a losing trade relies on the trailing ladder or{" "}
+                  <strong>3:25 PM</strong> square-off.
+                </li>
+                <li>
+                  <strong>Trailing from +3%</strong> — each rung locks the stop and steps the target by{" "}
+                  <strong>+2%</strong>:
                   <ul className="nf-live-rules-sublist">
                     <li>
-                      Anchor = <strong>Nifty 50 spot</strong> when the option fills — not 9:15 open, not option
-                      premium
+                      <strong>+3%</strong> → stop locks <strong>+3%</strong> · next target <strong>+5%</strong>
                     </li>
                     <li>
-                      <strong>Main</strong> (|Δ| ≥ 15): until <strong>10:01</strong> ±25 · from 10:01 ±20 · from
-                      11:01 ±15
+                      <strong>+5%</strong> → stop locks <strong>+5%</strong> · next target <strong>+7%</strong>
                     </li>
                     <li>
-                      <strong>Near-miss</strong> (11 ≤ |Δ| &lt; 15): until <strong>10:01</strong> ±20 · from 10:01
-                      ±10
+                      Then <strong>+7%→+9%</strong>, <strong>+9%→+11%</strong>, … with no ceiling
                     </li>
                   </ul>
                 </li>
                 <li>
-                  <strong>2. Option P&amp;L %</strong> (independent of index — either exits the trade)
-                  <ul className="nf-live-rules-sublist">
-                    <li>
-                      <strong>9:16–10:00 IST:</strong> unrealised ≥ <strong>+10%</strong> of (entry premium × qty)
-                    </li>
-                    <li>
-                      <strong>10:01–11:00 IST:</strong> unrealised ≥ <strong>+5%</strong> of (entry premium × qty)
-                    </li>
-                    <li>
-                      <strong>11:01–12:00 IST:</strong> unrealised ≥ <strong>+3%</strong> of (entry premium × qty)
-                    </li>
-                    <li>
-                      <strong>From 12:01 IST:</strong> unrealised ≥ <strong>+1%</strong> of (entry premium × qty)
-                    </li>
-                    <li>No P&amp;L % exit before 9:16 (entry)</li>
-                    <li>
-                      With split entries, P&amp;L uses the <strong>weighted average entry price</strong> and{" "}
-                      <strong>total quantity</strong> — not each order separately
-                    </li>
-                  </ul>
-                </li>
-                <li>
-                  <strong>3. End of day</strong>
-                  <ul className="nf-live-rules-sublist">
-                    <li>
-                      <strong>3:25 PM IST</strong> → force square-off if still open
-                    </li>
-                  </ul>
-                </li>
-                <li>
-                  <strong>4. Exiting a split (multi-order) position</strong>
-                  <ul className="nf-live-rules-sublist">
-                    <li>
-                      All 9:16 split orders are the <strong>same strike + expiry</strong>, so Zerodha holds them as{" "}
-                      <strong>one MIS position</strong> — there are no separate trades to manage
-                    </li>
-                    <li>
-                      Exit rules are checked <strong>once on the whole position</strong> (avg entry, total qty) — never
-                      per order, so partial exits can’t happen by rule
-                    </li>
-                    <li>
-                      When a rule fires, the full open quantity is split into <strong>max 25 lots per SELL order</strong>{" "}
-                      and <strong>all orders are sent simultaneously</strong> (e.g. 34 lots → 25+9 at once)
-                    </li>
-                    <li>
-                      If any SELL is rejected or unfilled, the bot re-sends only the{" "}
-                      <strong>remaining quantity</strong> (up to 3 rounds, then every tick) until Zerodha shows{" "}
-                      <strong>flat</strong>
-                    </li>
-                    <li>
-                      Orders already working on Kite are subtracted before a retry, so the position can never be{" "}
-                      <strong>double-sold or flipped short</strong>
-                    </li>
-                    <li>
-                      The day is marked complete <strong>only when quantity is 0</strong> — an unfilled leg keeps the
-                      bot in position and retrying
-                    </li>
-                  </ul>
+                  <strong>Exit:</strong> stop hit → immediate <strong>market</strong> sell. Reaching a target
+                  never exits — only slipping back to the locked rung does.
                 </li>
               </ol>
               <p className="nf-live-rules-foot text-muted">
-                Example after 10:01: Nifty +20 from fill exits even if option P&amp;L is under +5%; or +5% P&amp;L
-                exits even if Nifty has not reached ±20. Same OR logic from 11:01 with ±15 / +3%, and from 12:01 the
-                P&amp;L leg eases to +1% while the index leg stays ±15. Split example: entered
-                75 lots as 25+25+25 at 9:16 → on target, exits as 25+25+25 SELL orders fired together, not one after
-                another.
+                If the 9:15 leg is flat before <strong>9:15:59</strong>, the 9:16 leg may still run. If it is
+                still open at <strong>9:16:00</strong>, the 9:16 trade is skipped for the day.
               </p>
+            </div>
+
+            {/* —— 9:16 trade —— */}
+            <div className="nf-live-rules-col">
+              <h3 className="nf-live-rules-heading text-down">9:16 trade · PE on a red 9:15 bar</h3>
+              <p className="nf-live-rules-lead text-muted">
+                Uses the <strong>sealed 9:15 candle</strong> (open from the first tick 9:15:00–15, close from the
+                last tick before 9:16:00). <strong>PE only</strong> — a green 9:15 close is skipped, not bought
+                as a CE.
+              </p>
+              <h4 className="nf-live-rules-subheading">Entry</h4>
+              <ol className="nf-live-rules-list">
+                <li>
+                  <strong>Δ = 9:15 close − open</strong>
+                  <ul className="nf-live-rules-sublist">
+                    <li>Flat → no trade</li>
+                    <li>
+                      Green (+Δ) → <strong>no trade</strong> (no long side on this leg)
+                    </li>
+                    <li>
+                      |Δ| &lt; <strong>11</strong> → no trade
+                    </li>
+                    <li>
+                      Red, <strong>11 ≤ |Δ| &lt; 15</strong> → <strong>PE</strong> (near-miss entry band)
+                    </li>
+                    <li>
+                      Red, <strong>|Δ| ≥ 15</strong> → <strong>PE</strong> (main entry band)
+                    </li>
+                  </ul>
+                </li>
+                <li>
+                  <strong>Order at 9:16:00.000</strong> (dedicated timer, not the poll loop) · window until{" "}
+                  <strong>9:16:30</strong>.
+                </li>
+                <li>
+                  <strong>Blocked</strong> when the 9:15 leg is still open at 9:16:00, or when 9:15 closed
+                  green.
+                </li>
+                <li>ATM weekly PE · <strong>MIS market</strong> · max <strong>25 lots</strong> per order (split in parallel if larger).</li>
+              </ol>
+              <h4 className="nf-live-rules-subheading">Exit (option P&amp;L % only)</h4>
+              <ol className="nf-live-rules-list">
+                <li>
+                  <strong>Trailing option P&amp;L</strong> — nothing locked until <strong>+5%</strong>, then each{" "}
+                  <strong>+5%</strong> rung locks the stop and raises the next target. Slipping{" "}
+                  <strong>below</strong> the locked rung exits at market.
+                </li>
+                <li>
+                  <strong>3:25 PM</strong> force square-off if still open.
+                </li>
+              </ol>
+            </div>
+          </div>
+        </div>
+
+        <div className="card nf-live-rules nf-live-rules--traps">
+          <h2 className="nf-live-rules-title">Traps bot (10:30–12:00 & 13:45–15:10 IST)</h2>
+          <p className="nf-live-rules-lead text-muted">
+            Separate strategy on the panel below — not tied to the 9:15 candle. Scans every completed 1-minute
+            Nifty bar in two weekday windows until the afternoon entry cutoff. A trade still open when a window
+            ends is not cut — it runs to its own exit.
+          </p>
+          <div className="nf-live-rules-grid nf-live-rules-grid--single">
+            <div className="nf-live-rules-col">
+              <ol className="nf-live-rules-list">
+                <li>
+                  <strong>Signal candle:</strong> high − low &gt; <strong>2 pts</strong>; green body → CE idea,
+                  red → PE.
+                </li>
+                <li>
+                  <strong>10-second gate on the next minute:</strong> websocket ticks for the first{" "}
+                  <strong>10 seconds</strong>. CE needs Nifty ≥ signal close <strong>+0.2</strong>; PE needs ≤
+                  close <strong>−0.2</strong>. The open alone is not enough.
+                </li>
+                <li>
+                  <strong>Entry at :11</strong> — if the gate was seen <strong>and</strong> Wilder RSI(14)
+                  on Nifty 1-min closes is in <strong>0–10</strong>, <strong>40–50</strong>, or{" "}
+                  <strong>70–100</strong> (updated every websocket tick), <strong>MIS market buy</strong> on
+                  the ATM leg at second <strong>:11</strong>. Otherwise the setup is dropped.
+                </li>
+                <li>
+                  <strong>Exit ladder:</strong> initial stop <strong>−4%</strong> P&amp;L (instant, no hold) ·
+                  rungs at <strong>+0.5%</strong>, <strong>+0.7%</strong>, <strong>+1%</strong>, then{" "}
+                  <strong>+0.5%</strong> steps.
+                  Profit exits fire on the way back down to a locked rung, not when the rung is first reached.
+                </li>
+              </ol>
             </div>
           </div>
         </div>
@@ -241,6 +201,7 @@ export default function NineFifteenPage() {
         )}
 
         {connected && <ServerNineSixteenBotPanel connected={connected} />}
+        {connected && <ServerMomentumScalperBotPanel connected={connected} />}
       </div>
     </DashboardShell>
   );
