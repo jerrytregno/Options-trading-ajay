@@ -241,6 +241,37 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
       ? (status.spotPollMs / 1000).toFixed(2).replace(/\.?0+$/, "")
       : "0.25";
 
+  const hardStopPoints = status.hardStopPoints ?? 30;
+  const hardStopStartLabel = status.hardStopStartLabel ?? "10:00";
+  const isPeLeg = status.leg === "PE_BUY" || (status.leg?.startsWith("PE") ?? false);
+  const isCeLeg = status.leg === "CE_BUY" || (status.leg?.startsWith("CE") ?? false);
+  const hardStopSpot =
+    status.hardStopSpot ??
+    (status.entrySpot != null && status.entrySpot > 0 && status.leg
+      ? isCeLeg
+        ? status.entrySpot - hardStopPoints
+        : status.entrySpot + hardStopPoints
+      : null);
+  const hardStopBreached =
+    inPosition &&
+    Boolean(status.hardStopActive) &&
+    status.lastSpot != null &&
+    status.lastSpot > 0 &&
+    hardStopSpot != null &&
+    (isCeLeg
+      ? status.lastSpot <= hardStopSpot
+      : isPeLeg
+        ? status.lastSpot >= hardStopSpot
+        : false);
+  const ptsToHardStop =
+    inPosition && status.lastSpot != null && status.lastSpot > 0 && hardStopSpot != null
+      ? isPeLeg
+        ? hardStopSpot - status.lastSpot
+        : isCeLeg
+          ? status.lastSpot - hardStopSpot
+          : null
+      : null;
+
   return (
     <section className={cn("pat-card card ns916-trader", isLive && "pat-card--live")}>
       <header className="pat-head">
@@ -332,6 +363,39 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
         </div>
       )}
 
+      <div className="ns916-exit-rules">
+        <div className="bb-bot-section">Exit rules (9:15 &amp; 9:16)</div>
+        <div className="pat-metric-grid">
+          <div className="pat-metric">
+            <span className="pat-metric-label">P&amp;L trail</span>
+            <span className="pat-metric-value">Premium ladder</span>
+            <span className="pat-metric-hint">
+              9:15: arms at +{nineFifteenArmPct}%, then +{nineFifteenStepPct}% rungs. 9:16: arms at +
+              {trailArmPct}%, then +{trailStepPct}% rungs. Hitting a rung never sells — slipping back to the
+              locked stop does.
+            </span>
+          </div>
+          <div className="pat-metric pat-metric--highlight">
+            <span className="pat-metric-label">Hard stop</span>
+            <span className="pat-metric-value">
+              {hardStopStartLabel} · ±{hardStopPoints} pts adverse
+            </span>
+            <span className="pat-metric-hint">
+              From {hardStopStartLabel} IST, exit at market if Nifty is {hardStopPoints} pts against the entry
+              spot — PE when spot ≥ entry + {hardStopPoints}, CE when spot ≤ entry − {hardStopPoints}. Applies to
+              both the 9:15 and 9:16 legs.
+            </span>
+          </div>
+          <div className="pat-metric">
+            <span className="pat-metric-label">Square-off</span>
+            <span className="pat-metric-value">3:25 PM IST</span>
+            <span className="pat-metric-hint">
+              Any leg still open at the intraday cutoff is squared off at market.
+            </span>
+          </div>
+        </div>
+      </div>
+
       <div className="pat-status-row">
         {inPosition && (
           <span className="pat-badge pat-badge--on">In position</span>
@@ -371,6 +435,14 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
               Trailing stop locked at +{lockedPct}% — next TP +{status.pnlTargetPct}%
             </span>
           )}
+          {hardStopBreached && (
+            <span className="pat-badge pat-badge--closed">Hard stop breached — bot exiting</span>
+          )}
+          {status.hardStopActive && !hardStopBreached && hardStopSpot != null && (
+            <span className="pat-badge pat-badge--off">
+              Hard stop live · exit if Nifty {isPeLeg ? "≥" : "≤"} {formatNumber(hardStopSpot, 2)}
+            </span>
+          )}
         </div>
       )}
 
@@ -391,7 +463,7 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
                 {status.entrySpot != null ? formatNumber(status.entrySpot, 2) : "—"}
               </span>
               <span className="pat-stat-hint">
-                reference only · exits on option P&amp;L trail
+                reference · P&amp;L trail + {hardStopStartLabel} hard stop ±{hardStopPoints} pts
                 {status.exitMode === "near_miss"
                   ? " · near-miss entry"
                   : status.exitMode === "main"
@@ -457,6 +529,27 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
                 {trailArmed
                   ? `Exits the moment P&L slips below +${lockedPct}%`
                   : `Arms once P&L touches +${trailArmPct}% of the premium paid`}
+              </span>
+            </div>
+            <div
+              className={cn(
+                "pat-stat ns916-stat-hard-stop",
+                status.hardStopActive && "ns916-stat-hard-stop--active",
+                hardStopBreached && "ns916-stat-hard-stop--breach",
+              )}
+            >
+              <span className="pat-stat-label">Hard stop (from {hardStopStartLabel})</span>
+              <span className={cn("pat-stat-value", hardStopBreached && "text-down")}>
+                {hardStopSpot != null ? formatNumber(hardStopSpot, 2) : "—"}
+              </span>
+              <span className="pat-stat-hint">
+                {status.hardStopActive
+                  ? hardStopBreached
+                    ? "Breached — bot exiting at market"
+                    : ptsToHardStop != null && ptsToHardStop > 0
+                      ? `${formatNumber(ptsToHardStop, 2)} pts until stop (Nifty ${isPeLeg ? "≥" : "≤"} ${formatNumber(hardStopSpot ?? 0, 2)})`
+                      : `Exit if Nifty ${isPeLeg ? "≥" : "≤"} ${formatNumber(hardStopSpot ?? 0, 2)}`
+                  : `Arms at ${hardStopStartLabel} IST · ${hardStopPoints} pts adverse from entry`}
               </span>
             </div>
           </div>

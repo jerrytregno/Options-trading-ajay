@@ -36,8 +36,8 @@ export default function NineFifteenPage() {
             <div className="nf-live-rules-col">
               <h3 className="nf-live-rules-heading text-down">9:15 trade · PE at 9:15:11</h3>
               <p className="nf-live-rules-lead text-muted">
-                Short-only burst on the opening minute. Option P&amp;L exits only — no index target and no 30-pt
-                hard stop.
+                Short-only burst on the opening minute. Exits: option P&amp;L trailing ladder plus a{" "}
+                <strong>10:00 hard stop</strong> on adverse Nifty movement from the entry spot.
               </p>
               <h4 className="nf-live-rules-subheading">Entry</h4>
               <ol className="nf-live-rules-list">
@@ -65,11 +65,16 @@ export default function NineFifteenPage() {
                   ATM PE is pre-resolved at <strong>9:15:05</strong> so :11 is placement only.
                 </li>
               </ol>
-              <h4 className="nf-live-rules-subheading">Exit (option P&amp;L % only)</h4>
+              <h4 className="nf-live-rules-subheading">Exit (P&amp;L trail + hard stop)</h4>
+              <p className="nf-live-rules-callout">
+                <strong>Hard stop — 10:00 IST · ±30 pts adverse</strong> (PE: spot ≥ entry + 30, CE: spot ≤
+                entry − 30). From <strong>10:00</strong>, exit at market if Nifty has moved 30 pts against the
+                entry spot — even when the P&amp;L ladder has not armed.
+              </p>
               <ol className="nf-live-rules-list">
                 <li>
-                  <strong>No stop before +3%</strong> — a losing trade relies on the trailing ladder or{" "}
-                  <strong>3:25 PM</strong> square-off.
+                  <strong>No P&amp;L stop before +3%</strong> — until the ladder arms, a losing option leg still
+                  exits on the <strong>10:00 hard stop</strong> or <strong>3:25 PM</strong> square-off.
                 </li>
                 <li>
                   <strong>Trailing from +3%</strong> — each rung locks the stop and steps the target by{" "}
@@ -135,7 +140,11 @@ export default function NineFifteenPage() {
                 </li>
                 <li>ATM weekly PE · <strong>MIS market</strong> · max <strong>25 lots</strong> per order (split in parallel if larger).</li>
               </ol>
-              <h4 className="nf-live-rules-subheading">Exit (option P&amp;L % only)</h4>
+              <h4 className="nf-live-rules-subheading">Exit (P&amp;L trail + hard stop)</h4>
+              <p className="nf-live-rules-callout">
+                <strong>Hard stop — 10:00 IST · ±30 pts adverse</strong> (PE: spot ≥ entry + 30, CE: spot ≤
+                entry − 30). Same rule as the 9:15 leg — measured from the entry spot, not the 9:15 open.
+              </p>
               <ol className="nf-live-rules-list">
                 <li>
                   <strong>Trailing option P&amp;L</strong> — nothing locked until <strong>+5%</strong>, then each{" "}

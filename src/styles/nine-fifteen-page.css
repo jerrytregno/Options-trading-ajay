@@ -253,6 +253,17 @@
   color: var(--muted-foreground);
 }
 
+.nf-live-rules-callout {
+  margin: 0.35rem 0 0.5rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: #fcd34d;
+  background: color-mix(in srgb, #eab308 14%, transparent);
+  border: 1px solid color-mix(in srgb, #eab308 45%, var(--border));
+}
+
 .nf-live-rules--traps {
   margin-top: 0;
 }
