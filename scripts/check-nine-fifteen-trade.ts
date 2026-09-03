@@ -1,5 +1,5 @@
 /**
- * The 9:15 trade: the five-second read, its +5% take-profit limit exit, and the red-only gate it puts on the
+ * The 9:15 trade: the ten-second read, its +5% take-profit limit exit, and the red-only gate it puts on the
  * 9:16 trade that follows it.
  *
  * Run: npx tsx scripts/check-nine-fifteen-trade.ts
@@ -9,7 +9,9 @@ import {
   decide915Entry,
   build915BarFromCaptured,
   NINE_FIFTEEN_MIN_DROP_PTS,
+  getNineFifteenTakeProfitPct,
   NINE_FIFTEEN_TAKE_PROFIT_PCT,
+  NINE_FIFTEEN_TAKE_PROFIT_PCT_EARLY,
   NINE_FIFTEEN_ENTRY_SEC,
   NINE_FIFTEEN_SIGNAL_READ_SEC,
   NINE_FIFTEEN_ENTRY_WINDOW_END_SEC,
@@ -44,7 +46,7 @@ function ist(h: number, m: number, s: number, ms = 0): number {
   return Date.UTC(2026, 7, 31, h - 5, m - 30, s, ms);
 }
 
-console.log("\n--- the five-second read decides red or green ---");
+console.log("\n--- the ten-second read decides red or green ---");
 check("red with 10 pt drop buys the PE", decideNineFifteenEntry(24_800, 24_790), {
   action: "enter",
   leg: "PE_BUY",
@@ -67,10 +69,10 @@ check("a missing open is skipped", decideNineFifteenEntry(0, 24_790).action, "sk
 check("a missing read is skipped", decideNineFifteenEntry(24_800, 0).action, "skip");
 
 console.log("\n--- timing gates ---");
-check("the read is due at 9:15:05.000", isPastNineFifteenSignalRead(ist(9, 15, 5)), true);
-check("not at 9:15:04.999", isPastNineFifteenSignalRead(ist(9, 15, 4, 999)), false);
-check("entry opens at 9:15:06", isReadyForNineFifteenEntry(ist(9, 15, 6)), true);
-check("entry is not open at 9:15:05", isReadyForNineFifteenEntry(ist(9, 15, 5)), false);
+check("the read is due at 9:15:10.000", isPastNineFifteenSignalRead(ist(9, 15, 10)), true);
+check("not at 9:15:09.999", isPastNineFifteenSignalRead(ist(9, 15, 9, 999)), false);
+check("entry opens at 9:15:11", isReadyForNineFifteenEntry(ist(9, 15, 11)), true);
+check("entry is not open at 9:15:10", isReadyForNineFifteenEntry(ist(9, 15, 10)), false);
 check("entry still open at 9:15:20", isReadyForNineFifteenEntry(ist(9, 15, 20)), true);
 check("entry window is gone at 9:15:21", isPastNineFifteenEntryWindow(ist(9, 15, 21)), true);
 check("the minute is not over at 9:15:59", isPastNineFifteenMinute(ist(9, 15, 59)), false);
@@ -83,15 +85,23 @@ check(
 );
 
 console.log("\n--- +5% take-profit limit on capital deployed ---");
-check("take-profit pct is 5", NINE_FIFTEEN_TAKE_PROFIT_PCT, 5);
-check("limit price is entry × 1.05", nineFifteenTakeProfitLimitPrice(100), 105);
-check("limit price rounds to paisa", nineFifteenTakeProfitLimitPrice(153.33), 161);
+check("take-profit pct is 5 on Tue/Fri default", NINE_FIFTEEN_TAKE_PROFIT_PCT, 5);
+check("Mon/Wed/Thu take-profit is 3%", getNineFifteenTakeProfitPct("2026-08-31"), 3);
+check("Tuesday take-profit is 5%", getNineFifteenTakeProfitPct("2026-09-01"), 5);
+check("Wednesday take-profit is 3%", getNineFifteenTakeProfitPct("2026-09-02"), 3);
+check("Thursday take-profit is 3%", getNineFifteenTakeProfitPct("2026-09-03"), 3);
+check("limit price is entry × 1.05 at 5%", nineFifteenTakeProfitLimitPrice(100, 5), 105);
+check("limit price is entry × 1.03 at 3%", nineFifteenTakeProfitLimitPrice(100, 3), 103);
+check("limit price rounds to paisa", nineFifteenTakeProfitLimitPrice(153.33, 5), 161);
 check("deployed capital is entry × qty", nineFifteenDeployedCapital(100, 650), 65_000);
-check("profit aim is 5% of deployed", nineFifteenTakeProfitAmount(100, 1000), 5000);
-check("₹1L deployed → ₹5K profit aim", nineFifteenTakeProfitAmount(100, 1000), 100_000 * 0.05);
-check("does not exit below target", shouldExitNineFifteenTakeProfit(4999, 100, 1000), false);
-check("exits at target", shouldExitNineFifteenTakeProfit(5000, 100, 1000), true);
-check("label mentions +5% limit", getNineFifteenLadderLabel().includes("+5%"), true);
+check("profit aim is 5% of deployed", nineFifteenTakeProfitAmount(100, 1000, 5), 5000);
+check("profit aim is 3% of deployed", nineFifteenTakeProfitAmount(100, 1000, 3), 3000);
+check("₹1L deployed → ₹5K profit aim", nineFifteenTakeProfitAmount(100, 1000, 5), 100_000 * 0.05);
+check("does not exit below 5% target", shouldExitNineFifteenTakeProfit(4999, 100, 1000, 5), false);
+check("exits at 5% target", shouldExitNineFifteenTakeProfit(5000, 100, 1000, 5), true);
+check("exits at 3% target", shouldExitNineFifteenTakeProfit(3000, 100, 1000, 3), true);
+check("label mentions +5% on Friday", getNineFifteenLadderLabel("2026-09-05").includes("+5%"), true);
+check("label mentions +3% on Wednesday", getNineFifteenLadderLabel("2026-09-02").includes("+3%"), true);
 
 check(
   "exit summary names limit fill and P&L",

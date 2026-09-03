@@ -142,8 +142,8 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
   const initialStopPnl = status?.initialStopPnlPct ?? standardRules.initialStopPnlPct;
   const initialStopHoldSec = status?.initialStopHoldSec ?? standardRules.initialStopHoldSec;
   const initialStopInstant = initialStopHoldSec <= 0;
-  const scanClose = rules?.tradeWindowCloseIst ?? "15:10";
-  const scanSchedule = status?.scanStartIst ?? "after 9:16:30–15:10";
+  const scanClose = rules?.tradeWindowCloseIst ?? "15:30";
+  const scanSchedule = status?.scanStartIst ?? "after 9:16:30–15:30";
   const hardStopPnl = status?.hardStopPnlPct ?? standardRules.hardStopPnlPct;
   const profitExitPnlPct = status?.profitExitPnlPct ?? null;
   const profitExitPrice = status?.profitExitPrice ?? null;
@@ -238,13 +238,14 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
             exactly where it opened has no colour and is skipped however wide it ran.
           </li>
           <li>
-            <strong>First-tick gate on candle 2.</strong> The signal minute&apos;s{" "}
-            <strong>last websocket tick</strong> is compared to the next minute&apos;s{" "}
-            <strong>first tick</strong>. Green needs first ≥ last + <strong>0.2</strong>; red needs
-            first ≤ last − <strong>0.2</strong>. If the first tick fails, the setup is dropped.
+            <strong>First-second gate on candle 2.</strong> The signal minute&apos;s{" "}
+            <strong>last websocket tick</strong> is compared to every tick in the next minute&apos;s{" "}
+            <strong>first second</strong>. Green needs any tick ≥ last + <strong>0.1</strong>; red needs
+            any tick ≤ last − <strong>0.1</strong>. If none reach it in that second, the setup is dropped.
           </li>
           <li>
-            <strong>Pullback entry.</strong> Once the gate passes, the start price is that first tick.
+            <strong>Pullback entry.</strong> Once the gate passes, the start price is the first tick of
+            candle 2.
             Green waits for a <strong>2 pt drop</strong> from start → <strong>CE market buy</strong>.
             Red waits for a <strong>2 pt gain</strong> from start → <strong>PE market buy</strong>.
           </li>
@@ -322,11 +323,12 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
           <li>
             <strong>The exit fires on the way back down, not on the way up.</strong> Reaching{" "}
             <strong>+{pnlArm}%</strong> locks +{pnlArm}% as the floor and points the target at{" "}
-            <strong>+{firstLadderTarget}%</strong>. Only when P&amp;L falls back to <strong>+{pnlArm}%</strong>{" "}
-            does the bot sell, and it sells immediately with a{" "}
-            <strong>marketable MIS limit</strong> priced <strong>{profitExitGiveback}% under the floor</strong>{" "}
-            (+{pnlArm}% floor → aim ~+{(pnlArm - profitExitGiveback).toFixed(2).replace(/\.?0+$/, "")}%).
-            Pricing it through the touch is what makes it trade on arrival instead of resting.
+            <strong>+{firstLadderTarget}%</strong>. When P&amp;L falls back to the locked floor, the bot
+            instantly places a <strong>resting MIS limit sell</strong> at{" "}
+            <strong>{profitExitGiveback}% under that floor</strong> (+{pnlArm}% floor → aim ~+
+            {(pnlArm - profitExitGiveback).toFixed(2).replace(/\.?0+$/, "")}%) and retries until Kite
+            accepts it. If the limit is stuck, a <strong>market backup</strong> fires at the same giveback
+            level.
           </li>
           <li>
             <strong>Stops cross at market.</strong> The initial stop at {initialStopPnl}% P&amp;L
@@ -459,7 +461,7 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
             <span className="pat-metric-hint">
               {status.pendingSignal.optionMarkPrice != null
                 ? `${status.pendingSignal.optionTradingsymbol ?? "option"} at ₹${status.pendingSignal.optionMarkPrice.toFixed(2)} · buying at market`
-                : "first-tick gate → 2 pt pullback entry"}
+                : "first-second gate → 2 pt pullback entry"}
             </span>
           </div>
         )}

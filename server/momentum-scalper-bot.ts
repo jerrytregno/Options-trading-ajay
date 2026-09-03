@@ -47,14 +47,17 @@ import {
   formatIstMins,
   momentumProfitExitLimitPrice,
   momentumProfitExitPnlPct,
+  shouldMomentumProfitExitMarketBackup,
   MOMENTUM_PROFIT_EXIT_GIVEBACK_PCT,
   momentumExitProfileConfig,
   momentumExitProfileForEntryMins,
   momentumGateLevel,
   momentumGateFirstTickPasses,
+  momentumGateInScanWindow,
   trapsPullbackEntryLevel,
   trapsPullbackEntryTriggered,
   MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS,
+  MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS,
   MOMENTUM_SCALPER_SCAN_START_MINS,
   signedSignalMovePts,
   type MomentumEntryDecision,
@@ -89,11 +92,13 @@ interface PendingSignal {
   signalMins: number;
   /** Reference close from the signal candle — gate is measured against this. */
   signalClose: number;
-  /** Last websocket tick on the signal candle — gate compares the next minute's first tick to this. */
+  /** Last websocket tick on the signal candle — gate compares candle 2's first second to this. */
   signalLastTick: number;
+  /** First websocket tick on candle 2 — pullback is measured from this once the gate passes. */
+  momentumMinuteFirstTick: number | null;
   /** Nifty at the second minute's first tick once the gate passes — pullback is measured from here. */
   entryStartPrice: number | null;
-  /** True once the second minute's first tick has been checked against {@link signalLastTick}. */
+  /** True once candle 2's first-second gate window has been evaluated. */
   gateChecked: boolean;
   /** True once the first-tick gate cleared. */
   momentumGateSeen: boolean;
@@ -132,6 +137,8 @@ export interface MomentumExitRuleSummary {
   /** Signed level that exits at once, with no hold and no limit, e.g. −6. */
   hardStopPnlPct: number;
 }
+
+export type ProfitExitOrderStatus = "none" | "pending" | "partial" | "complete" | "failed" | "cancelled";
 
 export interface MomentumScalperBotStatus {
   enabled: boolean;
@@ -199,12 +206,17 @@ export interface MomentumScalperBotStatus {
    * whenever an opening-window trade was live.
    */
   exitRules: Record<MomentumExitProfile, MomentumExitRuleSummary>;
-  /** Profit % the marketable limit will aim for when the locked floor is touched. */
+  /** Profit % the resting limit aims for when the locked floor is touched. */
   profitExitPnlPct: number | null;
   /** Premium that profit target works out to on this entry. */
   profitExitPrice: number | null;
   /** How far under the locked floor a profit exit is priced, in P&L %. */
   profitExitGivebackPct: number;
+  profitExitArmed?: boolean;
+  profitExitOrderStatus?: ProfitExitOrderStatus;
+  profitExitOrderIds?: string[];
+  profitExitFilledQty?: number;
+  profitExitPendingQty?: number;
   /** Final MIS safety square-off for an open leg (entries stop earlier, at the trade window close). */
   forceExitIst: string;
   /** Wilder RSI(14) from live Nifty 1-min bars — null until 14 prior closes exist. */
@@ -384,6 +396,16 @@ let rsiPrefillPromise: Promise<void> | null = null;
 let lastProcessedBarMins = -1;
 let squareOffInFlight = false;
 
+const MOMENTUM_PROFIT_EXIT_PLACE_MAX_ATTEMPTS = 15;
+let profitExitArmed = false;
+let profitExitFloorPct = 0;
+let profitExitExitIndexPrice = 0;
+let profitExitOrderIds: string[] = [];
+let profitExitLimitPrice = 0;
+let profitExitOrderStatus: ProfitExitOrderStatus = "none";
+let profitExitFilledQty = 0;
+let profitExitPlacing = false;
+
 const logs: MomentumScalperBotStatus["logs"] = [];
 
 interface PersistedState {
@@ -397,6 +419,13 @@ interface PersistedState {
   positionLotSize: number;
   leg: TradeLeg | null;
   exitState: MomentumScalperExitState | null;
+  profitExitArmed?: boolean;
+  profitExitFloorPct?: number;
+  profitExitExitIndexPrice?: number;
+  profitExitOrderIds?: string[];
+  profitExitLimitPrice?: number;
+  profitExitOrderStatus?: ProfitExitOrderStatus;
+  profitExitFilledQty?: number;
   tradesToday: number;
   resumeScanAfterMins: number;
   optionInstrumentToken: number;
@@ -498,6 +527,13 @@ function saveState(dateIst: string) {
     positionLotSize,
     leg,
     exitState,
+    profitExitArmed: profitExitArmed || undefined,
+    profitExitFloorPct: profitExitFloorPct > 0 ? profitExitFloorPct : undefined,
+    profitExitExitIndexPrice: profitExitExitIndexPrice > 0 ? profitExitExitIndexPrice : undefined,
+    profitExitOrderIds: profitExitOrderIds.length > 0 ? profitExitOrderIds : undefined,
+    profitExitLimitPrice: profitExitLimitPrice > 0 ? profitExitLimitPrice : undefined,
+    profitExitOrderStatus: profitExitOrderStatus !== "none" ? profitExitOrderStatus : undefined,
+    profitExitFilledQty: profitExitFilledQty > 0 ? profitExitFilledQty : undefined,
     tradesToday,
     resumeScanAfterMins,
     optionInstrumentToken,
@@ -586,6 +622,14 @@ function loadState(dateIst: string) {
     tradesToday = parsed.tradesToday;
     resumeScanAfterMins = parsed.resumeScanAfterMins;
     optionInstrumentToken = parsed.optionInstrumentToken;
+    profitExitArmed = parsed.profitExitArmed ?? false;
+    profitExitFloorPct = parsed.profitExitFloorPct ?? exitState?.lockedPnlPct ?? 0;
+    profitExitExitIndexPrice = parsed.profitExitExitIndexPrice ?? entryIndexPrice;
+    profitExitOrderIds = parsed.profitExitOrderIds ?? [];
+    profitExitLimitPrice = parsed.profitExitLimitPrice ?? 0;
+    profitExitOrderStatus =
+      parsed.profitExitOrderStatus ?? (profitExitOrderIds.length > 0 ? "pending" : "none");
+    profitExitFilledQty = parsed.profitExitFilledQty ?? 0;
     // Restart the grace window rather than trusting the old fill time: the bot should be sure the
     // broker book has caught up before it can decide a recovered leg is gone.
     positionOpenedAtMs = phase === "in_position" || phase === "exiting" ? Date.now() : 0;
@@ -828,6 +872,218 @@ async function marketableLimitSell(
   const filled = await settleLimitOrders(accessToken, placed.orderIds);
   if (filled > 0) pushLog(`Exit limit filled ${filled} qty @ ₹${limitPrice.toFixed(2)}`, "success");
   return filled;
+}
+
+function clearProfitExitTracking() {
+  profitExitArmed = false;
+  profitExitFloorPct = 0;
+  profitExitExitIndexPrice = 0;
+  profitExitOrderIds = [];
+  profitExitLimitPrice = 0;
+  profitExitOrderStatus = "none";
+  profitExitFilledQty = 0;
+  profitExitPlacing = false;
+}
+
+async function cancelProfitExitLimitOrders(accessToken: string): Promise<void> {
+  if (profitExitOrderIds.length === 0) return;
+  for (const orderId of profitExitOrderIds) {
+    try {
+      await cancelRegularOrder(accessToken, orderId);
+    } catch {
+      /* already filled or cancelled */
+    }
+  }
+  if (profitExitFilledQty <= 0) {
+    profitExitOrderStatus = "cancelled";
+  }
+  profitExitOrderIds = [];
+}
+
+async function placeProfitExitLimitOrders(
+  accessToken: string,
+  dateIst: string,
+  lockedFloorPct: number,
+): Promise<boolean> {
+  if (!tradingsymbol || quantity <= 0 || entryPrice <= 0 || lockedFloorPct <= 0) return false;
+  if (profitExitPlacing) return profitExitOrderIds.length > 0;
+
+  const limitPrice = momentumProfitExitLimitPrice(entryPrice, lockedFloorPct);
+  if (!(limitPrice > 0)) return false;
+
+  const lotSize = positionLotSize > 0 ? positionLotSize : 65;
+  const aimPct = momentumProfitExitPnlPct(lockedFloorPct);
+  profitExitPlacing = true;
+  try {
+    pushLog(
+      `Profit exit limit · SELL ${quantity} qty @ ₹${limitPrice.toFixed(2)} ` +
+        `(floor +${lockedFloorPct}% → aim ~+${aimPct}% on ₹${entryPrice.toFixed(2)} entry)`,
+      "success",
+    );
+
+    for (let attempt = 1; attempt <= MOMENTUM_PROFIT_EXIT_PLACE_MAX_ATTEMPTS; attempt += 1) {
+      if (profitExitOrderIds.length > 0) {
+        await cancelProfitExitLimitOrders(accessToken);
+      }
+
+      const placed = await placeSplitOrders(accessToken, {
+        tradingsymbol,
+        transaction_type: "SELL",
+        quantities: splitQuantityIntoOrderChunks(quantity, lotSize),
+        limitPrice,
+      });
+      for (const failure of placed.failures) {
+        pushLog(
+          `Profit exit limit rejected (attempt ${attempt}/${MOMENTUM_PROFIT_EXIT_PLACE_MAX_ATTEMPTS}) · ${failure.message}`,
+          "warning",
+        );
+      }
+
+      if (placed.orderIds.length > 0) {
+        profitExitOrderIds = placed.orderIds;
+        profitExitLimitPrice = limitPrice;
+        profitExitFloorPct = lockedFloorPct;
+        profitExitOrderStatus = "pending";
+        profitExitFilledQty = 0;
+        pushLog(
+          `Profit exit limit LIVE on Kite · ${placed.orderIds.length} order(s) · ${quantity} qty @ ₹${limitPrice.toFixed(2)}`,
+          "success",
+        );
+        saveState(dateIst);
+        return true;
+      }
+    }
+
+    profitExitOrderStatus = "failed";
+    pushLog(
+      `Profit exit limit not placed after ${MOMENTUM_PROFIT_EXIT_PLACE_MAX_ATTEMPTS} attempts — market backup at ~+${aimPct}% if price prints`,
+      "warning",
+    );
+    saveState(dateIst);
+    return false;
+  } finally {
+    profitExitPlacing = false;
+  }
+}
+
+async function syncProfitExitLimitOrders(accessToken: string, dateIst: string): Promise<void> {
+  if (!profitExitArmed || profitExitOrderIds.length === 0 || !tradingsymbol || quantity <= 0) return;
+
+  try {
+    const rows = await fetchOrdersByIds(accessToken, profitExitOrderIds);
+    let filledQty = 0;
+    let pendingQty = 0;
+    let anyRejected = false;
+
+    for (const orderId of profitExitOrderIds) {
+      const row = rows.get(orderId);
+      if (!row) {
+        pendingQty += Math.max(0, quantity - filledQty - pendingQty);
+        continue;
+      }
+      filledQty += Number(row.filled_quantity) || 0;
+      pendingQty += Math.max(
+        0,
+        (Number(row.quantity) || 0) - (Number(row.filled_quantity) || 0),
+      );
+      if ((row.status ?? "").toUpperCase() === "REJECTED") anyRejected = true;
+    }
+
+    profitExitFilledQty = filledQty;
+    if (filledQty >= quantity) profitExitOrderStatus = "complete";
+    else if (filledQty > 0) profitExitOrderStatus = "partial";
+    else if (anyRejected && pendingQty <= 0) profitExitOrderStatus = "failed";
+
+    saveState(dateIst);
+  } catch (err) {
+    pushLog(
+      `Profit exit limit sync failed · ${err instanceof Error ? err.message : "could not read Kite orders"}`,
+      "warning",
+    );
+  }
+}
+
+async function maybeCompleteProfitExitFill(accessToken: string, dateIst: string): Promise<boolean> {
+  if (!tradingsymbol) return false;
+  try {
+    const brokerQty = await fetchNetQty(accessToken, tradingsymbol);
+    if (brokerQty > 0) return false;
+  } catch {
+    return false;
+  }
+
+  const aimPct = profitExitFloorPct > 0 ? momentumProfitExitPnlPct(profitExitFloorPct) : null;
+  const summary =
+    `Exited — profit exit limit filled on Kite` +
+    (profitExitFloorPct > 0 ? ` · floor +${profitExitFloorPct}%` : "") +
+    (aimPct != null ? ` (~+${aimPct}% on entry)` : "") +
+    (profitExitLimitPrice > 0 ? ` @ ₹${profitExitLimitPrice.toFixed(2)}` : "") +
+    `. Nifty ${profitExitExitIndexPrice > 0 ? profitExitExitIndexPrice.toFixed(2) : lastSpot?.toFixed(2) ?? "—"}.`;
+
+  clearProfitExitTracking();
+  await completeTrackedExit(
+    accessToken,
+    dateIst,
+    summary,
+    profitExitExitIndexPrice > 0 ? profitExitExitIndexPrice : lastSpot ?? entryIndexPrice,
+    profitExitLimitPrice > 0 ? profitExitLimitPrice : lastOptionPrice,
+  );
+  return true;
+}
+
+async function profitExitMarketBackup(
+  accessToken: string,
+  lockedFloorPct: number,
+): Promise<void> {
+  if (squareOffInFlight || !tradingsymbol || quantity <= 0) return;
+  await cancelProfitExitLimitOrders(accessToken);
+  clearProfitExitTracking();
+  const aimPct = momentumProfitExitPnlPct(lockedFloorPct);
+  const pnlPct = currentPnlPct();
+  const pnlLabel = pnlPct != null ? ` · P&L ${pnlPct.toFixed(2)}%` : "";
+  await squareOff(
+    accessToken,
+    `Exited — market backup at ~+${aimPct}% under the +${lockedFloorPct}% floor${pnlLabel}. ` +
+      `Nifty ${(profitExitExitIndexPrice > 0 ? profitExitExitIndexPrice : lastSpot ?? entryIndexPrice).toFixed(2)}.`,
+    profitExitExitIndexPrice > 0 ? profitExitExitIndexPrice : lastSpot ?? entryIndexPrice,
+  );
+}
+
+async function armProfitExit(accessToken: string, dateIst: string, lockedFloorPct: number, exitIndexPrice: number) {
+  if (profitExitArmed && profitExitFloorPct === lockedFloorPct) return;
+
+  profitExitArmed = true;
+  profitExitFloorPct = lockedFloorPct;
+  profitExitExitIndexPrice = exitIndexPrice;
+  const aimPct = momentumProfitExitPnlPct(lockedFloorPct);
+  pushLog(
+    `Floor +${lockedFloorPct}% touched — placing resting limit sell at ~+${aimPct}% ` +
+      `(+${lockedFloorPct}% minus ${MOMENTUM_PROFIT_EXIT_GIVEBACK_PCT}%)`,
+    "info",
+  );
+  await placeProfitExitLimitOrders(accessToken, dateIst, lockedFloorPct);
+  saveState(dateIst);
+}
+
+async function maintainProfitExitOrders(accessToken: string, dateIst: string) {
+  if (phase !== "in_position" || squareOffInFlight || !profitExitArmed || profitExitFloorPct <= 0) return;
+
+  await syncProfitExitLimitOrders(accessToken, dateIst);
+
+  if (
+    profitExitOrderStatus === "failed" &&
+    profitExitOrderIds.length === 0 &&
+    profitExitFilledQty <= 0
+  ) {
+    await placeProfitExitLimitOrders(accessToken, dateIst, profitExitFloorPct);
+  }
+
+  if (await maybeCompleteProfitExitFill(accessToken, dateIst)) return;
+
+  const pnlPct = currentPnlPct();
+  if (shouldMomentumProfitExitMarketBackup(pnlPct, profitExitFloorPct)) {
+    await profitExitMarketBackup(accessToken, profitExitFloorPct);
+  }
 }
 
 async function completeTrackedExit(
@@ -1159,6 +1415,9 @@ async function squareOff(
   message = reason;
   pushLog(reason, "success");
 
+  await cancelProfitExitLimitOrders(accessToken);
+  clearProfitExitTracking();
+
   const symbol = tradingsymbol;
   const lotSize = positionLotSize > 0 ? positionLotSize : 65;
   const side: DayScalperSide = leg?.startsWith("PE") ? "PE" : "CE";
@@ -1305,6 +1564,7 @@ function resetTrackedPosition() {
   positionLotSize = 0;
   leg = null;
   exitState = null;
+  clearProfitExitTracking();
   unrealisedPnl = null;
   lastOptionPrice = null;
   optionInstrumentToken = 0;
@@ -1574,6 +1834,7 @@ function currentPnlPct(): number | null {
 function runExitCheck() {
   if (phase !== "in_position" || !exitState || lastSpot == null || !(lastSpot > 0)) return;
 
+  const ctx = getIndianMarketContext();
   const profile = activeExitProfile();
   const previousLocked = exitState.lockedPnlPct;
   const result = evaluateMomentumExit(exitState, {
@@ -1587,27 +1848,41 @@ function runExitCheck() {
     const locked = exitState.lockedPnlPct;
     pushLog(
       `+${locked}% reached — floor locked at +${locked}%, next target ` +
-        `+${momentumPnlTargetPct(locked, profile)}%. Nothing sold yet: coming back down to ` +
-        `+${locked}% is what triggers the exit, at ~+${momentumProfitExitPnlPct(locked)}%.`,
+        `+${momentumPnlTargetPct(locked, profile)}%. Coming back down to +${locked}% places a ` +
+        `resting limit sell at ~+${momentumProfitExitPnlPct(locked)}%.`,
       "info",
     );
-    saveState(getIndianMarketContext().dateIST);
+    saveState(ctx.dateIST);
   }
 
-  if (result.exit) {
-    void handleExitHit(
-      result.exit.exitIndexPrice,
-      result.exit.outcome,
-      result.exit.lockedPnlPct,
-      result.exit.hardStop === true,
-    );
+  const session = loadKiteSession();
+  if (result.exit && session?.accessToken) {
+    if (result.exit.hardStop || result.exit.outcome === "stop") {
+      void handleExitHit(
+        result.exit.exitIndexPrice,
+        result.exit.outcome,
+        result.exit.lockedPnlPct,
+        result.exit.hardStop === true,
+      );
+    } else if (result.exit.outcome === "trail-stop" && result.exit.lockedPnlPct > 0) {
+      void armProfitExit(
+        session.accessToken,
+        ctx.dateIST,
+        result.exit.lockedPnlPct,
+        result.exit.exitIndexPrice,
+      );
+    }
+  }
+
+  if (session?.accessToken) {
+    void maintainProfitExitOrders(session.accessToken, ctx.dateIST);
   }
 }
 
 async function handleExitHit(
   exitIndexPrice: number,
   outcome: string,
-  lockedPnlPct = 0,
+  _lockedPnlPct = 0,
   hardStop = false,
 ) {
   const session = loadKiteSession();
@@ -1619,6 +1894,8 @@ async function handleExitHit(
   // The opening profile breaches strictly below its level; the standard one breaches at it.
   const breachWord = profile === "opening" ? "below" : "at or below";
   if (hardStop) {
+    await cancelProfitExitLimitOrders(session.accessToken);
+    clearProfitExitTracking();
     await squareOff(
       session.accessToken,
       `Exited — hard stop, option P&L broke −${config.hardStopLossPct}%${pnlLabel}. ` +
@@ -1628,19 +1905,7 @@ async function handleExitHit(
     return;
   }
 
-  // Profit exit: price came back to the locked floor. Sold with a limit set a tenth of a percent
-  // under that floor, which is through the touch at the moment it goes out.
-  if (outcome === "trail-stop" && lockedPnlPct > 0 && entryPrice > 0) {
-    const limitPrice = momentumProfitExitLimitPrice(entryPrice, lockedPnlPct);
-    const aimPct = momentumProfitExitPnlPct(lockedPnlPct);
-    await squareOff(
-      session.accessToken,
-      `Exited — P&L came back to the locked +${lockedPnlPct}% floor${pnlLabel}. ` +
-        `Marketable limit sell at ₹${limitPrice.toFixed(2)} (~+${aimPct}% on the ₹${entryPrice.toFixed(2)} entry). ` +
-        `Nifty ${exitIndexPrice.toFixed(2)}.`,
-      exitIndexPrice,
-      limitPrice > 0 ? limitPrice : undefined,
-    );
+  if (outcome === "trail-stop") {
     return;
   }
 
@@ -1770,9 +2035,9 @@ function onNiftyTick(tick: NiftyTick) {
 }
 
 /**
- * Second minute: first tick vs signal last tick for the gate, then wait for a 2-pt pullback from start.
+ * Second minute: scan the first second for any tick that clears the gate, then wait for a 2-pt pullback from start.
  */
-function evaluateTriggerOnTick(_tickAtMs: number) {
+function evaluateTriggerOnTick(tickAtMs: number) {
   // Ticks keep flowing while a disabled bot sees an open position out — none may start a new one.
   if (!enabled) return;
   if (!pendingSignal || !currentBar) return;
@@ -1786,17 +2051,29 @@ function evaluateTriggerOnTick(_tickAtMs: number) {
   }
 
   if (!pendingSignal.gateChecked) {
+    const inGateWindow = momentumGateInScanWindow(tickAtMs);
+    if (inGateWindow) {
+      if (pendingSignal.momentumMinuteFirstTick == null) {
+        pendingSignal.momentumMinuteFirstTick = lastSpot;
+      }
+      if (
+        momentumGateFirstTickPasses(
+          pendingSignal.side,
+          lastSpot,
+          pendingSignal.signalLastTick,
+        )
+      ) {
+        pendingSignal.momentumGateSeen = true;
+      }
+      return;
+    }
+
     pendingSignal.gateChecked = true;
     const gateLevel = momentumGateLevel(pendingSignal.side, pendingSignal.signalLastTick);
-    const pass = momentumGateFirstTickPasses(
-      pendingSignal.side,
-      lastSpot,
-      pendingSignal.signalLastTick,
-    );
-    if (!pass) {
+    if (!pendingSignal.momentumGateSeen) {
       pushLog(
         `No trade — ${pendingSignal.signalTimeIst} ${pendingSignal.side} setup cancelled. ` +
-          `First tick ${lastSpot.toFixed(2)} did not reach ` +
+          `First second ended without any tick reaching ` +
           `${pendingSignal.side === "CE" ? "≥" : "≤"} ${gateLevel.toFixed(2)} ` +
           `(last tick ${pendingSignal.signalLastTick.toFixed(2)}).`,
         "warning",
@@ -1805,13 +2082,13 @@ function evaluateTriggerOnTick(_tickAtMs: number) {
       return;
     }
 
-    pendingSignal.momentumGateSeen = true;
-    pendingSignal.entryStartPrice = lastSpot;
+    pendingSignal.entryStartPrice = pendingSignal.momentumMinuteFirstTick ?? lastSpot;
     const session = loadKiteSession();
     if (session?.accessToken) warmEntryPath(session.accessToken);
-    const pullbackLevel = trapsPullbackEntryLevel(pendingSignal.side, lastSpot);
+    const start = pendingSignal.entryStartPrice;
+    const pullbackLevel = trapsPullbackEntryLevel(pendingSignal.side, start);
     pushLog(
-      `Gate passed — ${pendingSignal.side} ${pendingSignal.signalTimeIst} · start ${lastSpot.toFixed(2)} · ` +
+      `Gate passed — ${pendingSignal.side} ${pendingSignal.signalTimeIst} · start ${start.toFixed(2)} · ` +
         `waiting for ${pendingSignal.side === "CE" ? "drop" : "gain"} to ${pullbackLevel.toFixed(2)} ` +
         `(−/+${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pts).`,
       "info",
@@ -1882,6 +2159,7 @@ async function onMinuteClosed() {
     signalMins: bar.mins,
     signalClose: bar.close,
     signalLastTick,
+    momentumMinuteFirstTick: null,
     entryStartPrice: null,
     gateChecked: false,
     momentumGateSeen: false,
@@ -1894,9 +2172,9 @@ async function onMinuteClosed() {
   pushLog(
     `Setup — ${side === "CE" ? "Bullish" : "Bearish"} ${bar.timeIst} candle ` +
       `(${Math.abs(movePts)} pt range, ${bodyPts > 0 ? "+" : ""}${bodyPts} pt body) → ${side} idea. ` +
-      `Next minute: first tick must reach ${side === "CE" ? "≥" : "≤"} ${gateNeed} ` +
+      `Next minute: any tick in the first second must reach ${side === "CE" ? "≥" : "≤"} ${gateNeed} ` +
       `(last tick ${signalLastTick.toFixed(2)}), then ${side === "CE" ? "drop" : "gain"} ` +
-      `${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pts from start.`,
+      `${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pts from the first tick.`,
     "info",
   );
 }
@@ -2348,8 +2626,8 @@ async function mainLoop() {
           ? pendingSignal.entryStartPrice != null
             ? `gate passed from ${pendingSignal.entryStartPrice.toFixed(2)} · waiting for ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback`
             : "gate passed — waiting for pullback"
-          : `waiting for first tick ${pendingSignal.side === "CE" ? "≥" : "≤"} ${momentumGateLevel(pendingSignal.side, pendingSignal.signalLastTick).toFixed(2)} vs last ${pendingSignal.signalLastTick.toFixed(2)}`)
-    : `Scanning live bars · range ≥ ${MOMENTUM_SCALPER_LIVE_RULES.minMovePts} pts · first-tick gate ±0.2 · ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback entry · SL ${MOMENTUM_SCALPER_INITIAL_STOP_PNL_PCT}% P&L`;
+          : `scanning first second for ${pendingSignal.side === "CE" ? "≥" : "≤"} ${momentumGateLevel(pendingSignal.side, pendingSignal.signalLastTick).toFixed(2)} vs last ${pendingSignal.signalLastTick.toFixed(2)}`)
+    : `Scanning live bars · range ≥ ${MOMENTUM_SCALPER_LIVE_RULES.minMovePts} pts · first-second gate ±${MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS} · ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback entry · SL ${MOMENTUM_SCALPER_INITIAL_STOP_PNL_PCT}% P&L`;
 
   scheduleNext(POLL_MS);
 }
@@ -2414,6 +2692,15 @@ function buildStatus(): MomentumScalperBotStatus {
     profitExitPnlPct: locked > 0 ? momentumProfitExitPnlPct(locked) : null,
     profitExitPrice: locked > 0 && entryPrice > 0 ? momentumProfitExitLimitPrice(entryPrice, locked) : null,
     profitExitGivebackPct: MOMENTUM_PROFIT_EXIT_GIVEBACK_PCT,
+    profitExitArmed,
+    profitExitOrderStatus: profitExitArmed ? profitExitOrderStatus : undefined,
+    profitExitOrderIds:
+      profitExitArmed && profitExitOrderIds.length > 0 ? [...profitExitOrderIds] : undefined,
+    profitExitFilledQty: profitExitArmed ? profitExitFilledQty : undefined,
+    profitExitPendingQty:
+      profitExitArmed && quantity > 0
+        ? Math.max(0, quantity - profitExitFilledQty)
+        : undefined,
     lastSpot,
     unrealisedPnl,
     indexPnlPts: idxPnl,

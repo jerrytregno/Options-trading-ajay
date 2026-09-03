@@ -25,8 +25,8 @@ export const MOMENTUM_SCALPER_LIVE_RULES: DayScalperRules = {
   sessionOpenIst: "09:15",
   sessionCloseIst: "15:30",
   tradeWindowOpenIst: DAY_SCALPER_TRADE_WINDOW_OPEN,
-  tradeWindowCloseIst: "15:10",
-  tuesdayTradeWindowCloseIst: "15:10",
+  tradeWindowCloseIst: "15:30",
+  tuesdayTradeWindowCloseIst: "15:30",
 };
 
 const IST = "Asia/Kolkata";
@@ -41,7 +41,7 @@ export function tradeWindowOpenMins(rules: DayScalperRules): number {
 }
 
 /**
- * Last minute a *new* entry may be taken (15:10 every day). A trade already open keeps running
+ * Last minute a *new* entry may be taken (15:30 every day). A trade already open keeps running
  * its own exit rules until {@link MOMENTUM_SCALPER_FORCE_EXIT_IST}.
  */
 export function sessionCloseMinsForWeekday(_weekday: string, rules: DayScalperRules): number {
@@ -206,8 +206,11 @@ export function momentumRsiBlocksEntry(
   return { blocked: false };
 }
 
-/** Second-minute first tick must clear the first-minute last tick by at least this many points. */
-export const MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS = 0.2;
+/** Second-minute first second must include a tick clearing the first-minute last tick by at least this many points. */
+export const MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS = 0.1;
+
+/** How many whole seconds of candle 2 to scan for the momentum gate (0 = first second only). */
+export const MOMENTUM_SCALPER_GATE_SCAN_SEC = 1;
 
 /** After the gate passes, Nifty must retrace this many points from the start before entry. */
 export const MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS = 2;
@@ -259,7 +262,7 @@ export function evaluateMomentumPullbackTrigger(
   return hit ? { action: "enter", triggerPrice } : { action: "waiting" };
 }
 
-/** Level the second minute's first tick must reach vs the first minute's last tick. */
+/** Level any tick in candle 2's gate window must reach vs the first minute's last tick. */
 export function momentumGateLevel(
   side: DayScalperSide,
   signalLastTick: number,
@@ -268,9 +271,16 @@ export function momentumGateLevel(
   return round2(signalLastTick + (side === "CE" ? gapPts : -gapPts));
 }
 
+/** True when `atMs` falls in the first `scanSec` whole seconds of the current IST minute. */
+export function momentumGateInScanWindow(
+  atMs: number,
+  scanSec = MOMENTUM_SCALPER_GATE_SCAN_SEC,
+): boolean {
+  return istSecondsIntoMinute(atMs) < scanSec;
+}
+
 /**
- * Gate: compare the second minute's first websocket tick to the first minute's last tick.
- * CE (green) needs first ≥ last + gap; PE (red) needs first ≤ last − gap.
+ * Single-tick gate check — CE (green) needs spot ≥ last + gap; PE (red) needs spot ≤ last − gap.
  */
 export function momentumGateFirstTickPasses(
   side: DayScalperSide,
@@ -282,6 +292,19 @@ export function momentumGateFirstTickPasses(
   const level = momentumGateLevel(side, signalLastTick, gapPts);
   if (side === "CE") return momentumFirstTick + 1e-9 >= level;
   return momentumFirstTick <= level + 1e-9;
+}
+
+/** True if any tick collected during candle 2's first second clears the gate. */
+export function momentumGateFirstSecondPasses(
+  side: DayScalperSide,
+  ticksInFirstSecond: readonly number[],
+  signalLastTick: number,
+  gapPts = MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS,
+): boolean {
+  for (const spot of ticksInFirstSecond) {
+    if (momentumGateFirstTickPasses(side, spot, signalLastTick, gapPts)) return true;
+  }
+  return false;
 }
 
 /** @deprecated Use {@link momentumGateFirstTickPasses} — old 10-second scan against signal close. */
@@ -454,7 +477,7 @@ export function evaluateMomentumEntry(
 /** Live/backtest scan starts after the 9:16 entry window (9:16:30 IST) — first signal bar is 9:16. */
 export const MOMENTUM_SCALPER_SCAN_START_MINS = 9 * 60 + 16;
 
-/** @deprecated Split windows removed — live Traps scans 09:15–15:10 continuously. */
+/** @deprecated Split windows removed — live Traps scans 09:15–15:30 continuously. */
 export const MOMENTUM_SCALPER_LIVE_MORNING_START_MINS = MOMENTUM_SCALPER_SCAN_START_MINS;
 /** @deprecated */
 export const MOMENTUM_SCALPER_LIVE_MORNING_END_MINS = 12 * 60;
@@ -463,7 +486,7 @@ export const MOMENTUM_SCALPER_LIVE_AFTERNOON_START_MINS = 13 * 60 + 45;
 /** @deprecated */
 export const MOMENTUM_SCALPER_LIVE_AFTERNOON_END_MINS = 15 * 60 + 10;
 
-/** True when a new Traps entry may be taken (after 9:16 trade through 15:10 IST). */
+/** True when a new Traps entry may be taken (after 9:16 trade through 15:30 IST). */
 export function momentumLiveEntryAllowed(mins: number): boolean {
   return (
     mins >= MOMENTUM_SCALPER_SCAN_START_MINS &&
@@ -665,8 +688,17 @@ export function momentumProfitExitLimitPrice(
   return price > entryPrice ? price : momentumOptionPriceForPnlPct(entryPrice, lockedPnlPct);
 }
 
-/**
- * Worst P&L a long option can actually print: the premium goes to zero and nothing more is at
+/** Market backup once live P&L reaches the giveback aim under a locked floor. */
+export function shouldMomentumProfitExitMarketBackup(
+  pnlPct: number | null,
+  lockedFloorPct: number,
+  givebackPct = MOMENTUM_PROFIT_EXIT_GIVEBACK_PCT,
+): boolean {
+  if (lockedFloorPct <= 0 || pnlPct == null || !Number.isFinite(pnlPct)) return false;
+  return pnlPct <= momentumProfitExitPnlPct(lockedFloorPct, givebackPct) + 1e-9;
+}
+
+/**: the premium goes to zero and nothing more is at
  * risk. A reading below this is arithmetically impossible, so it is bad data — a stale or
  * mispriced tick, or an entry price that never got booked properly.
  */

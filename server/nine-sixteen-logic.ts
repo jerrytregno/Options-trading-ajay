@@ -87,16 +87,16 @@ export const NINE_SIXTEEN_PRE_RESOLVE_SEC = 9 * 3600 + 15 * 60 + 58;
 /**
  * The 9:15 trade — a separate, earlier leg that runs before the 9:16 one.
  *
- * The 9:15 minute is read five seconds in: if price is at least 5 pts below the 9:15 open at that
- * point, an ATM PE goes out at 9:15:06. Smaller red reads, green, and flat are skipped.
+ * The 9:15 minute is read ten seconds in: if price is at least 5 pts below the 9:15 open at that
+ * point, an ATM PE goes out at 9:15:11. Smaller red reads, green, and flat are skipped.
  */
 export const NINE_FIFTEEN_PRE_RESOLVE_SEC = 9 * 3600 + 15 * 60 + 4;
-/** Minimum drop (open − mark at 9:15:05) required to arm the 9:15:06 PE entry. */
+/** Minimum drop (open − mark at 9:15:10) required to arm the 9:15:11 PE entry. */
 export const NINE_FIFTEEN_MIN_DROP_PTS = 5;
-/** The read: last tick strictly before 9:15:05 decides red or green. */
-export const NINE_FIFTEEN_SIGNAL_READ_SEC = 9 * 3600 + 15 * 60 + 5;
+/** The read: last tick strictly before 9:15:10 decides red or green. */
+export const NINE_FIFTEEN_SIGNAL_READ_SEC = 9 * 3600 + 15 * 60 + 10;
 /** The order goes out here. */
-export const NINE_FIFTEEN_ENTRY_SEC = 9 * 3600 + 15 * 60 + 6;
+export const NINE_FIFTEEN_ENTRY_SEC = 9 * 3600 + 15 * 60 + 11;
 /**
  * Retries stop here rather than at the end of the minute. A fill at 9:15:50 could not realise a
  * 3% rung before 9:16:00, so it would only stand in the way of the 9:16 trade.
@@ -159,7 +159,7 @@ export function msUntilEntryInstant(nowMs = Date.now()): number {
   return NINE_SIXTEEN_ENTRY_SEC * 1000 - istMsOfDay(nowMs);
 }
 
-/** Ms until the 9:15:06 order instant — negative once it has passed. */
+/** Ms until the 9:15:11 order instant — negative once it has passed. */
 export function msUntilNineFifteenEntry(nowMs = Date.now()): number {
   return NINE_FIFTEEN_ENTRY_SEC * 1000 - istMsOfDay(nowMs);
 }
@@ -306,13 +306,13 @@ export function isReadyForAtmPreResolve(nowMs = Date.now()): boolean {
   return nowSec >= NINE_SIXTEEN_PRE_RESOLVE_SEC && nowSec < NINE_SIXTEEN_ENTRY_SEC;
 }
 
-/** 9:15:04–9:15:05 — resolve the ATM PE so the 9:15:06 order makes no REST call. */
+/** 9:15:04–9:15:11 — resolve the ATM PE so the 9:15:11 order makes no REST call. */
 export function isReadyForNineFifteenPreResolve(nowMs = Date.now()): boolean {
   const nowSec = istSecondsOfDay(new Date(nowMs));
   return nowSec >= NINE_FIFTEEN_PRE_RESOLVE_SEC && nowSec < NINE_FIFTEEN_ENTRY_SEC;
 }
 
-/** True once the five-second read is due, i.e. from 9:15:05 onwards. */
+/** True once the ten-second read is due, i.e. from 9:15:10 onwards. */
 export function isPastNineFifteenSignalRead(nowMs = Date.now()): boolean {
   return istSecondsOfDay(new Date(nowMs)) >= NINE_FIFTEEN_SIGNAL_READ_SEC;
 }
@@ -416,7 +416,7 @@ export type NineFifteenEntryDecision =
   | { action: "skip"; reason: string };
 
 /**
- * Red at the 9:15:05 read, measured against the 9:15 open.
+ * Red at the 9:15:10 read, measured against the 9:15 open.
  *
  * Requires open − mark ≥ {@link NINE_FIFTEEN_MIN_DROP_PTS} index points. Green or flat is skipped.
  */
@@ -442,7 +442,7 @@ export function decideNineFifteenEntry(
     return {
       action: "skip",
       reason:
-        `Red but drop too small at the 5s mark (−${dropPts.toFixed(2)} pts · need at least −${NINE_FIFTEEN_MIN_DROP_PTS})`,
+        `Red but drop too small at the 10s mark (−${dropPts.toFixed(2)} pts · need at least −${NINE_FIFTEEN_MIN_DROP_PTS})`,
     };
   }
   return { action: "enter", leg: "PE_BUY", dropPts };
@@ -855,17 +855,32 @@ export function shouldExitOnTrailingPnl(lockedStopPct: number, pnlPct: number | 
 }
 
 /* ---------------------------------------------------------------------------------------------
- * 9:15 exit — fixed +5% take-profit limit on capital deployed at entry, plus the shared 10:00 IST
- * ±30 Nifty hard stop and 3:25 PM square-off.
+ * 9:15 exit — weekday take-profit limit on capital deployed (+3% Mon/Wed/Thu · +5% Tue/Fri),
+ * plus the shared 10:00 IST ±30 Nifty hard stop and 3:25 PM square-off.
  * ------------------------------------------------------------------------------------------- */
 
-/** Take-profit on premium / capital deployed — limit sell placed the moment the 9:15:06 fill lands. */
+/** Default take-profit on Tue/Fri (and unknown weekdays). */
 export const NINE_FIFTEEN_TAKE_PROFIT_PCT = 5;
+/** Take-profit on Mon/Wed/Thu. */
+export const NINE_FIFTEEN_TAKE_PROFIT_PCT_EARLY = 3;
 
-/** Limit price for a +5% profit on the entry premium (per-unit). */
-export function nineFifteenTakeProfitLimitPrice(entryPrice: number): number {
+/** Mon/Wed/Thu → 3% · Tue/Fri → 5%. */
+export function getNineFifteenTakeProfitPct(dateIst?: string): number {
+  if (!dateIst) return NINE_FIFTEEN_TAKE_PROFIT_PCT;
+  const weekday = istWeekdayShortFromDateKey(dateIst);
+  if (weekday === "Mon" || weekday === "Wed" || weekday === "Thu") {
+    return NINE_FIFTEEN_TAKE_PROFIT_PCT_EARLY;
+  }
+  return NINE_FIFTEEN_TAKE_PROFIT_PCT;
+}
+
+/** Limit price for a take-profit on the entry premium (per-unit). */
+export function nineFifteenTakeProfitLimitPrice(
+  entryPrice: number,
+  takeProfitPct = NINE_FIFTEEN_TAKE_PROFIT_PCT,
+): number {
   if (!(entryPrice > 0)) return 0;
-  return Math.round(entryPrice * (1 + NINE_FIFTEEN_TAKE_PROFIT_PCT / 100) * 100) / 100;
+  return Math.round(entryPrice * (1 + takeProfitPct / 100) * 100) / 100;
 }
 
 export function nineFifteenDeployedCapital(entryPrice: number, quantity: number): number {
@@ -873,30 +888,36 @@ export function nineFifteenDeployedCapital(entryPrice: number, quantity: number)
   return entryPrice * quantity;
 }
 
-/** Rupee profit aim — e.g. ₹5,000 on ₹1,00,000 deployed. */
-export function nineFifteenTakeProfitAmount(entryPrice: number, quantity: number): number {
-  return nineFifteenDeployedCapital(entryPrice, quantity) * (NINE_FIFTEEN_TAKE_PROFIT_PCT / 100);
+/** Rupee profit aim — e.g. ₹3,000 on ₹1,00,000 deployed at 3%. */
+export function nineFifteenTakeProfitAmount(
+  entryPrice: number,
+  quantity: number,
+  takeProfitPct = NINE_FIFTEEN_TAKE_PROFIT_PCT,
+): number {
+  return nineFifteenDeployedCapital(entryPrice, quantity) * (takeProfitPct / 100);
 }
 
-/** True when live P&L has reached the fixed take-profit (market backup if the limit is stuck). */
+/** True when live P&L has reached the take-profit (market backup if the limit is stuck). */
 export function shouldExitNineFifteenTakeProfit(
   unrealisedPnl: number | null,
   entryPrice: number,
   quantity: number,
+  takeProfitPct = NINE_FIFTEEN_TAKE_PROFIT_PCT,
 ): boolean {
   if (unrealisedPnl == null || entryPrice <= 0 || quantity <= 0) return false;
-  const target = nineFifteenTakeProfitAmount(entryPrice, quantity);
+  const target = nineFifteenTakeProfitAmount(entryPrice, quantity, takeProfitPct);
   return target > 0 && unrealisedPnl + 1e-9 >= target;
 }
 
-/** Rupees still needed to reach the +5% profit aim (0 once at/above target). */
+/** Rupees still needed to reach the profit aim (0 once at/above target). */
 export function nineFifteenPnlRemainingToTarget(
   unrealisedPnl: number | null,
   entryPrice: number,
   quantity: number,
+  takeProfitPct = NINE_FIFTEEN_TAKE_PROFIT_PCT,
 ): number | null {
   if (unrealisedPnl == null || entryPrice <= 0 || quantity <= 0) return null;
-  const target = nineFifteenTakeProfitAmount(entryPrice, quantity);
+  const target = nineFifteenTakeProfitAmount(entryPrice, quantity, takeProfitPct);
   return Math.max(0, target - unrealisedPnl);
 }
 
@@ -909,7 +930,9 @@ export function formatNineFifteenExitSummary(input: {
   entryPrice: number;
   pnl: number | null;
   via: NineFifteenExitVia;
+  takeProfitPct?: number;
 }): string {
+  const tpPct = input.takeProfitPct ?? NINE_FIFTEEN_TAKE_PROFIT_PCT;
   const capital = nineFifteenDeployedCapital(input.entryPrice, input.quantity);
   const pnlPct =
     capital > 0 && input.pnl != null ? (input.pnl / capital) * 100 : null;
@@ -917,7 +940,7 @@ export function formatNineFifteenExitSummary(input: {
     input.via === "limit"
       ? "limit sell executed on Kite"
       : input.via === "market"
-        ? "market exit (+5% backup)"
+        ? `market exit (+${tpPct}% backup)`
         : input.via === "hard-stop"
           ? "hard stop (market)"
           : "end-of-day square-off (market)";
@@ -983,9 +1006,33 @@ export function getPnlTrailScheduleLabel(dateIst?: string): string {
   return `${tiers} · +${NINE_SIXTEEN_PNL_INSTANT_EXIT_PCT}% instant market exit`;
 }
 
-export function getNineFifteenLadderLabel(): string {
+export function getNineFifteenLadderLabel(dateIst?: string): string {
+  const tpPct = getNineFifteenTakeProfitPct(dateIst);
   return (
-    `+${NINE_FIFTEEN_TAKE_PROFIT_PCT}% take-profit limit on capital deployed at entry · ` +
+    `+${tpPct}% take-profit limit on capital deployed at entry · ` +
+    `${getHardStopStartLabel()} hard stop ±${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} pts · 3:25 PM square-off`
+  );
+}
+
+/** Default take-profit on Tue/Fri (and unknown weekdays). */
+export const NINE_SIXTEEN_TAKE_PROFIT_PCT = 10;
+/** Take-profit on Mon/Wed/Thu. */
+export const NINE_SIXTEEN_TAKE_PROFIT_PCT_EARLY = 5;
+
+/** Mon/Wed/Thu → 5% · Tue/Fri → 10%. */
+export function getNineSixteenTakeProfitPct(dateIst?: string): number {
+  if (!dateIst) return NINE_SIXTEEN_TAKE_PROFIT_PCT;
+  const weekday = istWeekdayShortFromDateKey(dateIst);
+  if (weekday === "Mon" || weekday === "Wed" || weekday === "Thu") {
+    return NINE_SIXTEEN_TAKE_PROFIT_PCT_EARLY;
+  }
+  return NINE_SIXTEEN_TAKE_PROFIT_PCT;
+}
+
+export function getNineSixteenLadderLabel(dateIst?: string): string {
+  const tpPct = getNineSixteenTakeProfitPct(dateIst);
+  return (
+    `+${tpPct}% take-profit limit on capital deployed at entry · ` +
     `${getHardStopStartLabel()} hard stop ±${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} pts · 3:25 PM square-off`
   );
 }

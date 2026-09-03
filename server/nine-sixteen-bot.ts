@@ -19,25 +19,15 @@ import {
   exitModeFrom915Change,
   msUntilNextEntryPhase,
   build915BarFromCaptured,
-  computePnlTargetAmount,
   getPnlExitStartLabel,
-  getPnlTrailScheduleLabel,
-  getNineSixteenPnlTrailArmPct,
-  pnlPctOfEntryCost,
-  nextLockedPnlPct,
-  trailingPnlTargetPct,
-  trailingPnlStopPct,
-  shouldExitOnTrailingPnl,
-  shouldInstantExitTrailingPnl,
-  NINE_SIXTEEN_PNL_INSTANT_EXIT_PCT,
-  NINE_SIXTEEN_PNL_TRAIL_FIRST_LOCK_PCT,
   ownLegUnrealisedPnl,
   ownPositionSync,
-  isPlausiblePnlPct,
-  NINE_SIXTEEN_PNL_TRAIL_STEP_PCT,
+  pnlPctOfEntryCost,
   getNineSixteenSpotPollMs,
   decideNineFifteenEntry,
   getNineFifteenLadderLabel,
+  getNineSixteenTakeProfitPct,
+  getNineSixteenLadderLabel,
   getHardStopScheduleLabel,
   computeHardStopSpot,
   shouldHardStopNineSixteen,
@@ -51,6 +41,7 @@ import {
   isPastNineFifteenMinute,
   msUntilNineFifteenEntry,
   NINE_FIFTEEN_TAKE_PROFIT_PCT,
+  getNineFifteenTakeProfitPct,
   nineFifteenTakeProfitLimitPrice,
   nineFifteenTakeProfitAmount,
   nineFifteenDeployedCapital,
@@ -139,7 +130,7 @@ export interface RawTickRow {
   changePts: number | null;
 }
 
-/** The day runs up to two trades: the 9:15:06 leg, then the 9:16:00 one. */
+/** The day runs up to two trades: the 9:15:11 leg, then the 9:16:00 one. */
 export type NineSixteenTradeSlot = "nine-fifteen" | "nine-sixteen";
 
 export type NineFifteenTpOrderStatus =
@@ -214,7 +205,7 @@ export interface NineSixteenBotStatus {
   nineFifteenEnabled: boolean;
   /** Which of the day's two trades is open, or which one is next. */
   tradeSlot: NineSixteenTradeSlot;
-  /** Last Nifty print before 9:15:05 — the read that decides red or green. */
+  /** Last Nifty print before 9:15:10 — the read that decides red or green. */
   nineFifteenMarkPrice: number | null;
   nineFifteenMarkAt: string | null;
   /** Mark minus the 9:15 open. Negative is red, which is the only side that trades. */
@@ -293,6 +284,8 @@ interface PersistedBotState {
   nineFifteenTpFilledQty?: number;
   nineFifteenTpPendingQty?: number;
   nineFifteenTpPlacedAt?: string;
+  /** Take-profit % armed for this 9:15 leg (3 Mon/Wed/Thu · 5 Tue/Fri). */
+  nineFifteenTakeProfitPct?: number;
 }
 
 interface PersistedCaptureState {
@@ -311,7 +304,7 @@ let enabled = true;
 let nineFifteenEnabled = true;
 /** Which of the day's two trades the open position belongs to. */
 let tradeSlot: NineSixteenTradeSlot = "nine-sixteen";
-/** Sealed from the last tick strictly before 9:15:05 — the read that decides red or green. */
+/** Sealed from the last tick strictly before 9:15:10 — the read that decides red or green. */
 let nineFifteenMarkPrice: number | null = null;
 let nineFifteenMarkAtLabel: string | null = null;
 /** Set once the 9:15 attempt is over — traded, skipped or failed — so it runs at most once a day. */
@@ -323,9 +316,10 @@ let nineFifteenOverranMinute = false;
 let nineFifteenBurstInFlight = false;
 let nineFifteenTimer: ReturnType<typeof setTimeout> | null = null;
 let nineFifteenTimerDate: string | null = null;
-/** Resting +5% take-profit limit sell for the 9:15 leg. */
+/** Resting take-profit limit sell for the 9:15 leg. */
 let nineFifteenTpOrderIds: string[] = [];
 let nineFifteenTpLimitPrice = 0;
+let nineFifteenTakeProfitPct = NINE_FIFTEEN_TAKE_PROFIT_PCT;
 let nineFifteenTpOrderStatus: NineFifteenTpOrderStatus = "none";
 let nineFifteenTpFilledQty = 0;
 let nineFifteenTpPendingQty = 0;
@@ -385,7 +379,7 @@ let prewarmInFlight = false;
 let lastPrewarmAttemptAt = 0;
 const PREWARM_RETRY_MS = 60_000;
 
-/** ATM PE resolved at 9:15:04, so the 9:15:06 order makes no REST call of its own. */
+/** ATM PE resolved at 9:15:04, so the 9:15:11 order makes no REST call of its own. */
 let nineFifteenPreResolvedPe: ResolvedAtmOption | null = null;
 let nineFifteenPreResolvedDate: string | null = null;
 let nineFifteenPreResolveInFlight = false;
@@ -597,9 +591,30 @@ function haltBotTicker(clearSamples = false) {
   stopNiftyTicker();
 }
 
+const NINE_FIFTEEN_TP_PLACE_MAX_ATTEMPTS = 15;
+
+function legTakeProfitPctForSlot(dateIst: string): number {
+  return tradeSlot === "nine-fifteen"
+    ? getNineFifteenTakeProfitPct(dateIst)
+    : getNineSixteenTakeProfitPct(dateIst);
+}
+
+function legTradeTag(): string {
+  return tradeSlot === "nine-fifteen" ? "9:15" : "9:16";
+}
+
+function activeLegTakeProfitPct(dateIst: string): number {
+  return nineFifteenTakeProfitPct > 0 ? nineFifteenTakeProfitPct : legTakeProfitPctForSlot(dateIst);
+}
+
+function persistsTakeProfitLeg(): boolean {
+  return tradeSlot === "nine-fifteen" || tradeSlot === "nine-sixteen";
+}
+
 function clearNineFifteenTpTracking() {
   nineFifteenTpOrderIds = [];
   nineFifteenTpLimitPrice = 0;
+  nineFifteenTakeProfitPct = NINE_FIFTEEN_TAKE_PROFIT_PCT;
   nineFifteenTpOrderStatus = "none";
   nineFifteenTpFilledQty = 0;
   nineFifteenTpPendingQty = 0;
@@ -634,16 +649,20 @@ function saveBotState(dateIst: string) {
     ownedSymbol: ownedSymbol ?? undefined,
     tradeSlot,
     nineFifteenSettled: nineFifteenSettled || undefined,
-    nineFifteenTpOrderIds: tradeSlot === "nine-fifteen" && nineFifteenTpOrderIds.length > 0 ? nineFifteenTpOrderIds : undefined,
+    nineFifteenTpOrderIds:
+      persistsTakeProfitLeg() && nineFifteenTpOrderIds.length > 0 ? nineFifteenTpOrderIds : undefined,
     nineFifteenTpLimitPrice:
-      tradeSlot === "nine-fifteen" && nineFifteenTpLimitPrice > 0 ? nineFifteenTpLimitPrice : undefined,
+      persistsTakeProfitLeg() && nineFifteenTpLimitPrice > 0 ? nineFifteenTpLimitPrice : undefined,
     nineFifteenTpOrderStatus:
-      tradeSlot === "nine-fifteen" && nineFifteenTpOrderStatus !== "none" ? nineFifteenTpOrderStatus : undefined,
+      persistsTakeProfitLeg() && nineFifteenTpOrderStatus !== "none" ? nineFifteenTpOrderStatus : undefined,
     nineFifteenTpFilledQty:
-      tradeSlot === "nine-fifteen" && nineFifteenTpFilledQty > 0 ? nineFifteenTpFilledQty : undefined,
+      persistsTakeProfitLeg() && nineFifteenTpFilledQty > 0 ? nineFifteenTpFilledQty : undefined,
     nineFifteenTpPendingQty:
-      tradeSlot === "nine-fifteen" && nineFifteenTpPendingQty > 0 ? nineFifteenTpPendingQty : undefined,
-    nineFifteenTpPlacedAt: tradeSlot === "nine-fifteen" && nineFifteenTpPlacedAt ? nineFifteenTpPlacedAt : undefined,
+      persistsTakeProfitLeg() && nineFifteenTpPendingQty > 0 ? nineFifteenTpPendingQty : undefined,
+    nineFifteenTpPlacedAt:
+      persistsTakeProfitLeg() && nineFifteenTpPlacedAt ? nineFifteenTpPlacedAt : undefined,
+    nineFifteenTakeProfitPct:
+      persistsTakeProfitLeg() && nineFifteenTakeProfitPct > 0 ? nineFifteenTakeProfitPct : undefined,
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(payload, null, 2));
 }
@@ -673,12 +692,17 @@ function loadBotState(dateIst: string) {
     nineFifteenTpFilledQty = parsed.nineFifteenTpFilledQty ?? 0;
     nineFifteenTpPendingQty = parsed.nineFifteenTpPendingQty ?? Math.max(0, quantity - nineFifteenTpFilledQty);
     nineFifteenTpPlacedAt = parsed.nineFifteenTpPlacedAt ?? null;
+    nineFifteenTakeProfitPct =
+      parsed.nineFifteenTakeProfitPct ??
+      (tradeSlot === "nine-fifteen"
+        ? getNineFifteenTakeProfitPct(dateIst)
+        : getNineSixteenTakeProfitPct(dateIst));
     nineFifteenTpLastSyncedAt = null;
     nineFifteenTpLastLogKey = "";
     message =
       tradeSlot === "nine-fifteen"
-        ? `In 9:15 position · ${getNineFifteenLadderLabel()}`
-        : `In position · P&L trail ${getPnlTrailScheduleLabel(dateIst)}`;
+        ? `In 9:15 position · ${getNineFifteenLadderLabel(dateIst)}`
+        : `In position · ${getNineSixteenLadderLabel(dateIst)}`;
   } catch {
     /* ignore corrupt state */
   }
@@ -770,7 +794,10 @@ async function reconcilePositionWithKiteInner(accessToken: string, dateIst: stri
       }
     }
 
-    message = `In position · P&L trail ${getPnlTrailScheduleLabel(dateIst)}`;
+    message =
+      tradeSlot === "nine-fifteen"
+        ? `In 9:15 position · ${getNineFifteenLadderLabel(dateIst)}`
+        : `In position · ${getNineSixteenLadderLabel(dateIst)}`;
     saveBotState(dateIst);
     return;
   }
@@ -1048,8 +1075,8 @@ function handle915CaptureTick(tick: NiftyTick, dateIst: string) {
   const price = tick.lastPrice;
   if (!isIn915CloseTickWindow(tick.receivedAtMs)) return;
 
-  // Seal the five-second read before this tick overwrites the running "last tick" — the read is
-  // the last print strictly before 9:15:05, so a tick landing at 9:15:05.4 must not become it.
+  // Seal the ten-second read before this tick overwrites the running "last tick" — the read is
+  // the last print strictly before 9:15:10, so a tick landing at 9:15:10.4 must not become it.
   if (isPastNineFifteenSignalRead(tick.receivedAtMs)) {
     sealNineFifteenMark();
   }
@@ -1112,10 +1139,10 @@ function handleBotTick(tick: NiftyTick) {
 }
 
 /**
- * Freeze the 9:15:05 read.
+ * Freeze the 9:15:10 read.
  *
- * Called from the tick handler and again from the 9:15:06 timer, because a minute quiet enough to
- * print nothing after 9:15:05 would otherwise never seal one.
+ * Called from the tick handler and again from the 9:15:11 timer, because a minute quiet enough to
+ * print nothing after 9:15:10 would otherwise never seal one.
  */
 function sealNineFifteenMark() {
   if (nineFifteenMarkPrice != null) return;
@@ -1127,7 +1154,7 @@ function sealNineFifteenMark() {
   nineFifteenMarkAtLabel = closeTickAtLabel;
   const change = nineFifteenMarkPrice - capturedOpen915;
   pushLog(
-    `9:15:05 read · ${nineFifteenMarkPrice.toFixed(2)} vs open ${capturedOpen915.toFixed(2)} · ` +
+    `9:15:10 read · ${nineFifteenMarkPrice.toFixed(2)} vs open ${capturedOpen915.toFixed(2)} · ` +
       `Δ ${change >= 0 ? "+" : ""}${change.toFixed(2)} (${change < 0 ? "red" : change > 0 ? "green" : "flat"})`,
     change < 0 ? "success" : "info",
   );
@@ -1319,7 +1346,7 @@ async function preResolveNineFifteenPe(accessToken: string, dateIst: string) {
     });
     const pe = await resolveAtmNiftyOption(accessToken, "PE_BUY", { spotPrice: spot });
     if (!pe) {
-      pushLog("9:15 ATM PE pre-resolve incomplete · 9:15:06 will resolve live", "warning");
+      pushLog("9:15 ATM PE pre-resolve incomplete · 9:15:11 will resolve live", "warning");
       return;
     }
     nineFifteenPreResolvedPe = pe;
@@ -1455,7 +1482,7 @@ async function placeSplitLimitOrders(
   return { orderIds, failures };
 }
 
-async function cancelNineFifteenTakeProfitOrders(accessToken: string): Promise<void> {
+async function cancelLegTakeProfitOrders(accessToken: string): Promise<void> {
   if (nineFifteenTpOrderIds.length === 0) return;
   for (const orderId of nineFifteenTpOrderIds) {
     try {
@@ -1493,11 +1520,11 @@ async function resolveNineFifteenTakeProfitExitPrice(accessToken: string): Promi
   return nineFifteenTpLimitPrice > 0 ? nineFifteenTpLimitPrice : lastOptionPrice;
 }
 
-async function syncNineFifteenTakeProfitOrders(
+async function syncLegTakeProfitOrders(
   accessToken: string,
   dateIst: string,
 ): Promise<NineFifteenTpOrderStatus> {
-  if (tradeSlot !== "nine-fifteen" || quantity <= 0) {
+  if (!persistsTakeProfitLeg() || quantity <= 0) {
     return nineFifteenTpOrderStatus;
   }
 
@@ -1535,21 +1562,25 @@ async function syncNineFifteenTakeProfitOrders(
     else if (filledQty > 0) nextStatus = "partial";
     else if (anyRejected && pendingQty <= 0) nextStatus = "failed";
 
+    const tag = legTradeTag();
     const logKey = `${nextStatus}:${filledQty}/${quantity}`;
     if (logKey !== nineFifteenTpLastLogKey) {
       nineFifteenTpLastLogKey = logKey;
       if (nextStatus === "partial") {
         pushLog(
-          `9:15 limit sell partially filled · ${filledQty}/${quantity} qty @ ₹${nineFifteenTpLimitPrice.toFixed(2)} · ${pendingQty} still working on Kite`,
+          `${tag} limit sell partially filled · ${filledQty}/${quantity} qty @ ₹${nineFifteenTpLimitPrice.toFixed(2)} · ${pendingQty} still working on Kite`,
           "info",
         );
       } else if (nextStatus === "complete") {
         pushLog(
-          `9:15 limit sell fully filled on Kite · ${filledQty} qty @ ₹${nineFifteenTpLimitPrice.toFixed(2)}`,
+          `${tag} limit sell fully filled on Kite · ${filledQty} qty @ ₹${nineFifteenTpLimitPrice.toFixed(2)}`,
           "success",
         );
       } else if (nextStatus === "failed") {
-        pushLog("9:15 limit sell rejected on Kite — market backup at +5% remains active", "warning");
+        pushLog(
+          `${tag} limit sell rejected on Kite — retrying · market backup at +${activeLegTakeProfitPct(dateIst)}% remains active`,
+          "warning",
+        );
       }
     }
 
@@ -1558,66 +1589,83 @@ async function syncNineFifteenTakeProfitOrders(
     return nextStatus;
   } catch (err) {
     pushLog(
-      `9:15 limit sell sync failed · ${err instanceof Error ? err.message : "could not read Kite orders"}`,
+      `${legTradeTag()} limit sell sync failed · ${err instanceof Error ? err.message : "could not read Kite orders"}`,
       "warning",
     );
     return nineFifteenTpOrderStatus;
   }
 }
 
-async function placeNineFifteenTakeProfitOrders(accessToken: string, dateIst: string): Promise<void> {
-  if (!tradingsymbol || quantity <= 0 || entryPrice <= 0) return;
+async function placeLegTakeProfitOrders(accessToken: string, dateIst: string): Promise<boolean> {
+  if (!tradingsymbol || quantity <= 0 || entryPrice <= 0) return false;
 
-  if (nineFifteenTpOrderIds.length > 0) {
-    await cancelNineFifteenTakeProfitOrders(accessToken);
-  }
-
-  const limitPrice = nineFifteenTakeProfitLimitPrice(entryPrice);
-  if (!(limitPrice > 0)) return;
+  nineFifteenTakeProfitPct = legTakeProfitPctForSlot(dateIst);
+  const tpPct = nineFifteenTakeProfitPct;
+  const tag = legTradeTag();
+  const limitPrice = nineFifteenTakeProfitLimitPrice(entryPrice, tpPct);
+  if (!(limitPrice > 0)) return false;
 
   const lotSize = positionLotSize > 0 ? positionLotSize : 65;
   const chunks = splitQuantityIntoOrderChunks(quantity, lotSize);
   const capital = nineFifteenDeployedCapital(entryPrice, quantity);
-  const profitAim = nineFifteenTakeProfitAmount(entryPrice, quantity);
+  const profitAim = nineFifteenTakeProfitAmount(entryPrice, quantity, tpPct);
 
   pushLog(
-    `9:15 TP limit · SELL ${quantity} qty @ ₹${limitPrice.toFixed(2)} ` +
-      `(+${NINE_FIFTEEN_TAKE_PROFIT_PCT}% on ₹${Math.round(capital)} deployed → ₹${Math.round(profitAim)} profit aim)`,
+    `${tag} TP limit · SELL ${quantity} qty @ ₹${limitPrice.toFixed(2)} ` +
+      `(+${tpPct}% on ₹${Math.round(capital)} deployed → ₹${Math.round(profitAim)} profit aim)`,
     "success",
   );
 
-  const placed = await placeSplitLimitOrders(accessToken, {
-    tradingsymbol,
-    transaction_type: "SELL",
-    quantities: chunks,
-    price: limitPrice,
-  });
-  for (const failure of placed.failures) {
-    pushLog(`9:15 TP limit rejected · ${failure.message}`, "warning");
-  }
-  if (placed.orderIds.length === 0) {
-    nineFifteenTpOrderStatus = "failed";
-    pushLog("9:15 TP limit not placed — will exit at +5% via market backup if price prints", "warning");
-    saveBotState(dateIst);
-    return;
+  for (let attempt = 1; attempt <= NINE_FIFTEEN_TP_PLACE_MAX_ATTEMPTS; attempt += 1) {
+    if (nineFifteenTpOrderIds.length > 0) {
+      await cancelLegTakeProfitOrders(accessToken);
+    }
+
+    const placed = await placeSplitLimitOrders(accessToken, {
+      tradingsymbol,
+      transaction_type: "SELL",
+      quantities: chunks,
+      price: limitPrice,
+    });
+    for (const failure of placed.failures) {
+      pushLog(
+        `${tag} TP limit rejected (attempt ${attempt}/${NINE_FIFTEEN_TP_PLACE_MAX_ATTEMPTS}) · ${failure.message}`,
+        "warning",
+      );
+    }
+
+    if (placed.orderIds.length > 0) {
+      nineFifteenTpOrderIds = placed.orderIds;
+      nineFifteenTpLimitPrice = limitPrice;
+      nineFifteenTpOrderStatus = "pending";
+      nineFifteenTpFilledQty = 0;
+      nineFifteenTpPendingQty = quantity;
+      nineFifteenTpPlacedAt = new Date().toISOString();
+      nineFifteenTpLastSyncedAt = nineFifteenTpPlacedAt;
+      nineFifteenTpLastLogKey = `pending:0/${quantity}`;
+      pushLog(
+        `${tag} limit sell LIVE on Kite · ${placed.orderIds.length} order(s) · ${quantity} qty @ ₹${limitPrice.toFixed(2)} · tracking until filled`,
+        "success",
+      );
+      saveBotState(dateIst);
+      return true;
+    }
+
+    if (attempt < NINE_FIFTEEN_TP_PLACE_MAX_ATTEMPTS) {
+      pushLog(`${tag} TP limit retry ${attempt + 1}/${NINE_FIFTEEN_TP_PLACE_MAX_ATTEMPTS}…`, "info");
+    }
   }
 
-  nineFifteenTpOrderIds = placed.orderIds;
-  nineFifteenTpLimitPrice = limitPrice;
-  nineFifteenTpOrderStatus = "pending";
-  nineFifteenTpFilledQty = 0;
-  nineFifteenTpPendingQty = quantity;
-  nineFifteenTpPlacedAt = new Date().toISOString();
-  nineFifteenTpLastSyncedAt = nineFifteenTpPlacedAt;
-  nineFifteenTpLastLogKey = `pending:0/${quantity}`;
+  nineFifteenTpOrderStatus = "failed";
   pushLog(
-    `9:15 limit sell LIVE on Kite · ${placed.orderIds.length} order(s) · ${quantity} qty @ ₹${limitPrice.toFixed(2)} · tracking until filled`,
-    "success",
+    `${tag} TP limit not placed after ${NINE_FIFTEEN_TP_PLACE_MAX_ATTEMPTS} attempts — market backup at +${tpPct}% if price prints`,
+    "warning",
   );
   saveBotState(dateIst);
+  return false;
 }
 
-async function completeNineFifteenTakeProfitExit(
+async function completeLegTakeProfitExit(
   accessToken: string,
   dateIst: string,
   via: "limit" | "market" | "hard-stop" | "eod",
@@ -1640,6 +1688,7 @@ async function completeNineFifteenTakeProfitExit(
     entryPrice: closedEntry,
     pnl,
     via,
+    takeProfitPct: activeLegTakeProfitPct(dateIst),
   });
   message = summary;
 
@@ -1821,7 +1870,7 @@ async function finalizeEntryInPosition(
   }
 
   if (entrySpot <= 0) {
-    pushLog("Nifty spot unavailable at entry — P&L trail exits only", "warning");
+    pushLog("Nifty spot unavailable at entry — take-profit limit + hard stop only", "warning");
   }
 
   optionInstrumentToken =
@@ -1835,14 +1884,14 @@ async function finalizeEntryInPosition(
   }
 
   phase = "in_position";
-  message = `In position · P&L trail ${getPnlTrailScheduleLabel(dateIst)}`;
+  message = `In position · ${getNineSixteenLadderLabel(dateIst)}`;
   pushLog(
     `Entry filled on attempt ${attempt} · ${splitLabel} · ${quantity} qty @ ₹${entryPrice.toFixed(2)}` +
       (entrySpot > 0 ? ` · Nifty spot ${entrySpot.toFixed(2)}` : "") +
       ` · ${exitMode} band (entry only)`,
     "success",
   );
-  pushLog(`P&L exit ${getPnlTrailScheduleLabel(dateIst)}`, "info");
+  pushLog(getNineSixteenLadderLabel(dateIst), "info");
   pushLog(getHardStopScheduleLabel(), "info");
   pushLog(
     optionInstrumentToken > 0
@@ -1850,6 +1899,15 @@ async function finalizeEntryInPosition(
       : "Exit websocket live · Nifty 50 (option token missing — P&L uses quote fallback)",
     optionInstrumentToken > 0 ? "success" : "warning",
   );
+  try {
+    await placeLegTakeProfitOrders(accessToken, dateIst);
+  } catch (err) {
+    const tpPct = activeLegTakeProfitPct(dateIst);
+    pushLog(
+      `9:16 TP limit placement failed · ${err instanceof Error ? err.message : "unknown"} · market backup at +${tpPct}% remains active`,
+      "warning",
+    );
+  }
   pushLog(message, "success");
   saveBotState(dateIst);
 }
@@ -1976,8 +2034,8 @@ async function squareOffInner(accessToken: string, reason: string) {
   const symbol = tradingsymbol;
   const lotSize = positionLotSize > 0 ? positionLotSize : 65;
 
-  if (tradeSlot === "nine-fifteen" && nineFifteenTpOrderIds.length > 0) {
-    await cancelNineFifteenTakeProfitOrders(accessToken);
+  if (persistsTakeProfitLeg() && nineFifteenTpOrderIds.length > 0) {
+    await cancelLegTakeProfitOrders(accessToken);
   }
 
   const brokerQty = await fetchNetQty(accessToken, symbol);
@@ -2051,6 +2109,7 @@ async function squareOffInner(accessToken: string, reason: string) {
         entryPrice: closedEntry,
         pnl,
         via,
+        takeProfitPct: activeLegTakeProfitPct(dateIst),
       });
     }
     message = exitNote;
@@ -2163,7 +2222,7 @@ function settleNineFifteen(note: string, type: NineSixteenBotStatus["logs"][numb
   message = `${note} · waiting for 9:16:00`;
 }
 
-/** Attempt 1 uses the leg resolved at 9:15:05; retries re-resolve against the live spot. */
+/** Attempt 1 uses the leg resolved at 9:15:04; retries re-resolve against the live spot. */
 async function resolveNineFifteenOption(
   accessToken: string,
   attempt: number,
@@ -2205,18 +2264,19 @@ async function finalizeNineFifteenEntry(
   }
 
   nineFifteenSettled = true;
-  message = `In 9:15 position · ${getNineFifteenLadderLabel()}`;
+  message = `In 9:15 position · ${getNineFifteenLadderLabel(dateIst)}`;
   pushLog(
     `9:15 entry filled on attempt ${attempt} · ${splitLabel} · ${quantity} qty @ ₹${entryPrice.toFixed(2)}`,
     "success",
   );
-  pushLog(getNineFifteenLadderLabel(), "info");
+  pushLog(getNineFifteenLadderLabel(dateIst), "info");
   pushLog(getHardStopScheduleLabel(), "info");
   try {
-    await placeNineFifteenTakeProfitOrders(accessToken, dateIst);
+    await placeLegTakeProfitOrders(accessToken, dateIst);
   } catch (err) {
+    const tpPct = activeLegTakeProfitPct(dateIst);
     pushLog(
-      `9:15 TP limit placement failed · ${err instanceof Error ? err.message : "unknown"} · market backup at +${NINE_FIFTEEN_TAKE_PROFIT_PCT}% remains active`,
+      `9:15 TP limit placement failed · ${err instanceof Error ? err.message : "unknown"} · market backup at +${tpPct}% remains active`,
       "warning",
     );
   }
@@ -2224,7 +2284,7 @@ async function finalizeNineFifteenEntry(
 }
 
 /**
- * The 9:15 trade: read the minute five seconds in and buy the ATM PE at 9:15:06 if it is red.
+ * The 9:15 trade: read the minute five seconds in and buy the ATM PE at 9:15:11 if it is red.
  *
  * Nothing in here ends the day. Whether it trades, skips or fails to fill, the 9:16 decision is
  * still taken at 9:16:00 — the only thing that stops it is this leg still being open by then.
@@ -2238,7 +2298,7 @@ async function tryEnterNineFifteen(accessToken: string, dateIst: string) {
     return;
   }
   if (nineFifteenMarkPrice == null) {
-    settleNineFifteen("9:15 trade skipped · no Nifty tick before 9:15:05", "warning");
+    settleNineFifteen("9:15 trade skipped · no Nifty tick before 9:15:10", "warning");
     return;
   }
 
@@ -2253,9 +2313,9 @@ async function tryEnterNineFifteen(accessToken: string, dateIst: string) {
   leg = "PE_BUY";
   open915 = open;
   clearFailedEntryAttempt();
-  message = "Placing 9:15:06 PE entry…";
+  message = "Placing 9:15:11 PE entry…";
   pushLog(
-    `9:15 RED · ${decision.dropPts.toFixed(2)} pts below the open at the 5s mark → buying the ATM PE`,
+    `9:15 RED · ${decision.dropPts.toFixed(2)} pts below the open at the 10s mark → buying the ATM PE`,
     "success",
   );
   await assertEgressReadyForEntry();
@@ -2633,14 +2693,16 @@ async function maybeHardStopExit(accessToken: string, slotLabel: string): Promis
   return true;
 }
 
-async function checkAndMaybeExitNineFifteen(accessToken: string, dateIst: string): Promise<boolean> {
+async function checkAndMaybeExitTakeProfitLeg(accessToken: string, dateIst: string): Promise<boolean> {
   // The main loop hands every pass to the position while one is open, so sealing the 9:15 close
   // has to happen here too — otherwise a leg held across 9:16:00 leaves the candle unrecorded.
-  if (isReadyToSeal915Close()) seal915CloseFromTicks(dateIst);
+  if (tradeSlot === "nine-fifteen") {
+    if (isReadyToSeal915Close()) seal915CloseFromTicks(dateIst);
 
-  if (!nineFifteenOverranMinute && isPastNineFifteenMinute()) {
-    nineFifteenOverranMinute = true;
-    pushLog("9:15 leg still open at 9:16:00 · the 9:16 trade is skipped today", "warning");
+    if (!nineFifteenOverranMinute && isPastNineFifteenMinute()) {
+      nineFifteenOverranMinute = true;
+      pushLog("9:15 leg still open at 9:16:00 · the 9:16 trade is skipped today", "warning");
+    }
   }
 
   if (isPastNineSixteenForceExit()) {
@@ -2648,22 +2710,31 @@ async function checkAndMaybeExitNineFifteen(accessToken: string, dateIst: string
     return true;
   }
 
-  if (await maybeHardStopExit(accessToken, "9:15")) return true;
+  const tag = legTradeTag();
+  if (await maybeHardStopExit(accessToken, tag)) return true;
 
-  await syncNineFifteenTakeProfitOrders(accessToken, dateIst);
+  await syncLegTakeProfitOrders(accessToken, dateIst);
+
+  if (
+    nineFifteenTpOrderStatus === "failed" &&
+    nineFifteenTpOrderIds.length === 0 &&
+    nineFifteenTpFilledQty <= 0
+  ) {
+    await placeLegTakeProfitOrders(accessToken, dateIst);
+  }
 
   if (tradingsymbol && quantity > 0) {
     try {
       const brokerQty = await fetchNetQty(accessToken, tradingsymbol);
       if (brokerQty <= 0) {
-        await completeNineFifteenTakeProfitExit(accessToken, dateIst, "limit");
+        await completeLegTakeProfitExit(accessToken, dateIst, "limit");
         return true;
       }
       if (brokerQty < quantity) {
         quantity = brokerQty;
         saveBotState(dateIst);
         if (nineFifteenTpOrderIds.length > 0) {
-          await placeNineFifteenTakeProfitOrders(accessToken, dateIst);
+          await placeLegTakeProfitOrders(accessToken, dateIst);
         }
       }
     } catch {
@@ -2672,8 +2743,9 @@ async function checkAndMaybeExitNineFifteen(accessToken: string, dateIst: string
   }
 
   const legPnl = ownLegUnrealisedPnl(entryPrice, quantity, lastOptionPrice);
-  if (shouldExitNineFifteenTakeProfit(legPnl, entryPrice, quantity)) {
-    await cancelNineFifteenTakeProfitOrders(accessToken);
+  const tpPct = activeLegTakeProfitPct(dateIst);
+  if (shouldExitNineFifteenTakeProfit(legPnl, entryPrice, quantity, tpPct)) {
+    await cancelLegTakeProfitOrders(accessToken);
     await squareOff(
       accessToken,
       formatNineFifteenExitSummary({
@@ -2682,6 +2754,7 @@ async function checkAndMaybeExitNineFifteen(accessToken: string, dateIst: string
         entryPrice,
         pnl: legPnl,
         via: "market",
+        takeProfitPct: tpPct,
       }),
     );
     return true;
@@ -2693,49 +2766,8 @@ async function checkAndMaybeExitNineFifteen(accessToken: string, dateIst: string
 async function checkAndMaybeExit(accessToken: string, _dateIst: string): Promise<boolean> {
   if (phase !== "in_position") return false;
 
-  if (tradeSlot === "nine-fifteen") {
-    return checkAndMaybeExitNineFifteen(accessToken, _dateIst);
-  }
-
-  if (isPastNineSixteenForceExit()) {
-    await squareOff(accessToken, "End of day square-off");
-    return true;
-  }
-
-  if (await maybeHardStopExit(accessToken, "9:16")) return true;
-
-  // Trailing option P&L % — plus the 10:00 ±30 Nifty hard stop above.
-  const legPnl = ownLegUnrealisedPnl(entryPrice, quantity, lastOptionPrice);
-  const pnlPct = pnlPctOfEntryCost(legPnl, entryPrice, quantity);
-  if (pnlPct == null) return false;
-  if (!isPlausiblePnlPct(pnlPct)) {
-    pushLog(
-      `Ignoring implausible P&L reading ${pnlPct.toFixed(1)}% · ladder held at +${lockedPnlPct}%`,
-      "warning",
-    );
-    return false;
-  }
-
-  const previousLocked = lockedPnlPct;
-  lockedPnlPct = nextLockedPnlPct(lockedPnlPct, pnlPct, _dateIst);
-  if (lockedPnlPct > previousLocked) {
-    pushLog(
-      `Trailing ladder → locked SL +${lockedPnlPct}% · next TP +${trailingPnlTargetPct(lockedPnlPct, _dateIst)}%` +
-        ` (P&L +${pnlPct.toFixed(2)}%)`,
-      "success",
-    );
-    saveBotState(_dateIst);
-  }
-
-  if (shouldExitOnTrailingPnl(lockedPnlPct, pnlPct)) {
-    const entryAmount = entryPrice * quantity;
-    const reason = shouldInstantExitTrailingPnl(pnlPct)
-      ? `9:16 +${NINE_SIXTEEN_PNL_INSTANT_EXIT_PCT}% instant exit · P&L +${pnlPct.toFixed(2)}% · ` +
-        `₹${Math.round(legPnl ?? 0)} on ₹${Math.round(entryAmount)}`
-      : `9:16 trailing stop · fell below locked +${lockedPnlPct}% (now +${pnlPct.toFixed(2)}% · ` +
-        `₹${Math.round(legPnl ?? 0)} on ₹${Math.round(entryAmount)})`;
-    await squareOff(accessToken, reason);
-    return true;
+  if (tradeSlot === "nine-fifteen" || tradeSlot === "nine-sixteen") {
+    return checkAndMaybeExitTakeProfitLeg(accessToken, _dateIst);
   }
 
   return false;
@@ -2955,7 +2987,7 @@ async function mainLoop() {
           /* logged inside */
         });
       }
-      // Backstop for the 9:15:06.000 timer — a poll that gets here first still enters on time.
+      // Backstop for the 9:15:11.000 timer — a poll that gets here first still enters on time.
       if (isReadyForNineFifteenEntry()) {
         await tryEnterNineFifteen(session.accessToken, ctx.dateIST);
         return;
@@ -3104,7 +3136,7 @@ async function runEntryBurst() {
 }
 
 /**
- * Fire the 9:15 entry the instant 9:15:06 arrives, rather than on the next 250ms poll.
+ * Fire the 9:15 entry the instant 9:15:11 arrives, rather than on the next 250ms poll.
  *
  * Errors are swallowed into a settled 9:15 attempt instead of the shared bot error handler: a
  * failure on this leg must not leave the bot in a state that costs it the 9:16 trade.
@@ -3117,7 +3149,7 @@ async function runNineFifteenEntryBurst() {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   if (loopBusy) {
-    pushLog("9:15:06 timer yielded to in-flight poll · entry continues on the poll loop", "warning");
+    pushLog("9:15:11 timer yielded to in-flight poll · entry continues on the poll loop", "warning");
     return;
   }
 
@@ -3150,7 +3182,7 @@ async function runNineFifteenEntryBurst() {
   }
 }
 
-/** Same wall-clock re-arming as the 9:16:00 timer below, aimed at 9:15:06.000. */
+/** Same wall-clock re-arming as the 9:16:00 timer below, aimed at 9:15:11.000. */
 function armNineFifteenTimer() {
   const ctx = getIndianMarketContext();
   if (ctx.sessionStatus === "closed_weekend" || ctx.sessionStatus === "post_market") return;
@@ -3167,7 +3199,7 @@ function armNineFifteenTimer() {
 
   if (nineFifteenTimerDate !== ctx.dateIST) {
     nineFifteenTimerDate = ctx.dateIST;
-    pushLog(`9:15:06.000 entry armed · T-${(delay / 1000).toFixed(1)}s`, "info");
+    pushLog(`9:15:11.000 entry armed · T-${(delay / 1000).toFixed(1)}s`, "info");
   }
 }
 
@@ -3246,29 +3278,32 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
 
   const pnlPct = pnlPctOfEntryCost(pnl, entryPrice, quantity);
   const onNineFifteenLeg = tradeSlot === "nine-fifteen";
-  const pnlTargetPct = onNineFifteenLeg
-    ? NINE_FIFTEEN_TAKE_PROFIT_PCT
-    : trailingPnlTargetPct(lockedPnlPct, ctx.dateIST);
-  const pnlStopPct = onNineFifteenLeg ? null : trailingPnlStopPct(lockedPnlPct);
-  const pnlTrailArmed = onNineFifteenLeg
-    ? nineFifteenTpOrderIds.length > 0 || (entryPrice > 0 && quantity > 0)
-    : lockedPnlPct >= NINE_SIXTEEN_PNL_TRAIL_FIRST_LOCK_PCT;
+  const onNineSixteenLeg = tradeSlot === "nine-sixteen";
+  const onTpLimitLeg = onNineFifteenLeg || onNineSixteenLeg;
+  const tpPct = onTpLimitLeg
+    ? activeLegTakeProfitPct(ctx.dateIST)
+    : NINE_FIFTEEN_TAKE_PROFIT_PCT;
+  const pnlTargetPct = onTpLimitLeg ? tpPct : 0;
+  const pnlStopPct = null;
+  const pnlTrailArmed =
+    onTpLimitLeg && (nineFifteenTpOrderIds.length > 0 || (entryPrice > 0 && quantity > 0));
   const sizeKnown = entryPrice > 0 && quantity > 0;
-  const pnlTargetAmount = onNineFifteenLeg
-    ? sizeKnown
-      ? nineFifteenTakeProfitAmount(entryPrice, quantity)
-      : null
-    : sizeKnown
-      ? computePnlTargetAmount(entryPrice, quantity, pnlTargetPct)
-      : null;
-  const pnlStopAmount =
-    sizeKnown && pnlStopPct != null ? computePnlTargetAmount(entryPrice, quantity, pnlStopPct) : null;
+  const pnlTargetAmount =
+    onTpLimitLeg && sizeKnown ? nineFifteenTakeProfitAmount(entryPrice, quantity, tpPct) : null;
+  const pnlStopAmount = null;
   const nineFifteenCapital =
-    onNineFifteenLeg && sizeKnown ? nineFifteenDeployedCapital(entryPrice, quantity) : null;
+    onTpLimitLeg && sizeKnown ? nineFifteenDeployedCapital(entryPrice, quantity) : null;
   const nineFifteenProfitAim =
-    onNineFifteenLeg && sizeKnown ? nineFifteenTakeProfitAmount(entryPrice, quantity) : null;
+    onTpLimitLeg && sizeKnown ? nineFifteenTakeProfitAmount(entryPrice, quantity, tpPct) : null;
   const nineFifteenRemaining =
-    onNineFifteenLeg && sizeKnown ? nineFifteenPnlRemainingToTarget(pnl, entryPrice, quantity) : null;
+    onTpLimitLeg && sizeKnown
+      ? nineFifteenPnlRemainingToTarget(pnl, entryPrice, quantity, tpPct)
+      : null;
+  const tpExitSchedule = onNineFifteenLeg
+    ? getNineFifteenLadderLabel(ctx.dateIST)
+    : onNineSixteenLeg
+      ? getNineSixteenLadderLabel(ctx.dateIST)
+      : null;
 
   const inTrade = phase === "in_position" || phase === "exiting";
 
@@ -3301,14 +3336,14 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
     pnlTargetPct,
     pnlExitActive: pnlTrailArmed,
     pnlExitStartLabel: getPnlExitStartLabel(),
-    pnlExitSchedule: getPnlTrailScheduleLabel(ctx.dateIST),
+    pnlExitSchedule: tpExitSchedule ?? getNineFifteenLadderLabel(ctx.dateIST),
     pnlPct,
     pnlLockedPct: lockedPnlPct,
     pnlStopPct,
     pnlStopAmount,
     pnlTrailArmed,
-    pnlTrailArmPct: onNineFifteenLeg ? NINE_FIFTEEN_TAKE_PROFIT_PCT : getNineSixteenPnlTrailArmPct(ctx.dateIST),
-    pnlTrailStepPct: onNineFifteenLeg ? 0 : NINE_SIXTEEN_PNL_TRAIL_STEP_PCT,
+    pnlTrailArmPct: onTpLimitLeg ? tpPct : 0,
+    pnlTrailStepPct: 0,
     nineFifteenEnabled,
     tradeSlot,
     nineFifteenMarkPrice,
@@ -3320,20 +3355,21 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
     nineFifteenSettled,
     nineFifteenNote,
     nineFifteenBlocked916: nineFifteenOverranMinute,
-    nineFifteenLadder: getNineFifteenLadderLabel(),
-    nineFifteenTakeProfitPct: NINE_FIFTEEN_TAKE_PROFIT_PCT,
+    nineFifteenLadder: getNineFifteenLadderLabel(ctx.dateIST),
+    nineFifteenTakeProfitPct: onTpLimitLeg ? tpPct : NINE_FIFTEEN_TAKE_PROFIT_PCT,
     nineFifteenTpLimitPrice:
-      onNineFifteenLeg && nineFifteenTpLimitPrice > 0 ? nineFifteenTpLimitPrice : null,
+      onTpLimitLeg && nineFifteenTpLimitPrice > 0 ? nineFifteenTpLimitPrice : null,
     nineFifteenDeployedCapital: nineFifteenCapital,
     nineFifteenTpProfitAim: nineFifteenProfitAim,
     nineFifteenPnlRemaining: nineFifteenRemaining,
-    nineFifteenTpOrderStatus: onNineFifteenLeg ? nineFifteenTpOrderStatus : undefined,
-    nineFifteenTpOrderIds: onNineFifteenLeg && nineFifteenTpOrderIds.length > 0 ? [...nineFifteenTpOrderIds] : undefined,
-    nineFifteenTpFilledQty: onNineFifteenLeg ? nineFifteenTpFilledQty : undefined,
-    nineFifteenTpPendingQty: onNineFifteenLeg ? nineFifteenTpPendingQty : undefined,
-    nineFifteenTpPlacedAt: onNineFifteenLeg ? nineFifteenTpPlacedAt : undefined,
-    nineFifteenTpLastSyncedAt: onNineFifteenLeg ? nineFifteenTpLastSyncedAt : undefined,
-    nineFifteenTrailArmPct: NINE_FIFTEEN_TAKE_PROFIT_PCT,
+    nineFifteenTpOrderStatus: onTpLimitLeg ? nineFifteenTpOrderStatus : undefined,
+    nineFifteenTpOrderIds:
+      onTpLimitLeg && nineFifteenTpOrderIds.length > 0 ? [...nineFifteenTpOrderIds] : undefined,
+    nineFifteenTpFilledQty: onTpLimitLeg ? nineFifteenTpFilledQty : undefined,
+    nineFifteenTpPendingQty: onTpLimitLeg ? nineFifteenTpPendingQty : undefined,
+    nineFifteenTpPlacedAt: onTpLimitLeg ? nineFifteenTpPlacedAt : undefined,
+    nineFifteenTpLastSyncedAt: onTpLimitLeg ? nineFifteenTpLastSyncedAt : undefined,
+    nineFifteenTrailArmPct: onTpLimitLeg ? tpPct : NINE_FIFTEEN_TAKE_PROFIT_PCT,
     nineFifteenTrailStepPct: 0,
     sessionConnected: Boolean(session),
     sessionAgeHours: session ? kiteSessionAgeHours(session) : null,
@@ -3464,7 +3500,11 @@ export function setNineSixteenBotEnabled(next: boolean) {
     entryTimer = null;
     entryTimerDate = null;
     if (phase === "in_position" || phase === "exiting") {
-      message = `9:16 trading disabled · still managing open position · ${getPnlTrailScheduleLabel(getIndianMarketContext().dateIST)}`;
+      const dateIst = getIndianMarketContext().dateIST;
+      message =
+        tradeSlot === "nine-fifteen"
+          ? `9:16 trading disabled · still managing open 9:15 position · ${getNineFifteenLadderLabel(dateIst)}`
+          : `9:16 trading disabled · still managing open position · ${getNineSixteenLadderLabel(dateIst)}`;
       pushLog("9:16 trading disabled — open position still managed", "warning");
     } else if (phase === "done") {
       message = isKiteTickerConnected()
@@ -3501,7 +3541,7 @@ export function setNineFifteenBotEnabled(next: boolean) {
       "info",
     );
   } else {
-    pushLog("9:15 trading enabled — red at the 9:15:05 read buys the ATM PE at 9:15:06", "info");
+    pushLog("9:15 trading enabled — red at the 9:15:10 read buys the ATM PE at 9:15:11", "info");
   }
   scheduleNext();
 }
@@ -3514,7 +3554,7 @@ export function startNineSixteenBot() {
   } else if (enabled) {
     pushLog("9:16 trading enabled on startup", "info");
   } else if (nineFifteenEnabled) {
-    pushLog("9:15 trading enabled on startup — red at 9:15:05 read buys the ATM PE at 9:15:06", "info");
+    pushLog("9:15 trading enabled on startup — red at 9:15:10 read buys the ATM PE at 9:15:11", "info");
   } else {
     pushLog("9:16 websocket monitor started (trading disabled)", "info");
   }

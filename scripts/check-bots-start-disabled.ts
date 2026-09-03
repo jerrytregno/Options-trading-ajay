@@ -33,14 +33,14 @@ const DATE_IST = "2026-08-26";
 const WEEKDAY = "Wednesday";
 const TODAY_IST = getIndianMarketContext().dateIST;
 
-console.log("\n--- schedule window boundaries (after 9:16:30 – 15:10) ---");
+console.log("\n--- schedule window boundaries (after 9:16:30 – 15:30) ---");
 check("09:15 outside window", momentumInScheduledWindow(9 * 60 + 15), false);
 check("09:16 inside minute window", momentumInScheduledWindow(9 * 60 + 16), true);
 check("10:30 inside window", momentumInScheduledWindow(10 * 60 + 30), true);
 check("12:00 inside window (no lunch gap)", momentumInScheduledWindow(12 * 60), true);
 check("13:45 inside window", momentumInScheduledWindow(13 * 60 + 45), true);
-check("15:09 inside window", momentumInScheduledWindow(15 * 60 + 9), true);
-check("15:10 outside window", momentumInScheduledWindow(15 * 60 + 10), false);
+check("15:29 inside window", momentumInScheduledWindow(15 * 60 + 29), true);
+check("15:30 outside window", momentumInScheduledWindow(15 * 60 + 30), false);
 
 console.log("\n--- fresh module load ---");
 check("momentum disabled by default", getMomentumScalperBotStatus().enabled, false);
@@ -61,8 +61,8 @@ applyMomentumDailySchedule(DATE_IST, WEEKDAY, istMs(12, 0));
 check("12:00 schedule does not disable", getMomentumScalperBotStatus().enabled, true);
 applyMomentumDailySchedule(DATE_IST, WEEKDAY, istMs(13, 45));
 check("13:45 schedule does not change enabled", getMomentumScalperBotStatus().enabled, true);
-applyMomentumDailySchedule(DATE_IST, WEEKDAY, istMs(15, 10));
-check("15:10 schedule does not disable", getMomentumScalperBotStatus().enabled, true);
+applyMomentumDailySchedule(DATE_IST, WEEKDAY, istMs(15, 30));
+check("15:30 schedule does not disable", getMomentumScalperBotStatus().enabled, true);
 setMomentumScalperBotEnabled(false);
 
 console.log("\n--- no persisted flag can re-arm the bot ---");
