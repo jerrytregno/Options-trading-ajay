@@ -6,8 +6,8 @@ import PortfolioPage from "@/pages/PortfolioPage";
 import SettingsPage from "@/pages/SettingsPage";
 import TradePage from "@/pages/TradePage";
 import LogTestPage from "@/pages/LogTestPage";
-import TrapsBacktestPage from "@/pages/TrapsBacktestPage";
-import TrapsBacktest1PtPage from "@/pages/TrapsBacktest1PtPage";
+import NineFifteenBacktestPage from "@/pages/NineFifteenBacktestPage";
+import NiftyOneHourBacktestPage from "@/pages/NiftyOneHourBacktestPage";
 
 export default function App() {
   return (
@@ -17,8 +17,8 @@ export default function App() {
       <Route path="/dashboard" element={<Navigate to="/dashboard/nine-fifteen" replace />} />
       <Route path="/dashboard/nine-fifteen" element={<NineFifteenPage />} />
       <Route path="/dashboard/backtesting" element={<BacktestingPage />} />
-      <Route path="/dashboard/traps-backtest" element={<TrapsBacktestPage />} />
-      <Route path="/dashboard/traps-backtest-1pt" element={<TrapsBacktest1PtPage />} />
+      <Route path="/dashboard/nine-fifteen-backtest" element={<NineFifteenBacktestPage />} />
+      <Route path="/dashboard/nifty-one-hour" element={<NiftyOneHourBacktestPage />} />
       <Route path="/dashboard/log-test" element={<LogTestPage />} />
       <Route path="/dashboard/trades" element={<TradePage />} />
       <Route path="/dashboard/portfolio" element={<PortfolioPage />} />

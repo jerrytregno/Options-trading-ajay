@@ -1,0 +1,253 @@
+.nf915bt-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.nf915bt-accordions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.nf915bt-accordion {
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--card, #1e293b) 92%, rgba(148, 163, 184, 0.15));
+}
+
+.nf915bt-accordion-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
+  padding: 0.75rem 0.9rem;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.nf915bt-accordion-summary::-webkit-details-marker {
+  display: none;
+}
+
+.nf915bt-accordion-summary:hover {
+  background: color-mix(in srgb, var(--primary, #6366f1) 6%, transparent);
+}
+
+.nf915bt-accordion-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text, #f8fafc);
+}
+
+.nf915bt-accordion-meta {
+  font-size: 0.8125rem;
+  color: var(--text-muted, #94a3b8);
+  text-align: right;
+  line-height: 1.45;
+}
+
+.nf915bt-accordion[open] > .nf915bt-accordion-summary {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.nf915bt-accordion-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding: 1rem 0.9rem 1.1rem;
+}
+
+.nf915bt-accordion-body .nf915bt-section-subtitle {
+  margin-top: 0;
+}
+
+.nf915bt-section-subtitle {
+  margin: 0.35rem 0 0;
+  max-width: 52rem;
+  color: var(--text-muted, #94a3b8);
+  line-height: 1.5;
+}
+
+.nf915bt-rules h3,
+.nf915bt-table-section h3 {
+  font-size: 1rem;
+  margin: 0 0 0.75rem;
+}
+
+.nf915bt-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding-bottom: 2rem;
+}
+
+.nf915bt-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.nf915bt-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0 0 0.35rem;
+}
+
+.nf915bt-subtitle {
+  margin: 0;
+  max-width: 52rem;
+  color: var(--text-muted, #94a3b8);
+  line-height: 1.5;
+}
+
+.nf915bt-error,
+.nf915bt-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+.nf915bt-rules h2,
+.nf915bt-table-section h2,
+.nf915bt-notes h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1rem;
+  margin: 0 0 0.75rem;
+}
+
+.nf915bt-rules ul {
+  margin: 0 0 0.75rem;
+  padding-left: 1.25rem;
+  line-height: 1.55;
+}
+
+.nf915bt-muted {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+.nf915bt-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.75rem;
+}
+
+.nf915bt-stat-label {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+.nf915bt-stat-value {
+  margin: 0.15rem 0 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+}
+
+.nf915bt-stat-hint {
+  margin: 0.25rem 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+.nf915bt-tone-late {
+  color: #f59e0b;
+}
+
+.nf915bt-table-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.nf915bt-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.nf915bt-table-wrap {
+  overflow-x: auto;
+}
+
+.nf915bt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.nf915bt-table th,
+.nf915bt-table td {
+  padding: 0.5rem 0.65rem;
+  text-align: left;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+  white-space: nowrap;
+}
+
+.nf915bt-table th {
+  font-weight: 600;
+  color: var(--text-muted, #94a3b8);
+}
+
+.nf915bt-empty {
+  text-align: center;
+  color: var(--text-muted, #94a3b8);
+  padding: 1.5rem !important;
+}
+
+.nf915bt-outcome-pill {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.nf915bt-outcome-win {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+}
+
+.nf915bt-outcome-late {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
+.nf915bt-outcome-loss {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.nf915bt-outcome-skip {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+}
+
+.nf915bt-notes p {
+  margin: 0;
+  line-height: 1.55;
+  color: var(--text-muted, #94a3b8);
+}
+
+.spin {
+  animation: nf915bt-spin 0.8s linear infinite;
+}
+
+@keyframes nf915bt-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

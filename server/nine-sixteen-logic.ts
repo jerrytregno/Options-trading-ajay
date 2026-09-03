@@ -11,12 +11,12 @@ export const NINE_SIXTEEN_INDEX_TARGET_20_START_MINUTE = 10 * 60 + 1;
 export const NINE_SIXTEEN_INDEX_TARGET_15 = 15;
 export const NINE_SIXTEEN_INDEX_TARGET_15_START_MINUTE = 11 * 60 + 1;
 /**
- * Live entry bands by |9:15 close − open|:
- * · ≥ 15 → main exits (±25 → ±20@10:01 → ±15@11:01)
- * · 11 ≤ |Δ| < 15 → near-miss exits (±20 → ±10@10:01)
- * · < 11 → skip
+ * Live entry by |9:15 close − open| on a red bar:
+ * · ≥ 15 → PE @ 9:16 with main exits (±25 → ±20@10:01 → ±15@11:01)
+ * · < 15 → skip
  */
 export const NINE_SIXTEEN_MIN_915_ABS_DIFF = 15;
+/** Backtest / legacy exit ladder only — live 9:16 bot no longer enters this band. */
 export const NINE_SIXTEEN_NEAR_MISS_MIN_915_ABS_DIFF = 11;
 /** Near-miss index exit: ±20 until 10:01, then ±10. */
 export const NINE_SIXTEEN_NEAR_MISS_INDEX_TARGET = 20;
@@ -87,15 +87,16 @@ export const NINE_SIXTEEN_PRE_RESOLVE_SEC = 9 * 3600 + 15 * 60 + 58;
 /**
  * The 9:15 trade — a separate, earlier leg that runs before the 9:16 one.
  *
- * The 9:15 minute is read ten seconds in: if price is below the 9:15 open at that point the
- * minute is opening red, and an ATM PE goes out at 9:15:11. There is no green side — a minute
- * opening up is left alone and the day waits for the 9:16 decision.
+ * The 9:15 minute is read five seconds in: if price is at least 5 pts below the 9:15 open at that
+ * point, an ATM PE goes out at 9:15:06. Smaller red reads, green, and flat are skipped.
  */
-export const NINE_FIFTEEN_PRE_RESOLVE_SEC = 9 * 3600 + 15 * 60 + 5;
-/** The read: last tick strictly before 9:15:10 decides red or green. */
-export const NINE_FIFTEEN_SIGNAL_READ_SEC = 9 * 3600 + 15 * 60 + 10;
+export const NINE_FIFTEEN_PRE_RESOLVE_SEC = 9 * 3600 + 15 * 60 + 4;
+/** Minimum drop (open − mark at 9:15:05) required to arm the 9:15:06 PE entry. */
+export const NINE_FIFTEEN_MIN_DROP_PTS = 5;
+/** The read: last tick strictly before 9:15:05 decides red or green. */
+export const NINE_FIFTEEN_SIGNAL_READ_SEC = 9 * 3600 + 15 * 60 + 5;
 /** The order goes out here. */
-export const NINE_FIFTEEN_ENTRY_SEC = 9 * 3600 + 15 * 60 + 11;
+export const NINE_FIFTEEN_ENTRY_SEC = 9 * 3600 + 15 * 60 + 6;
 /**
  * Retries stop here rather than at the end of the minute. A fill at 9:15:50 could not realise a
  * 3% rung before 9:16:00, so it would only stand in the way of the 9:16 trade.
@@ -158,7 +159,7 @@ export function msUntilEntryInstant(nowMs = Date.now()): number {
   return NINE_SIXTEEN_ENTRY_SEC * 1000 - istMsOfDay(nowMs);
 }
 
-/** Ms until the 9:15:11 order instant — negative once it has passed. */
+/** Ms until the 9:15:06 order instant — negative once it has passed. */
 export function msUntilNineFifteenEntry(nowMs = Date.now()): number {
   return NINE_FIFTEEN_ENTRY_SEC * 1000 - istMsOfDay(nowMs);
 }
@@ -305,13 +306,13 @@ export function isReadyForAtmPreResolve(nowMs = Date.now()): boolean {
   return nowSec >= NINE_SIXTEEN_PRE_RESOLVE_SEC && nowSec < NINE_SIXTEEN_ENTRY_SEC;
 }
 
-/** 9:15:05–9:15:10 — resolve the ATM PE so the 9:15:11 order makes no REST call. */
+/** 9:15:04–9:15:05 — resolve the ATM PE so the 9:15:06 order makes no REST call. */
 export function isReadyForNineFifteenPreResolve(nowMs = Date.now()): boolean {
   const nowSec = istSecondsOfDay(new Date(nowMs));
   return nowSec >= NINE_FIFTEEN_PRE_RESOLVE_SEC && nowSec < NINE_FIFTEEN_ENTRY_SEC;
 }
 
-/** True once the ten-second read is due, i.e. from 9:15:10 onwards. */
+/** True once the five-second read is due, i.e. from 9:15:05 onwards. */
 export function isPastNineFifteenSignalRead(nowMs = Date.now()): boolean {
   return istSecondsOfDay(new Date(nowMs)) >= NINE_FIFTEEN_SIGNAL_READ_SEC;
 }
@@ -372,21 +373,18 @@ export type NineSixteenEntryDecision =
   | { action: "skip"; reason: string }
   | { action: "enter"; leg: TradeLeg; exitMode: NineSixteenExitMode };
 
-/** |Δ| ≥ 15 → main; 11 ≤ |Δ| < 15 → near_miss; else null (skip). */
+/** |Δ| ≥ 15 → main; else null (skip). */
 export function exitModeFrom915Change(change: number): NineSixteenExitMode | null {
   const abs = Math.abs(change);
   if (abs >= NINE_SIXTEEN_MIN_915_ABS_DIFF) return "main";
-  if (abs >= NINE_SIXTEEN_NEAR_MISS_MIN_915_ABS_DIFF) return "near_miss";
   return null;
 }
 
-/** Live rules: flat or |Δ| < 11 → skip; green → CE; red → PE; exit mode from |Δ|. */
 /**
  * The 9:16 entry decision, taken on the sealed 9:15 bar.
  *
- * Short side only: a green 9:15 minute is left alone rather than bought as a CE. What remains is
- * a red minute that fell at least {@link NINE_SIXTEEN_NEAR_MISS_MIN_915_ABS_DIFF} points, which
- * buys the ATM PE on the same near-miss / main exit bands as before.
+ * Short side only: a green 9:15 minute is left alone rather than bought as a CE. A red minute
+ * enters only when |Δ| ≥ {@link NINE_SIXTEEN_MIN_915_ABS_DIFF} (main band).
  */
 export function decide915Entry(bar: NineSixteen915Bar): NineSixteenEntryDecision {
   const diff = bar.change;
@@ -403,7 +401,7 @@ export function decide915Entry(bar: NineSixteen915Bar): NineSixteenEntryDecision
   if (!exitMode) {
     return {
       action: "skip",
-      reason: `9:15 move too small — |Δ| ${Math.abs(diff).toFixed(2)} pts (need at least ${NINE_SIXTEEN_NEAR_MISS_MIN_915_ABS_DIFF}; main band ≥ ${NINE_SIXTEEN_MIN_915_ABS_DIFF})`,
+      reason: `9:15 move too small — |Δ| ${Math.abs(diff).toFixed(2)} pts (main band requires ≥ ${NINE_SIXTEEN_MIN_915_ABS_DIFF})`,
     };
   }
   return { action: "enter", leg: "PE_BUY", exitMode };
@@ -418,10 +416,9 @@ export type NineFifteenEntryDecision =
   | { action: "skip"; reason: string };
 
 /**
- * Red or green ten seconds into the 9:15 minute, measured against the 9:15 open.
+ * Red at the 9:15:05 read, measured against the 9:15 open.
  *
- * Any fall at all counts — there is no minimum here, unlike the 9:16 decision. A flat or rising
- * read is skipped outright; this trade has no long side.
+ * Requires open − mark ≥ {@link NINE_FIFTEEN_MIN_DROP_PTS} index points. Green or flat is skipped.
  */
 export function decideNineFifteenEntry(
   open: number,
@@ -440,15 +437,23 @@ export function decideNineFifteenEntry(
       reason: `Green at the 10s mark (+${change.toFixed(2)} pts) — the 9:15 trade only takes red`,
     };
   }
-  return { action: "enter", leg: "PE_BUY", dropPts: Math.abs(change) };
+  const dropPts = Math.abs(change);
+  if (dropPts + 1e-9 < NINE_FIFTEEN_MIN_DROP_PTS) {
+    return {
+      action: "skip",
+      reason:
+        `Red but drop too small at the 5s mark (−${dropPts.toFixed(2)} pts · need at least −${NINE_FIFTEEN_MIN_DROP_PTS})`,
+    };
+  }
+  return { action: "enter", leg: "PE_BUY", dropPts };
 }
 
 /* The 9:15 exit ladder lives further down, next to the 9:16 one it mirrors. */
 
-/** Default = live floor (near-miss min). Pass 15 to test main-band-only. */
+/** Default = live main-band floor (|Δ| ≥ 15). */
 export function passes915EntryFilter(
   change: number,
-  minAbsDiff = NINE_SIXTEEN_NEAR_MISS_MIN_915_ABS_DIFF,
+  minAbsDiff = NINE_SIXTEEN_MIN_915_ABS_DIFF,
 ): boolean {
   return Math.abs(change) >= minAbsDiff;
 }
@@ -729,14 +734,65 @@ export function pnlPctOfEntryCost(
 }
 
 /**
- * Trailing P&L ladder (all days, replaces the old time-tiered +10/+5/+3/+1 schedule).
- * Nothing is locked until +5% of the premium paid prints. From there each +5% rung locks the
- * stop at that rung and moves the take-profit one rung higher — reaching the take-profit only
- * expands the ladder, it never exits. The trade closes when profit slips back below the
- * locked rung (or on the index target, 9:55+ hard stop, or 3:25 PM square-off).
+ * 9:16 trailing P&L ladder — each target tier locks a stop floor; slipping below the floor exits.
+ * Reaching +50% exits at market instantly (no trail-back).
+ *
+ * Mon/Wed: first tier +4→lock+3% · Thu: +5→lock+3% · Tue/Fri: +8→lock+3%.
  */
-export const NINE_SIXTEEN_PNL_TRAIL_ARM_PCT = 5;
-export const NINE_SIXTEEN_PNL_TRAIL_STEP_PCT = 5;
+export type PnlTrailRung = { readonly targetPct: number; readonly lockPct: number };
+
+export const NINE_SIXTEEN_PNL_TRAIL_RUNGS_TAIL = [
+  { targetPct: 12, lockPct: 6 },
+  { targetPct: 16, lockPct: 9 },
+  { targetPct: 20, lockPct: 12 },
+  { targetPct: 25, lockPct: 16 },
+  { targetPct: 30, lockPct: 20 },
+  { targetPct: 40, lockPct: 28 },
+] as const;
+
+export const NINE_SIXTEEN_PNL_TRAIL_RUNGS = [
+  { targetPct: 8, lockPct: 3 },
+  ...NINE_SIXTEEN_PNL_TRAIL_RUNGS_TAIL,
+] as const;
+
+/** Instant market exit when profit touches this level. */
+export const NINE_SIXTEEN_PNL_INSTANT_EXIT_PCT = 50;
+
+function istWeekdayShortFromDateKey(dateKey: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return "";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Kolkata",
+    weekday: "short",
+  }).format(new Date(`${dateKey}T06:00:00.000Z`));
+}
+
+/** First target tier for the session date (+8 Tue/Fri; +4 Mon/Wed · +5 Thu). */
+export function getNineSixteenPnlTrailFirstTargetPct(dateIst?: string): number {
+  if (!dateIst) return NINE_SIXTEEN_PNL_TRAIL_RUNGS[0].targetPct;
+  const weekday = istWeekdayShortFromDateKey(dateIst);
+  if (weekday === "Mon" || weekday === "Wed") return 4;
+  if (weekday === "Thu") return 5;
+  return NINE_SIXTEEN_PNL_TRAIL_RUNGS[0].targetPct;
+}
+
+/** Full ladder for the session date (weekday-specific first rung). */
+export function getNineSixteenPnlTrailRungs(dateIst?: string): readonly PnlTrailRung[] {
+  const firstTarget = getNineSixteenPnlTrailFirstTargetPct(dateIst);
+  return [{ targetPct: firstTarget, lockPct: 3 }, ...NINE_SIXTEEN_PNL_TRAIL_RUNGS_TAIL];
+}
+
+/** First target tier (+8% default) — nothing locks before this prints. */
+export const NINE_SIXTEEN_PNL_TRAIL_ARM_PCT = NINE_SIXTEEN_PNL_TRAIL_RUNGS[0].targetPct;
+
+/** First target for a session date (+4 Mon/Wed · +5 Thu · +8 Tue/Fri). */
+export function getNineSixteenPnlTrailArmPct(dateIst?: string): number {
+  return getNineSixteenPnlTrailFirstTargetPct(dateIst);
+}
+
+/** First stop floor once the first target prints (always +3%). */
+export const NINE_SIXTEEN_PNL_TRAIL_FIRST_LOCK_PCT = NINE_SIXTEEN_PNL_TRAIL_RUNGS[0].lockPct;
+/** @deprecated Uniform +5% steps removed — kept for older panels. */
+export const NINE_SIXTEEN_PNL_TRAIL_STEP_PCT = 4;
 /**
  * The ladder ratchets and never steps back down, so one bad P&L reading would lock a rung the
  * trade can never meet and force an instant stop-out. Readings above this are treated as bad
@@ -750,104 +806,138 @@ export function isPlausiblePnlPct(pnlPct: number | null): boolean {
   return pnlPct <= NINE_SIXTEEN_PNL_TRAIL_MAX_LOCK_PCT;
 }
 
-/** Highest rung locked so far: 0 before +5% prints, then 5, 10, 15 … in +5% steps. */
-export function nextLockedPnlPct(lockedPct: number, pnlPct: number | null): number {
-  const current = Number.isFinite(lockedPct) && lockedPct > 0 ? lockedPct : 0;
+/** Highest stop floor locked so far (0 until first target prints, then 3, 6, 9 …). */
+export function nextLockedPnlPct(
+  lockedStopPct: number,
+  pnlPct: number | null,
+  dateIst?: string,
+): number {
+  const current = Number.isFinite(lockedStopPct) && lockedStopPct > 0 ? lockedStopPct : 0;
   if (pnlPct == null || !isPlausiblePnlPct(pnlPct)) return current;
-  if (pnlPct < NINE_SIXTEEN_PNL_TRAIL_ARM_PCT) return current;
-  const rung =
-    Math.floor(pnlPct / NINE_SIXTEEN_PNL_TRAIL_STEP_PCT) * NINE_SIXTEEN_PNL_TRAIL_STEP_PCT;
-  return Math.max(current, Math.min(rung, NINE_SIXTEEN_PNL_TRAIL_MAX_LOCK_PCT));
+  let next = current;
+  for (const rung of getNineSixteenPnlTrailRungs(dateIst)) {
+    if (pnlPct + 1e-9 >= rung.targetPct) {
+      next = Math.max(next, rung.lockPct);
+    }
+  }
+  return next;
 }
 
-/** Take-profit rung — where the ladder expands next, not an exit level. */
-export function trailingPnlTargetPct(lockedPct: number): number {
-  const current = Number.isFinite(lockedPct) && lockedPct > 0 ? lockedPct : 0;
-  return current === 0
-    ? NINE_SIXTEEN_PNL_TRAIL_ARM_PCT + NINE_SIXTEEN_PNL_TRAIL_STEP_PCT
-    : current + NINE_SIXTEEN_PNL_TRAIL_STEP_PCT;
+/** Next profit target — not an exit until +50% instant rule fires. */
+export function trailingPnlTargetPct(lockedStopPct: number, dateIst?: string): number {
+  const rungs = getNineSixteenPnlTrailRungs(dateIst);
+  if (lockedStopPct <= 0) return rungs[0]!.targetPct;
+  for (let i = 0; i < rungs.length; i += 1) {
+    const rung = rungs[i]!;
+    if (rung.lockPct === lockedStopPct) {
+      return i + 1 < rungs.length ? rungs[i + 1]!.targetPct : NINE_SIXTEEN_PNL_INSTANT_EXIT_PCT;
+    }
+  }
+  const last = rungs[rungs.length - 1]!;
+  if (lockedStopPct >= last.lockPct) return NINE_SIXTEEN_PNL_INSTANT_EXIT_PCT;
+  return rungs[0]!.targetPct;
 }
 
-/** Stop rung once armed — null while profit has never touched +5%. */
-export function trailingPnlStopPct(lockedPct: number): number | null {
-  return lockedPct >= NINE_SIXTEEN_PNL_TRAIL_ARM_PCT ? lockedPct : null;
+/** Locked stop floor — null until the first target (+8%) has printed. */
+export function trailingPnlStopPct(lockedStopPct: number): number | null {
+  return lockedStopPct > 0 ? lockedStopPct : null;
 }
 
-/** Exit only after the ladder is armed and profit slips back below the locked rung. */
-export function shouldExitOnTrailingPnl(lockedPct: number, pnlPct: number | null): boolean {
-  if (lockedPct < NINE_SIXTEEN_PNL_TRAIL_ARM_PCT) return false;
-  if (pnlPct == null || !Number.isFinite(pnlPct)) return false;
-  return pnlPct < lockedPct;
+export function shouldInstantExitTrailingPnl(pnlPct: number | null): boolean {
+  return pnlPct != null && isPlausiblePnlPct(pnlPct) && pnlPct + 1e-9 >= NINE_SIXTEEN_PNL_INSTANT_EXIT_PCT;
+}
+
+/** Trail stop-out or +50% instant market exit. */
+export function shouldExitOnTrailingPnl(lockedStopPct: number, pnlPct: number | null): boolean {
+  if (shouldInstantExitTrailingPnl(pnlPct)) return true;
+  if (lockedStopPct <= 0 || pnlPct == null || !Number.isFinite(pnlPct)) return false;
+  return pnlPct < lockedStopPct;
 }
 
 /* ---------------------------------------------------------------------------------------------
- * 9:15 exit ladder
- *
- * Tighter and faster than the 9:16 one, because the trade is meant to be over inside the minute:
- * it arms at +3% instead of +5% and steps +2% instead of +5%, and it runs on option P&L plus the
- * shared 10:00 IST ±30 Nifty hard stop from entry spot.
+ * 9:15 exit — fixed +5% take-profit limit on capital deployed at entry, plus the shared 10:00 IST
+ * ±30 Nifty hard stop and 3:25 PM square-off.
  * ------------------------------------------------------------------------------------------- */
 
-/** First rung. Nothing is locked until profit reaches this. */
-export const NINE_FIFTEEN_TRAIL_ARM_PCT = 3;
-/** Every rung after the first: 3 → 5 → 7 → 9 → … */
-export const NINE_FIFTEEN_TRAIL_STEP_PCT = 2;
-/** Same bad-data ceiling as the 9:16 ladder. */
-export const NINE_FIFTEEN_TRAIL_MAX_LOCK_PCT = NINE_SIXTEEN_PNL_TRAIL_MAX_LOCK_PCT;
+/** Take-profit on premium / capital deployed — limit sell placed the moment the 9:15:06 fill lands. */
+export const NINE_FIFTEEN_TAKE_PROFIT_PCT = 5;
 
-/** Highest rung reached so far: 0 below +3%, then 3, 5, 7, 9 … */
-export function nextNineFifteenLockedPct(lockedPct: number, pnlPct: number | null): number {
-  const current = Number.isFinite(lockedPct) && lockedPct > 0 ? lockedPct : 0;
-  if (pnlPct == null || !isPlausiblePnlPct(pnlPct)) return current;
-  if (pnlPct < NINE_FIFTEEN_TRAIL_ARM_PCT) return current;
-  const steps = Math.floor((pnlPct - NINE_FIFTEEN_TRAIL_ARM_PCT) / NINE_FIFTEEN_TRAIL_STEP_PCT);
-  const rung = NINE_FIFTEEN_TRAIL_ARM_PCT + steps * NINE_FIFTEEN_TRAIL_STEP_PCT;
-  return Math.max(current, Math.min(rung, NINE_FIFTEEN_TRAIL_MAX_LOCK_PCT));
+/** Limit price for a +5% profit on the entry premium (per-unit). */
+export function nineFifteenTakeProfitLimitPrice(entryPrice: number): number {
+  if (!(entryPrice > 0)) return 0;
+  return Math.round(entryPrice * (1 + NINE_FIFTEEN_TAKE_PROFIT_PCT / 100) * 100) / 100;
 }
 
-/** Where the ladder expands next. Reaching it never exits. */
-export function nineFifteenTargetPct(lockedPct: number): number {
-  const current = Number.isFinite(lockedPct) && lockedPct > 0 ? lockedPct : 0;
-  return current === 0 ? NINE_FIFTEEN_TRAIL_ARM_PCT : current + NINE_FIFTEEN_TRAIL_STEP_PCT;
+export function nineFifteenDeployedCapital(entryPrice: number, quantity: number): number {
+  if (entryPrice <= 0 || quantity <= 0) return 0;
+  return entryPrice * quantity;
 }
 
-/** The live stop once the ladder has armed; null while no rung is locked yet. */
-export function nineFifteenStopPct(lockedPct: number): number | null {
-  return lockedPct >= NINE_FIFTEEN_TRAIL_ARM_PCT ? lockedPct : null;
+/** Rupee profit aim — e.g. ₹5,000 on ₹1,00,000 deployed. */
+export function nineFifteenTakeProfitAmount(entryPrice: number, quantity: number): number {
+  return nineFifteenDeployedCapital(entryPrice, quantity) * (NINE_FIFTEEN_TAKE_PROFIT_PCT / 100);
 }
 
-export interface NineFifteenExitEvaluation {
-  lockedPnlPct: number;
-  exit: { reason: "trail-stop"; lockedPnlPct: number } | null;
+/** True when live P&L has reached the fixed take-profit (market backup if the limit is stuck). */
+export function shouldExitNineFifteenTakeProfit(
+  unrealisedPnl: number | null,
+  entryPrice: number,
+  quantity: number,
+): boolean {
+  if (unrealisedPnl == null || entryPrice <= 0 || quantity <= 0) return false;
+  const target = nineFifteenTakeProfitAmount(entryPrice, quantity);
+  return target > 0 && unrealisedPnl + 1e-9 >= target;
 }
 
-/**
- * One evaluation of the 9:15 ladder against a live P&L reading.
- *
- * Reaching a rung only ratchets the floor — the exit fires when P&L later comes back down to it.
- * The check is skipped on the evaluation that advances the ladder, because the floor and the
- * reading are the same number there and every rung would sell itself the moment it locked.
- */
-export function evaluateNineFifteenExit(
-  lockedPct: number,
-  pnlPct: number | null,
-): NineFifteenExitEvaluation {
-  const current = Number.isFinite(lockedPct) && lockedPct > 0 ? lockedPct : 0;
-  if (pnlPct == null || !isPlausiblePnlPct(pnlPct)) {
-    return { lockedPnlPct: current, exit: null };
+/** Rupees still needed to reach the +5% profit aim (0 once at/above target). */
+export function nineFifteenPnlRemainingToTarget(
+  unrealisedPnl: number | null,
+  entryPrice: number,
+  quantity: number,
+): number | null {
+  if (unrealisedPnl == null || entryPrice <= 0 || quantity <= 0) return null;
+  const target = nineFifteenTakeProfitAmount(entryPrice, quantity);
+  return Math.max(0, target - unrealisedPnl);
+}
+
+export type NineFifteenExitVia = "limit" | "market" | "hard-stop" | "eod";
+
+/** Human-readable close line for logs and the panel after a 9:15 leg exits. */
+export function formatNineFifteenExitSummary(input: {
+  exitPrice: number | null;
+  quantity: number;
+  entryPrice: number;
+  pnl: number | null;
+  via: NineFifteenExitVia;
+}): string {
+  const capital = nineFifteenDeployedCapital(input.entryPrice, input.quantity);
+  const pnlPct =
+    capital > 0 && input.pnl != null ? (input.pnl / capital) * 100 : null;
+  const viaLabel =
+    input.via === "limit"
+      ? "limit sell executed on Kite"
+      : input.via === "market"
+        ? "market exit (+5% backup)"
+        : input.via === "hard-stop"
+          ? "hard stop (market)"
+          : "end-of-day square-off (market)";
+  const parts = [
+    `TRADE EXITED · 9:15 ${viaLabel}`,
+    `${input.quantity} qty`,
+  ];
+  if (input.exitPrice != null && input.exitPrice > 0) {
+    parts.push(`@ ₹${input.exitPrice.toFixed(2)} avg`);
   }
-
-  const locked = nextNineFifteenLockedPct(current, pnlPct);
-  if (locked > current) return { lockedPnlPct: locked, exit: null };
-
-  if (locked >= NINE_FIFTEEN_TRAIL_ARM_PCT) {
-    return pnlPct <= locked
-      ? { lockedPnlPct: locked, exit: { reason: "trail-stop", lockedPnlPct: locked } }
-      : { lockedPnlPct: locked, exit: null };
+  if (input.pnl != null) {
+    parts.push(`P&L ${input.pnl >= 0 ? "+" : ""}₹${Math.round(input.pnl)}`);
   }
-
-  // No P&L stop before the ladder arms — EOD square-off is the only other exit.
-  return { lockedPnlPct: locked, exit: null };
+  if (pnlPct != null) {
+    parts.push(`(${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)`);
+  }
+  if (capital > 0) {
+    parts.push(`on ₹${Math.round(capital)} deployed`);
+  }
+  return parts.join(" · ");
 }
 
 /**
@@ -886,21 +976,17 @@ export function ownLegUnrealisedPnl(
   return (lastOptionPrice - entryPrice) * quantity;
 }
 
-export function getPnlTrailScheduleLabel(): string {
-  const arm = NINE_SIXTEEN_PNL_TRAIL_ARM_PCT;
-  const step = NINE_SIXTEEN_PNL_TRAIL_STEP_PCT;
-  return (
-    `Trail from +${arm}% · every +${step}% locks SL at that rung, TP moves to rung+${step}% ` +
-    `(+${arm}→TP+${arm + step}/SL+${arm} · +${arm + step}→TP+${arm + 2 * step}/SL+${arm + step} …)`
-  );
+export function getPnlTrailScheduleLabel(dateIst?: string): string {
+  const tiers = getNineSixteenPnlTrailRungs(dateIst).map(
+    (rung) => `+${rung.targetPct}→lock+${rung.lockPct}%`,
+  ).join(" · ");
+  return `${tiers} · +${NINE_SIXTEEN_PNL_INSTANT_EXIT_PCT}% instant market exit`;
 }
 
 export function getNineFifteenLadderLabel(): string {
-  const arm = NINE_FIFTEEN_TRAIL_ARM_PCT;
-  const step = NINE_FIFTEEN_TRAIL_STEP_PCT;
   return (
-    `Trail from +${arm}% · every +${step}% locks SL at that rung ` +
-    `(+${arm}→TP+${arm + step}/SL+${arm} · +${arm + step}→TP+${arm + 2 * step}/SL+${arm + step} …) · market exits`
+    `+${NINE_FIFTEEN_TAKE_PROFIT_PCT}% take-profit limit on capital deployed at entry · ` +
+    `${getHardStopStartLabel()} hard stop ±${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} pts · 3:25 PM square-off`
   );
 }
 

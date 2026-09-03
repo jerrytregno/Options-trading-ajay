@@ -13,9 +13,9 @@ import {
   DAY_SCALPER_TRADE_WINDOW_OPEN,
 } from "../src/types/day-scalper.js";
 
-/** Live bot defaults — min body 2 pts, close→mark gap 1.5 pt, initial stop −4% P&L, no hold. */
+/** Live bot defaults — min range 5 pts, close→mark gap 1.5 pt, initial stop −4% P&L, no hold. */
 export const MOMENTUM_SCALPER_LIVE_RULES: DayScalperRules = {
-  minMovePts: 2,
+  minMovePts: 5,
   signalMeasure: "range",
   triggerPts: DAY_SCALPER_TRIGGER_PTS,
   initialTargetPts: DAY_SCALPER_INITIAL_TARGET_PTS,
@@ -127,7 +127,7 @@ export function signedSignalMovePts(bar: SignalBar, rules: DayScalperRules): num
 export function detectSignalSide(bar: SignalBar, rules: DayScalperRules): DayScalperSide | null {
   // A candle with no body has no colour, so it is neither a CE nor a PE idea however wide it ran.
   if (bar.close === bar.open) return null;
-  if (signalMagnitudePts(bar, rules) <= rules.minMovePts) return null;
+  if (signalMagnitudePts(bar, rules) < rules.minMovePts) return null;
   return bar.close > bar.open ? "CE" : "PE";
 }
 
@@ -206,13 +206,16 @@ export function momentumRsiBlocksEntry(
   return { blocked: false };
 }
 
-/** Nifty must continue the signal colour by at least this many points during the gate window. */
+/** Second-minute first tick must clear the first-minute last tick by at least this many points. */
 export const MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS = 0.2;
 
-/** Websocket ticks in the first N seconds of candle 2 decide whether the gate passed. */
+/** After the gate passes, Nifty must retrace this many points from the start before entry. */
+export const MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS = 2;
+
+/** @deprecated Live Traps no longer uses a 10-second gate window — kept for legacy scripts. */
 export const MOMENTUM_GATE_READ_SEC = 10;
 
-/** Market entry fires at this second of candle 2 when the gate passed. */
+/** @deprecated Live Traps enters on the 2-pt pullback, not at :11 — kept for legacy scripts. */
 export const MOMENTUM_ENTRY_SEC = 11;
 
 export type MomentumEntrySkipReason = "no-pullback" | "outside-window" | "momentum-open";
@@ -256,29 +259,39 @@ export function evaluateMomentumPullbackTrigger(
   return hit ? { action: "enter", triggerPrice } : { action: "waiting" };
 }
 
-/** Level Nifty must reach in the signal direction during the gate window. */
+/** Level the second minute's first tick must reach vs the first minute's last tick. */
 export function momentumGateLevel(
   side: DayScalperSide,
-  signalClose: number,
+  signalLastTick: number,
   gapPts = MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS,
 ): number {
-  return round2(signalClose + (side === "CE" ? gapPts : -gapPts));
+  return round2(signalLastTick + (side === "CE" ? gapPts : -gapPts));
 }
 
 /**
- * True when a single Nifty print has continued candle 1 in the signal colour by at least `gapPts`.
- * Live Traps asks this of every websocket tick in the first {@link MOMENTUM_GATE_READ_SEC} seconds.
+ * Gate: compare the second minute's first websocket tick to the first minute's last tick.
+ * CE (green) needs first ≥ last + gap; PE (red) needs first ≤ last − gap.
  */
+export function momentumGateFirstTickPasses(
+  side: DayScalperSide,
+  momentumFirstTick: number,
+  signalLastTick: number,
+  gapPts = MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS,
+): boolean {
+  if (!(momentumFirstTick > 0) || !(signalLastTick > 0)) return false;
+  const level = momentumGateLevel(side, signalLastTick, gapPts);
+  if (side === "CE") return momentumFirstTick + 1e-9 >= level;
+  return momentumFirstTick <= level + 1e-9;
+}
+
+/** @deprecated Use {@link momentumGateFirstTickPasses} — old 10-second scan against signal close. */
 export function momentumGateTickPasses(
   side: DayScalperSide,
   spot: number,
   signalClose: number,
   gapPts = MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS,
 ): boolean {
-  if (!(spot > 0) || !(signalClose > 0)) return false;
-  const level = momentumGateLevel(side, signalClose, gapPts);
-  if (side === "CE") return spot + 1e-9 >= level;
-  return spot <= level + 1e-9;
+  return momentumGateFirstTickPasses(side, spot, signalClose, gapPts);
 }
 
 /** @deprecated Name kept for Day Scalper — same tick test as {@link momentumGateTickPasses}. */
@@ -300,23 +313,62 @@ export function momentumMinuteOpenMin(
   return momentumGateLevel(side, signalClose, gapPts);
 }
 
-/**
- * Minute-bar stand-in for the live 10-second gate.
- *
- * Backtests only have OHLC, so the open is the :00 tick and a same-minute high/low touch is
- * credited when the open alone did not clear the gate — the closest honest approximation of
- * "seen in the opening seconds" without tick replay.
- */
+/** Candle gate — momentum bar open vs signal bar close (Day Scalper / unit checks). */
+export function momentumGateFirstTickBarPasses(
+  side: DayScalperSide,
+  momentumOpen: number,
+  signalLastTick: number,
+  gapPts = MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS,
+): boolean {
+  return momentumGateFirstTickPasses(side, momentumOpen, signalLastTick, gapPts);
+}
+
+/** @deprecated Use {@link momentumGateFirstTickBarPasses}. */
 export function momentumGateSeenInMinuteBar(
   side: DayScalperSide,
   bar: { open: number; high: number; low: number },
-  signalClose: number,
+  signalLastTick: number,
   gapPts = MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS,
 ): boolean {
-  if (momentumGateTickPasses(side, bar.open, signalClose, gapPts)) return true;
-  const level = momentumGateLevel(side, signalClose, gapPts);
-  if (side === "CE") return bar.high + 1e-9 >= level;
-  return bar.low <= level + 1e-9;
+  return momentumGateFirstTickBarPasses(side, bar.open, signalLastTick, gapPts);
+}
+
+/** Nifty index level that triggers the pullback entry once the gate has passed. */
+export function trapsPullbackEntryLevel(
+  side: DayScalperSide,
+  startPrice: number,
+  pullbackPts = MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS,
+): number {
+  return round2(startPrice + (side === "CE" ? -pullbackPts : pullbackPts));
+}
+
+/** True when spot has retraced `pullbackPts` from the gate start price. */
+export function trapsPullbackEntryTriggered(
+  side: DayScalperSide,
+  spot: number,
+  startPrice: number,
+  pullbackPts = MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS,
+): boolean {
+  if (!(spot > 0) || !(startPrice > 0)) return false;
+  const level = trapsPullbackEntryLevel(side, startPrice, pullbackPts);
+  if (side === "CE") return spot <= level + 1e-9;
+  return spot + 1e-9 >= level;
+}
+
+/** Backtest pullback fill on the momentum minute bar. */
+export function trapsPullbackEntryIndexFromBar(
+  side: DayScalperSide,
+  bar: { high: number; low: number },
+  startPrice: number,
+  pullbackPts = MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS,
+): number | null {
+  const level = trapsPullbackEntryLevel(side, startPrice, pullbackPts);
+  if (side === "CE") {
+    if (bar.low <= level + 1e-9) return level;
+    return null;
+  }
+  if (bar.high + 1e-9 >= level) return level;
+  return null;
 }
 
 const IST_HMS_FORMAT = new Intl.DateTimeFormat("en-IN", {
@@ -399,55 +451,39 @@ export function evaluateMomentumEntry(
   };
 }
 
-/** Live scan begins at the 9:15 candle — no 9:16 bot handoff. */
-/**
- * Scanning opens at 09:30 IST. The first fifteen minutes were the worst window by a distance in
- * the Aug 26–28 option-candle backtest — the 09:15–09:30 entries lost ₹39.9k while the rest of the
- * session made ₹136.7k — so the open is sat out rather than traded.
- */
-export const MOMENTUM_SCALPER_SCAN_START_MINS = 9 * 60 + 30;
+/** Live/backtest scan starts after the 9:16 entry window (9:16:30 IST) — first signal bar is 9:16. */
+export const MOMENTUM_SCALPER_SCAN_START_MINS = 9 * 60 + 16;
 
-/**
- * Live Traps entry windows only — backtests keep scanning {@link MOMENTUM_SCALPER_SCAN_START_MINS}–15:10.
- * Open legs are never cut at a window end; only new entries pause until the next window or 15:10.
- */
-export const MOMENTUM_SCALPER_LIVE_MORNING_START_MINS = 10 * 60 + 30;
+/** @deprecated Split windows removed — live Traps scans 09:15–15:10 continuously. */
+export const MOMENTUM_SCALPER_LIVE_MORNING_START_MINS = MOMENTUM_SCALPER_SCAN_START_MINS;
+/** @deprecated */
 export const MOMENTUM_SCALPER_LIVE_MORNING_END_MINS = 12 * 60;
+/** @deprecated */
 export const MOMENTUM_SCALPER_LIVE_AFTERNOON_START_MINS = 13 * 60 + 45;
+/** @deprecated */
 export const MOMENTUM_SCALPER_LIVE_AFTERNOON_END_MINS = 15 * 60 + 10;
 
-/** True when the clock is inside a live Traps entry window (not used by the backtest). */
+/** True when a new Traps entry may be taken (after 9:16 trade through 15:10 IST). */
 export function momentumLiveEntryAllowed(mins: number): boolean {
   return (
-    (mins >= MOMENTUM_SCALPER_LIVE_MORNING_START_MINS && mins < MOMENTUM_SCALPER_LIVE_MORNING_END_MINS) ||
-    (mins >= MOMENTUM_SCALPER_LIVE_AFTERNOON_START_MINS &&
-      mins < MOMENTUM_SCALPER_LIVE_AFTERNOON_END_MINS)
+    mins >= MOMENTUM_SCALPER_SCAN_START_MINS &&
+    mins < istHmToMins(MOMENTUM_SCALPER_LIVE_RULES.tradeWindowCloseIst)
   );
 }
 
-/** After the afternoon window — no more entries today; open legs still run their exits. */
+/** After the entry cutoff — no more entries today; open legs still run their exits. */
 export function momentumLiveDayEntryCutoffReached(mins: number): boolean {
-  return mins >= MOMENTUM_SCALPER_LIVE_AFTERNOON_END_MINS;
+  return mins >= istHmToMins(MOMENTUM_SCALPER_LIVE_RULES.tradeWindowCloseIst);
 }
 
 export function formatMomentumLiveScheduleLabel(): string {
-  return (
-    `${formatIstMins(MOMENTUM_SCALPER_LIVE_MORNING_START_MINS)}–` +
-    `${formatIstMins(MOMENTUM_SCALPER_LIVE_MORNING_END_MINS)} & ` +
-    `${formatIstMins(MOMENTUM_SCALPER_LIVE_AFTERNOON_START_MINS)}–` +
-    `${formatIstMins(MOMENTUM_SCALPER_LIVE_AFTERNOON_END_MINS)}`
-  );
+  return `after 9:16:30–${MOMENTUM_SCALPER_LIVE_RULES.tradeWindowCloseIst}`;
 }
 
-/** Next live entry window start, or null if the day is done or a window is already open. */
+/** Next scan start today, or null when already inside the window or past cutoff. */
 export function momentumNextLiveEntryOpenMins(nowMins: number): number | null {
   if (momentumLiveEntryAllowed(nowMins)) return null;
-  if (nowMins < MOMENTUM_SCALPER_LIVE_MORNING_START_MINS) {
-    return MOMENTUM_SCALPER_LIVE_MORNING_START_MINS;
-  }
-  if (nowMins < MOMENTUM_SCALPER_LIVE_AFTERNOON_START_MINS) {
-    return MOMENTUM_SCALPER_LIVE_AFTERNOON_START_MINS;
-  }
+  if (nowMins < MOMENTUM_SCALPER_SCAN_START_MINS) return MOMENTUM_SCALPER_SCAN_START_MINS;
   return null;
 }
 

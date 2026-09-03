@@ -12,7 +12,13 @@ export interface NineSixteenBodyBucket {
   losses: number;
 }
 
-type TradeLike = Pick<NineFifteenCePeFailureTrade, "change"> & { won?: boolean };
+type TradeLike = Pick<NineFifteenCePeFailureTrade, "change" | "candleRange915"> & { won?: boolean };
+
+/** Size used for entry-filter buckets — body or 9:15 high−low when present. */
+export function trade915EntrySize(trade: Pick<NineFifteenCePeFailureTrade, "change" | "candleRange915">): number {
+  if (trade.candleRange915 != null && Number.isFinite(trade.candleRange915)) return trade.candleRange915;
+  return Math.abs(trade.change);
+}
 
 /**
  * Bucket index for |9:15 close − 9:15 open| in fixed-width bands.
@@ -52,8 +58,9 @@ export function buildNineSixteenBodyBuckets(
   let maxIndex = 0;
 
   for (const trade of trades) {
-    if (!Number.isFinite(trade.change)) continue;
-    const idx = nineSixteenBodyBucketIndex(Math.abs(trade.change), width);
+    const size = trade915EntrySize(trade);
+    if (!Number.isFinite(size)) continue;
+    const idx = nineSixteenBodyBucketIndex(size, width);
     maxIndex = Math.max(maxIndex, idx);
     const row = tallies.get(idx) ?? { count: 0, wins: 0, losses: 0 };
     row.count += 1;
@@ -98,13 +105,14 @@ export function strategyTradesForBodyBuckets(
   failures: NineFifteenCePeFailureTrade[] | undefined,
   minAbsDiff: number,
   maxAbsDiffExclusive?: number,
+  minAbsDiffExclusive = false,
 ): TradeLike[] {
   const wins = (successes ?? []).map((t) => ({ ...t, won: true as const }));
   const losses = (failures ?? []).map((t) => ({ ...t, won: false as const }));
   return [...wins, ...losses].filter((t) => {
-    const abs = Math.abs(t.change);
-    if (abs < minAbsDiff) return false;
-    if (maxAbsDiffExclusive != null && abs >= maxAbsDiffExclusive) return false;
+    const size = trade915EntrySize(t);
+    if (minAbsDiffExclusive ? size <= minAbsDiff : size < minAbsDiff) return false;
+    if (maxAbsDiffExclusive != null && size >= maxAbsDiffExclusive) return false;
     return true;
   });
 }

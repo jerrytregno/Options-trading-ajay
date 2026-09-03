@@ -77,6 +77,17 @@ interface BotStatus {
   nineFifteenNote?: string | null;
   nineFifteenBlocked916?: boolean;
   nineFifteenLadder?: string;
+  nineFifteenTakeProfitPct?: number;
+  nineFifteenTpLimitPrice?: number | null;
+  nineFifteenDeployedCapital?: number | null;
+  nineFifteenTpProfitAim?: number | null;
+  nineFifteenPnlRemaining?: number | null;
+  nineFifteenTpOrderStatus?: "none" | "pending" | "partial" | "complete" | "cancelled" | "failed";
+  nineFifteenTpOrderIds?: string[];
+  nineFifteenTpFilledQty?: number;
+  nineFifteenTpPendingQty?: number;
+  nineFifteenTpPlacedAt?: string | null;
+  nineFifteenTpLastSyncedAt?: string | null;
   nineFifteenTrailArmPct?: number;
   nineFifteenTrailStepPct?: number;
   sessionConnected: boolean;
@@ -208,22 +219,50 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
       ? (status.lastOptionPrice - status.entryPrice) * status.quantity
       : null);
 
-  const trailArmPct = status.pnlTrailArmPct ?? 5;
-  const trailStepPct = status.pnlTrailStepPct ?? 5;
+  const nineFifteenTpPct = status.nineFifteenTakeProfitPct ?? status.nineFifteenTrailArmPct ?? 5;
+  const onNineFifteenLeg = status.tradeSlot === "nine-fifteen" && inPosition;
   const lockedPct = status.pnlLockedPct ?? 0;
-  const trailArmed = status.pnlTrailArmed ?? lockedPct >= trailArmPct;
+  const trailArmed = status.pnlTrailArmed ?? (!onNineFifteenLeg && lockedPct > 0);
   const livePnlPct =
     status.pnlPct ??
     (livePnl != null && status.entryPrice != null && status.quantity != null && status.quantity > 0
       ? (livePnl / (status.entryPrice * status.quantity)) * 100
       : null);
 
-  // Take-profit no longer exits — hitting it just promotes the ladder one rung.
+  const nineFifteenMarkChange = status.nineFifteenMarkChange ?? null;
+  const deployedCapital = status.nineFifteenDeployedCapital ?? null;
+  const profitAim = status.nineFifteenTpProfitAim ?? status.pnlTargetAmount ?? null;
+  const pnlRemaining = status.nineFifteenPnlRemaining ?? null;
+  const tpOrderStatus = status.nineFifteenTpOrderStatus ?? "none";
+  const tpProgressPct =
+    profitAim != null && profitAim > 0 && livePnl != null
+      ? Math.min(100, Math.max(0, (livePnl / profitAim) * 100))
+      : null;
+
+  function tpStatusLabel(): string {
+    switch (tpOrderStatus) {
+      case "pending":
+        return "Live on Kite — waiting for fill";
+      case "partial":
+        return "Partially filled";
+      case "complete":
+        return "Fully filled — closing trade";
+      case "cancelled":
+        return "Cancelled — market backup active";
+      case "failed":
+        return "Not placed — market backup at +5%";
+      default:
+        return "Not armed yet";
+    }
+  }
+
+  // 9:15 exits on a resting +5% limit; 9:16 still uses the trailing ladder.
   const pnlTargetReached =
     inPosition &&
     status.pnlTargetAmount != null &&
     livePnl != null &&
-    livePnl >= status.pnlTargetAmount;
+    livePnl >= status.pnlTargetAmount &&
+    (onNineFifteenLeg || !trailArmed);
 
   const pnlBlockClass =
     livePnl == null
@@ -231,10 +270,6 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
       : livePnl >= 0
         ? "is-up"
         : "is-down";
-
-  const nineFifteenArmPct = status.nineFifteenTrailArmPct ?? 3;
-  const nineFifteenStepPct = status.nineFifteenTrailStepPct ?? 2;
-  const nineFifteenMarkChange = status.nineFifteenMarkChange ?? null;
 
   const spotPollSec =
     status.spotPollMs != null && status.spotPollMs > 0
@@ -295,7 +330,7 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
               className="btn btn-secondary btn-sm pat-stop"
               disabled={loading}
               onClick={() => void toggle(false, "nine-fifteen")}
-              title="Stop the 9:15:11 entry — the 9:16 trade is unaffected"
+              title="Stop the 9:15:06 entry — the 9:16 trade is unaffected"
             >
               Disable 9:15 trading
             </button>
@@ -305,7 +340,7 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
               className="btn btn-secondary btn-sm"
               disabled={!connected || loading}
               onClick={() => void toggle(true, "nine-fifteen")}
-              title="Arm the 9:15:11 PE entry and its own P&L ladder"
+              title="Arm the 9:15:06 PE entry and its +5% take-profit limit exit"
             >
               <Bot size={14} />
               Enable 9:15 trading
@@ -350,13 +385,20 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
           </strong>{" "}
           {status.nineFifteenMarkPrice != null && nineFifteenMarkChange != null ? (
             <>
-              9:15:10 read {formatNumber(status.nineFifteenMarkPrice, 2)} against the open{" "}
+              9:15:05 read {formatNumber(status.nineFifteenMarkPrice, 2)} against the open{" "}
               {formatNumber(status.open915 ?? 0, 2)} · Δ {nineFifteenMarkChange >= 0 ? "+" : ""}
               {formatNumber(nineFifteenMarkChange, 2)} pts —{" "}
-              {nineFifteenMarkChange < 0 ? "red, buying the ATM PE" : "green, no 9:15 trade"}.
+              {nineFifteenMarkChange <= -5
+                ? "red ≥ 5 pts, buying the ATM PE"
+                : nineFifteenMarkChange < 0
+                  ? "red but under 5 pts, no 9:15 trade"
+                  : nineFifteenMarkChange === 0
+                    ? "flat, no 9:15 trade"
+                    : "green, no 9:15 trade"}
+              .
             </>
           ) : (
-            <>Waiting for the 9:15:10 read.</>
+            <>Waiting for the 9:15:05 read.</>
           )}
           {status.nineFifteenNote && <> {status.nineFifteenNote}.</>}
           {status.nineFifteenBlocked916 && <> The 9:16 trade is skipped today.</>}
@@ -367,12 +409,26 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
         <div className="bb-bot-section">Exit rules (9:15 &amp; 9:16)</div>
         <div className="pat-metric-grid">
           <div className="pat-metric">
-            <span className="pat-metric-label">P&amp;L trail</span>
-            <span className="pat-metric-value">Premium ladder</span>
+            <span className="pat-metric-label">P&amp;L exit</span>
+            <span className="pat-metric-value">
+              {onNineFifteenLeg ? `9:15 · +${nineFifteenTpPct}% limit` : "9:16 · premium ladder"}
+            </span>
             <span className="pat-metric-hint">
-              9:15: arms at +{nineFifteenArmPct}%, then +{nineFifteenStepPct}% rungs. 9:16: arms at +
-              {trailArmPct}%, then +{trailStepPct}% rungs. Hitting a rung never sells — slipping back to the
-              locked stop does.
+              {onNineFifteenLeg ? (
+                <>
+                  On fill at 9:15:06 a resting limit sell is placed at +{nineFifteenTpPct}% on capital
+                  deployed
+                  {status.nineFifteenTpLimitPrice != null
+                    ? ` (₹${formatNumber(status.nineFifteenTpLimitPrice, 2)} per unit)`
+                    : ""}
+                  . Hard stop and 3:25 PM square-off still apply if the limit does not fill.
+                </>
+              ) : (
+                <>
+                  9:16: {status.pnlExitSchedule ?? "custom trailing ladder"}. Slipping below the locked floor
+                  exits at market; <strong>+50%</strong> exits instantly.
+                </>
+              )}
             </span>
           </div>
           <div className="pat-metric pat-metric--highlight">
@@ -415,25 +471,73 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
         <span className="pat-scan-note pat-scan-note--watch">{status.message}</span>
       </div>
 
+      {status.nineFifteenSettled && status.nineFifteenNote?.startsWith("TRADE EXITED") && (
+        <div className="ns916-exit-banner card">
+          <strong>9:15 trade closed</strong>
+          <p>{status.nineFifteenNote}</p>
+        </div>
+      )}
+
       {inPosition && (
         <div className={cn("pat-pnl-block", pnlBlockClass, (targetReached || pnlTargetReached) && "is-hit")}>
-          <div className="pat-pnl-label">Live P&L (Zerodha)</div>
+          <div className="pat-pnl-label">
+            {onNineFifteenLeg ? "Live P&L · 9:15 leg (until exit)" : "Live P&L (Zerodha)"}
+          </div>
           <div className={cn("pat-pnl-value", livePnl != null && getChangeClass(livePnl))}>
             {livePnl != null ? formatCurrency(livePnl) : "Syncing…"}
+            {livePnlPct != null && (
+              <span className="pat-pnl-pct">
+                {" "}
+                ({livePnlPct >= 0 ? "+" : ""}
+                {formatNumber(livePnlPct, 2)}%)
+              </span>
+            )}
           </div>
-          {status.entryPrice != null && status.lastOptionPrice != null && status.quantity != null && (
+          {onNineFifteenLeg && deployedCapital != null && (
+            <p className="pat-pnl-sub">
+              Deployed {formatCurrency(deployedCapital)} · profit aim +{nineFifteenTpPct}% (
+              {profitAim != null ? formatCurrency(profitAim) : "—"})
+              {pnlRemaining != null && pnlRemaining > 0
+                ? ` · ${formatCurrency(pnlRemaining)} to target`
+                : pnlTargetReached
+                  ? " · target reached"
+                  : ""}
+            </p>
+          )}
+          {onNineFifteenLeg && tpProgressPct != null && (
+            <div className="pat-pnl-bar" aria-hidden>
+              <div
+                className="pat-pnl-bar-fill"
+                style={{ width: `${tpProgressPct}%` }}
+              />
+            </div>
+          )}
+          {!onNineFifteenLeg && status.entryPrice != null && status.lastOptionPrice != null && status.quantity != null && (
             <p className="pat-pnl-sub">
               Entry ₹{formatNumber(status.entryPrice, 2)} → LTP ₹{formatNumber(status.lastOptionPrice, 2)} ·{" "}
               {status.quantity} qty
             </p>
           )}
+          {onNineFifteenLeg && status.entryPrice != null && status.lastOptionPrice != null && status.quantity != null && (
+            <p className="pat-pnl-sub">
+              Entry ₹{formatNumber(status.entryPrice, 2)} → LTP ₹{formatNumber(status.lastOptionPrice, 2)} ·{" "}
+              {status.quantity} qty
+            </p>
+          )}
+          {onNineFifteenLeg && pnlTargetReached && (
+            <span className="pat-badge pat-badge--on">+{nineFifteenTpPct}% profit aim reached</span>
+          )}
           {targetReached && (
             <span className="pat-badge pat-badge--on">Nifty target zone hit — bot exiting</span>
           )}
-          {trailArmed && !targetReached && (
+          {trailArmed && !targetReached && !onNineFifteenLeg && (
             <span className="pat-badge pat-badge--on">
-              Trailing stop locked at +{lockedPct}% — next TP +{status.pnlTargetPct}%
+              Stop locked at +{lockedPct}% · next target +{status.pnlTargetPct}%
+              {status.pnlTargetPct >= 50 ? " (instant exit)" : ""}
             </span>
+          )}
+          {livePnlPct != null && livePnlPct >= 50 && !onNineFifteenLeg && inPosition && (
+            <span className="pat-badge pat-badge--on">+50% reached — instant exit</span>
           )}
           {hardStopBreached && (
             <span className="pat-badge pat-badge--closed">Hard stop breached — bot exiting</span>
@@ -464,11 +568,7 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
               </span>
               <span className="pat-stat-hint">
                 reference · P&amp;L trail + {hardStopStartLabel} hard stop ±{hardStopPoints} pts
-                {status.exitMode === "near_miss"
-                  ? " · near-miss entry"
-                  : status.exitMode === "main"
-                    ? " · main entry"
-                    : ""}
+                {status.exitMode === "main" ? " · main entry (|Δ| ≥ 15)" : ""}
               </span>
             </div>
             {status.open915 != null && (
@@ -506,18 +606,31 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
               </span>
             </div>
             <div className="pat-stat">
-              <span className="pat-stat-label">Next take-profit rung (+{status.pnlTargetPct}%)</span>
+              <span className="pat-stat-label">
+                {onNineFifteenLeg ? `Take-profit (+${status.pnlTargetPct}%)` : `Next take-profit rung (+${status.pnlTargetPct}%)`}
+              </span>
               <span className={cn("pat-stat-value", pnlTargetReached && "text-up")}>
                 {status.pnlTargetAmount != null ? formatCurrency(status.pnlTargetAmount) : "—"}
               </span>
               <span className="pat-stat-hint">
-                Reaching it does not exit — it moves the stop up to +{status.pnlTargetPct - trailStepPct >= 0
-                  ? status.pnlTargetPct - trailStepPct
-                  : 0}
-                % and the target to +{status.pnlTargetPct + trailStepPct}%
-                {livePnlPct != null ? ` · now ${livePnlPct >= 0 ? "+" : ""}${formatNumber(livePnlPct, 2)}%` : ""}
+                {onNineFifteenLeg ? (
+                  <>
+                    Resting limit
+                    {status.nineFifteenTpLimitPrice != null
+                      ? ` @ ₹${formatNumber(status.nineFifteenTpLimitPrice, 2)}`
+                      : ""}
+                    {livePnlPct != null ? ` · now ${livePnlPct >= 0 ? "+" : ""}${formatNumber(livePnlPct, 2)}%` : ""}
+                  </>
+                ) : (
+                  <>
+                    Next target +{status.pnlTargetPct}%
+                    {status.pnlStopPct != null ? ` · stop floor +${status.pnlStopPct}%` : ""}
+                    {livePnlPct != null ? ` · now ${livePnlPct >= 0 ? "+" : ""}${formatNumber(livePnlPct, 2)}%` : ""}
+                  </>
+                )}
               </span>
             </div>
+            {!onNineFifteenLeg && (
             <div className="pat-stat">
               <span className="pat-stat-label">Trailing stop</span>
               <span className={cn("pat-stat-value", trailArmed && "text-down")}>
@@ -528,9 +641,39 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
               <span className="pat-stat-hint">
                 {trailArmed
                   ? `Exits the moment P&L slips below +${lockedPct}%`
-                  : `Arms once P&L touches +${trailArmPct}% of the premium paid`}
+                  : `Arms once P&L touches +${status.pnlTrailArmPct ?? 8}% (first target tier)`}
               </span>
             </div>
+            )}
+            {onNineFifteenLeg && (
+              <div
+                className={cn(
+                  "pat-stat ns916-stat-tp-order",
+                  tpOrderStatus === "pending" && "ns916-stat-tp-order--live",
+                  tpOrderStatus === "partial" && "ns916-stat-tp-order--partial",
+                  tpOrderStatus === "complete" && "ns916-stat-tp-order--done",
+                  (tpOrderStatus === "failed" || tpOrderStatus === "cancelled") &&
+                    "ns916-stat-tp-order--warn",
+                )}
+              >
+                <span className="pat-stat-label">Limit sell (+{nineFifteenTpPct}% TP)</span>
+                <span className="pat-stat-value">{tpStatusLabel()}</span>
+                <span className="pat-stat-hint">
+                  {status.nineFifteenTpLimitPrice != null
+                    ? `Limit ₹${formatNumber(status.nineFifteenTpLimitPrice, 2)} · `
+                    : ""}
+                  {status.quantity != null
+                    ? `${status.nineFifteenTpFilledQty ?? 0}/${status.quantity} qty filled`
+                    : ""}
+                  {(status.nineFifteenTpOrderIds?.length ?? 0) > 0
+                    ? ` · ${status.nineFifteenTpOrderIds?.length} Kite order(s)`
+                    : ""}
+                  {status.nineFifteenTpLastSyncedAt
+                    ? ` · synced ${new Date(status.nineFifteenTpLastSyncedAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })} IST`
+                    : ""}
+                </span>
+              </div>
+            )}
             <div
               className={cn(
                 "pat-stat ns916-stat-hard-stop",
@@ -720,28 +863,21 @@ export function ServerNineSixteenBotPanel({ connected }: { connected: boolean })
 
       <p className="pat-idle-note text-muted">
         <strong>9:15 trade</strong> (separate switch): the first Nifty tick from 9:15:00 is the open, and the
-        last tick before 9:15:10 is read against it. Red → buy the ATM PE at market at 9:15:11; green or flat
-        → no trade. Exits: option P&amp;L ladder plus a <strong>10:00 hard stop</strong> — if Nifty is{" "}
-        <strong>30 pts adverse</strong> from the entry spot (PE: spot ≥ entry + 30), the leg exits at
-        market. Nothing locks until +
-        {nineFifteenArmPct}% prints, then every +{nineFifteenStepPct}% rung locks the stop there and moves the
-        target one rung on (+{nineFifteenArmPct}→TP +{nineFifteenArmPct + nineFifteenStepPct}/SL +
-        {nineFifteenArmPct} · +{nineFifteenArmPct + nineFifteenStepPct}→TP +
-        {nineFifteenArmPct + 2 * nineFifteenStepPct}/SL +{nineFifteenArmPct + nineFifteenStepPct} · …).
-        Reaching a rung never sells; coming back down to it does, at market.
+        last tick before 9:15:05 is read against it. Red ≥ <strong>5 pts</strong> below the open → buy the
+        ATM PE at market at 9:15:06; smaller red, green, or flat → no trade. Exit: a resting{" "}
+        <strong>limit sell at +{nineFifteenTpPct}%</strong> on capital deployed
+        (placed the moment the buy fills), plus a <strong>10:00 hard stop</strong> — if Nifty is{" "}
+        <strong>30 pts adverse</strong> from the entry spot (PE: spot ≥ entry + 30), the leg exits at market.
         <br />
         <br />
         <strong>9:16 trade</strong>: red 9:15 candles only — a green close is skipped rather than bought as a
-        CE. |Δ| ≥ 11 (skip under 11) · |Δ| ≥ 15 main band · 11–14 near-miss band (entry sizing only) · WS
+        CE. |Δ| ≥ 15 main band only (skip under 15) · WS
         9:00–16:00 · open@9:15:00–15 · close before 9:16 · order@9:16 → PE (ATM). Skipped when the 9:15 leg
-        is still open at 9:16:00. Auto exit: trailing P&amp;L plus a <strong>10:00 hard stop</strong> — if
-        Nifty is <strong>30 pts adverse</strong> from the entry spot (PE: spot ≥ entry + 30; CE: spot ≤
-        entry − 30), the leg exits at market. Nothing locked until +{trailArmPct}% of the premium paid,
-        then each +{trailStepPct}% rung locks the stop and moves the target one rung higher
-        (+{trailArmPct}→TP +{trailArmPct + trailStepPct}/SL +{trailArmPct} · +{trailArmPct + trailStepPct}→TP
-        +{trailArmPct + 2 * trailStepPct}/SL +{trailArmPct + trailStepPct} · …). Hitting the target never
-        exits — only slipping back below the locked rung does · 3:25 PM square-off if still open · WS tick
-        poll {spotPollSec}s if WS down.
+        is still open at 9:16:00. Auto exit: {status.pnlExitSchedule ?? "9:16 trailing P&L ladder"} plus a{" "}
+        <strong>10:00 hard stop</strong> — if Nifty is <strong>30 pts adverse</strong> from the entry spot (PE:
+        spot ≥ entry + 30; CE: spot ≤ entry − 30), the leg exits at market. Slipping below the locked floor
+        exits at market; <strong>+50%</strong> exits instantly · 3:25 PM square-off if still open · WS tick poll{" "}
+        {spotPollSec}s if WS down.
         {!status.enabled && inPosition && (
           <> 9:16 trading is off — re-enable to let the bot auto-manage exits, or square off manually.</>
         )}

@@ -34,7 +34,7 @@ import {
 } from "./kite-ticker.js";
 import { fetchHistoricalCandles } from "./kite-candles.js";
 import { kiteSessionAgeHours, loadKiteSession } from "./kite-session-store.js";
-import { isInBotWsHours } from "./nine-sixteen-logic.js";
+import { isInBotWsHours, isPast916EntryWindow } from "./nine-sixteen-logic.js";
 import {
   computeAffordableLots,
   getMaxLotsPerOrder,
@@ -51,16 +51,11 @@ import {
   momentumExitProfileConfig,
   momentumExitProfileForEntryMins,
   momentumGateLevel,
-  momentumGateTickPasses,
-  momentumLiveRsiBlocksEntry,
-  momentumLiveRsiFromBarCloses,
-  formatMomentumLiveRsiBucketsLabel,
-  MOMENTUM_SCALPER_RSI_PERIOD,
-  MOMENTUM_ENTRY_SEC,
-  MOMENTUM_GATE_READ_SEC,
-  momentumMinuteOpenMin,
-  msUntilSecondOfCurrentIstMinute,
-  istSecondsIntoMinute,
+  momentumGateFirstTickPasses,
+  trapsPullbackEntryLevel,
+  trapsPullbackEntryTriggered,
+  MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS,
+  MOMENTUM_SCALPER_SCAN_START_MINS,
   signedSignalMovePts,
   type MomentumEntryDecision,
   momentumPnlPctOfEntryCost,
@@ -69,13 +64,14 @@ import {
   MOMENTUM_SCALPER_FORCE_EXIT_IST,
   MOMENTUM_SCALPER_INITIAL_STOP_PNL_PCT,
   MOMENTUM_SCALPER_LIVE_RULES,
-  MOMENTUM_SCALPER_LIVE_AFTERNOON_START_MINS,
-  MOMENTUM_SCALPER_LIVE_MORNING_START_MINS,
   MOMENTUM_SCALPER_PNL_ARM_PCT,
   momentumLiveDayEntryCutoffReached,
   momentumLiveEntryAllowed,
   momentumNextLiveEntryOpenMins,
   formatMomentumLiveScheduleLabel,
+  momentumLiveRsiFromBarCloses,
+  formatMomentumLiveRsiBucketsLabel,
+  MOMENTUM_SCALPER_RSI_PERIOD,
   sessionCloseMinsForWeekday,
   indexPnlPts,
   isPastMomentumForceExit,
@@ -93,12 +89,16 @@ interface PendingSignal {
   signalMins: number;
   /** Reference close from the signal candle — gate is measured against this. */
   signalClose: number;
-  /** True once any tick in the first {@link MOMENTUM_GATE_READ_SEC}s clears the gate. */
+  /** Last websocket tick on the signal candle — gate compares the next minute's first tick to this. */
+  signalLastTick: number;
+  /** Nifty at the second minute's first tick once the gate passes — pullback is measured from here. */
+  entryStartPrice: number | null;
+  /** True once the second minute's first tick has been checked against {@link signalLastTick}. */
+  gateChecked: boolean;
+  /** True once the first-tick gate cleared. */
   momentumGateSeen: boolean;
-  /** One-shot :11 entry timer armed for this momentum minute. */
-  entryTimerArmed: boolean;
-  /** The :11 burst already ran (or was skipped) for this setup. */
-  entryBurstDone: boolean;
+  /** Pullback entry already attempted for this setup. */
+  entryAttempted: boolean;
   /**
    * Option premium the entry was sized and decided against, read the instant the open gate passed.
    * The market buy goes out immediately afterwards, so this is the quote the fill is judged
@@ -291,9 +291,10 @@ function applyDailySchedule(dateIst: string, weekday: string, nowMs = Date.now()
   if (session?.accessToken) void warmRsiFromKiteHistory(session.accessToken, dateIst);
 }
 
-/** Traps scans only inside the live entry windows — backtests use their own wider range. */
+/** Traps scans only after the 9:16 trade entry window and before the afternoon cutoff. */
 function momentumScanReady(nowMins: number): boolean {
-  return momentumLiveEntryAllowed(nowMins);
+  if (!momentumLiveEntryAllowed(nowMins)) return false;
+  return isPast916EntryWindow();
 }
 
 /**
@@ -303,12 +304,7 @@ function momentumScanReady(nowMins: number): boolean {
  * re-entered from the same bar after a restart.
  */
 function scanFloorMins(): number {
-  const nowMins = istMinsFromDate(new Date());
-  const sessionStart =
-    nowMins >= MOMENTUM_SCALPER_LIVE_AFTERNOON_START_MINS
-      ? MOMENTUM_SCALPER_LIVE_AFTERNOON_START_MINS
-      : MOMENTUM_SCALPER_LIVE_MORNING_START_MINS;
-  return Math.max(resumeScanAfterMins, sessionStart);
+  return Math.max(resumeScanAfterMins, MOMENTUM_SCALPER_SCAN_START_MINS);
 }
 
 /**
@@ -378,7 +374,6 @@ interface PreparedEntry {
 let preparedEntry: PreparedEntry | null = null;
 let atmArmInFlight = false;
 let marketEntryInFlight = false;
-let momentumEntryTimer: ReturnType<typeof setTimeout> | null = null;
 
 let completedBars: DayScalperCandle[] = [];
 let currentBar: DayScalperCandle | null = null;
@@ -464,6 +459,9 @@ function ensureSessionDate(dateIst: string) {
   sessionDateIst = dateIst;
   loadEntryClaim(dateIst);
   if (phase !== "in_position" && phase !== "exiting") {
+    enabled = false;
+    phase = "off";
+    message = DISABLED_MESSAGE;
     completedBars = [];
     currentBar = null;
     lastProcessedBarMins = -1;
@@ -635,7 +633,7 @@ function stopTrapsAfterLoss(dateIst: string, pnlLabel: string) {
   enabled = false;
   clearPendingSignal();
   const note =
-    `Stopped for the day after a loss${pnlLabel} — resumes tomorrow ${formatIstMins(MOMENTUM_SCALPER_LIVE_MORNING_START_MINS)}`;
+    `Stopped for the day after a loss${pnlLabel} — resumes tomorrow ${formatIstMins(MOMENTUM_SCALPER_SCAN_START_MINS)}`;
   finishDay(dateIst, note, "loss");
 }
 
@@ -1100,7 +1098,7 @@ export function nextEntryLotsAfterMarginReject(
 }
 
 /**
- * Resolve the ATM contract at :11 when the 10-second gate was seen, then buy it at market.
+ * Resolve the ATM contract once the gate passed and the 2-pt pullback printed, then buy at market.
  *
  * The strike is chosen from the live Nifty spot at that moment — not from the signal candle close,
  * which can be a minute and several points away. {@link buildEntryPlan} also quotes the premium and
@@ -1743,11 +1741,6 @@ async function warmRsiFromKiteHistory(accessToken: string, dateIst: string): Pro
   refreshLiveNiftyRsi();
 }
 
-async function ensureRsiReady(accessToken: string, dateIst: string): Promise<void> {
-  if (liveNiftyRsi != null) return;
-  await warmRsiFromKiteHistory(accessToken, dateIst);
-}
-
 function niftyBarClosesForRsi(): number[] {
   return mergeNiftyMinuteBarsForRsi(rsiPrefillBars, completedBars, currentBar)
     .map((bar) => bar.close)
@@ -1777,81 +1770,66 @@ function onNiftyTick(tick: NiftyTick) {
 }
 
 /**
- * Aim a one-shot timer at second :11 of the momentum minute. Re-armed on the first tick of that
- * minute so a restart mid-minute still lands close to the target.
+ * Second minute: first tick vs signal last tick for the gate, then wait for a 2-pt pullback from start.
  */
-function armMomentumEntryTimer() {
-  const signal = pendingSignal;
-  if (!signal || !currentBar || currentBar.mins !== signal.signalMins + 1) return;
-
-  const delay = msUntilSecondOfCurrentIstMinute(MOMENTUM_ENTRY_SEC);
-  if (delay < 0) return;
-
-  if (momentumEntryTimer) clearTimeout(momentumEntryTimer);
-  momentumEntryTimer = setTimeout(() => {
-    momentumEntryTimer = null;
-    void runMomentumEntryBurst();
-  }, delay);
-
-  if (!signal.entryTimerArmed) {
-    signal.entryTimerArmed = true;
-    pushLog(
-      `Momentum :${String(MOMENTUM_ENTRY_SEC).padStart(2, "0")} entry armed · T-${(delay / 1000).toFixed(1)}s ` +
-        `(gate: ${signal.side === "CE" ? "≥" : "≤"} ${momentumGateLevel(signal.side, signal.signalClose).toFixed(2)} ` +
-        `in first ${MOMENTUM_GATE_READ_SEC}s)`,
-      "info",
-    );
-  }
-}
-
-/**
- * At :11 of the momentum minute, enter at market if the gate was seen — otherwise drop the setup.
- */
-async function runMomentumEntryBurst() {
-  const signal = pendingSignal;
-  if (!signal || signal.entryBurstDone) return;
-  if (!currentBar || currentBar.mins !== signal.signalMins + 1) return;
+function evaluateTriggerOnTick(_tickAtMs: number) {
+  // Ticks keep flowing while a disabled bot sees an open position out — none may start a new one.
+  if (!enabled) return;
+  if (!pendingSignal || !currentBar) return;
   if (phase === "entering" || phase === "in_position" || phase === "exiting") return;
   if (entryClaim) return;
+  if (lastSpot == null || lastSpot <= 0) return;
 
+  if (currentBar.mins !== pendingSignal.signalMins + 1) {
+    if (!atmArmInFlight && !marketEntryInFlight) expirePendingSignal(currentBar.mins);
+    return;
+  }
+
+  if (!pendingSignal.gateChecked) {
+    pendingSignal.gateChecked = true;
+    const gateLevel = momentumGateLevel(pendingSignal.side, pendingSignal.signalLastTick);
+    const pass = momentumGateFirstTickPasses(
+      pendingSignal.side,
+      lastSpot,
+      pendingSignal.signalLastTick,
+    );
+    if (!pass) {
+      pushLog(
+        `No trade — ${pendingSignal.signalTimeIst} ${pendingSignal.side} setup cancelled. ` +
+          `First tick ${lastSpot.toFixed(2)} did not reach ` +
+          `${pendingSignal.side === "CE" ? "≥" : "≤"} ${gateLevel.toFixed(2)} ` +
+          `(last tick ${pendingSignal.signalLastTick.toFixed(2)}).`,
+        "warning",
+      );
+      clearPendingSignal();
+      return;
+    }
+
+    pendingSignal.momentumGateSeen = true;
+    pendingSignal.entryStartPrice = lastSpot;
+    const session = loadKiteSession();
+    if (session?.accessToken) warmEntryPath(session.accessToken);
+    const pullbackLevel = trapsPullbackEntryLevel(pendingSignal.side, lastSpot);
+    pushLog(
+      `Gate passed — ${pendingSignal.side} ${pendingSignal.signalTimeIst} · start ${lastSpot.toFixed(2)} · ` +
+        `waiting for ${pendingSignal.side === "CE" ? "drop" : "gain"} to ${pullbackLevel.toFixed(2)} ` +
+        `(−/+${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pts).`,
+      "info",
+    );
+    return;
+  }
+
+  if (!pendingSignal.momentumGateSeen || pendingSignal.entryAttempted) return;
+  if (pendingSignal.entryStartPrice == null) return;
+  if (!trapsPullbackEntryTriggered(pendingSignal.side, lastSpot, pendingSignal.entryStartPrice)) return;
+
+  pendingSignal.entryAttempted = true;
   const session = loadKiteSession();
-  if (!session?.accessToken) return;
-
-  signal.entryBurstDone = true;
-
-  if (!signal.momentumGateSeen) {
-    const level = momentumGateLevel(signal.side, signal.signalClose);
-    pushLog(
-      `No trade — ${signal.signalTimeIst} ${signal.side} setup cancelled. Nifty never reached ` +
-        `${signal.side === "CE" ? "≥" : "≤"} ${level.toFixed(2)} in the first ${MOMENTUM_GATE_READ_SEC}s.`,
-      "warning",
-    );
-    clearPendingSignal();
+  if (!session?.accessToken) {
+    pendingSignal.entryAttempted = false;
     return;
   }
-
-  const ctx = getIndianMarketContext();
-  await ensureRsiReady(session.accessToken, ctx.dateIST);
-
-  refreshLiveNiftyRsi();
-  signal.liveRsi = liveNiftyRsi;
-  const rsiBlock = momentumLiveRsiBlocksEntry(liveNiftyRsi);
-  if (rsiBlock.blocked) {
-    pushLog(
-      `No trade — ${signal.signalTimeIst} ${signal.side} gate passed but ${rsiBlock.reason ?? "RSI filter blocked"}.`,
-      "warning",
-    );
-    clearPendingSignal();
-    return;
-  }
-
-  const spot =
-    lastSpot != null && lastSpot > 0
-      ? lastSpot
-      : currentBar.open > 0
-        ? currentBar.open
-        : 0;
-  await armAtmContractForSignal(session.accessToken, signal.side, spot);
+  void armAtmContractForSignal(session.accessToken, pendingSignal.side, lastSpot);
 }
 
 async function onMinuteClosed() {
@@ -1879,6 +1857,7 @@ async function onMinuteClosed() {
 
   if (phase === "in_position" || phase === "exiting" || phase === "entering") return;
   if (bar.mins < scanFloorMins()) return;
+  if (!isPast916EntryWindow()) return;
   if (!momentumScanReady(bar.mins)) {
     if (pendingSignal) clearPendingSignal();
     return;
@@ -1893,39 +1872,37 @@ async function onMinuteClosed() {
 
   const movePts = signedSignalMovePts(bar, MOMENTUM_SCALPER_LIVE_RULES);
   const bodyPts = Math.round((bar.close - bar.open) * 100) / 100;
-  const openNeed = momentumMinuteOpenMin(side, bar.close).toFixed(2);
+  const signalLastTick =
+    lastSpot != null && lastSpot > 0 ? lastSpot : bar.close > 0 ? bar.close : bar.open;
+  const gateNeed = momentumGateLevel(side, signalLastTick).toFixed(2);
   pendingSignal = {
     side,
     signalTimeIst: bar.timeIst,
     movePts,
     signalMins: bar.mins,
     signalClose: bar.close,
+    signalLastTick,
+    entryStartPrice: null,
+    gateChecked: false,
     momentumGateSeen: false,
-    entryTimerArmed: false,
-    entryBurstDone: false,
+    entryAttempted: false,
     optionMarkPrice: null,
     optionTradingsymbol: null,
     liveRsi: liveNiftyRsi,
   };
-  // The gate can pass on the very first tick of the next minute. Fill the caches now.
   warmEntryPath(session.accessToken);
   pushLog(
     `Setup — ${side === "CE" ? "Bullish" : "Bearish"} ${bar.timeIst} candle ` +
       `(${Math.abs(movePts)} pt range, ${bodyPts > 0 ? "+" : ""}${bodyPts} pt body) → ${side} idea. ` +
-      `Next minute: watch websocket for ${MOMENTUM_GATE_READ_SEC}s — Nifty must reach ` +
-      `${side === "CE" ? "≥" : "≤"} ${openNeed}; if it does, market buy at :${String(MOMENTUM_ENTRY_SEC).padStart(2, "0")} ` +
-      `only when RSI is in ${formatMomentumLiveRsiBucketsLabel()} ` +
-      `(RSI now ${liveNiftyRsi != null ? liveNiftyRsi.toFixed(1) : "warming up"}).`,
+      `Next minute: first tick must reach ${side === "CE" ? "≥" : "≤"} ${gateNeed} ` +
+      `(last tick ${signalLastTick.toFixed(2)}), then ${side === "CE" ? "drop" : "gain"} ` +
+      `${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pts from start.`,
     "info",
   );
 }
 
 /** Tear down a pending setup and everything armed alongside it. */
 function clearPendingSignal() {
-  if (momentumEntryTimer) {
-    clearTimeout(momentumEntryTimer);
-    momentumEntryTimer = null;
-  }
   pendingSignal = null;
   preparedEntry = null;
 }
@@ -1948,49 +1925,6 @@ function expirePendingSignal(nowMins: number) {
     "warning",
   );
   clearPendingSignal();
-}
-
-/**
- * Nifty ticks on the momentum candle watch the first 10 seconds for the gate; entry fires at :11.
- */
-function evaluateTriggerOnTick(tickAtMs: number) {
-  // Ticks keep flowing while a disabled bot sees an open position out — none may start a new one.
-  if (!enabled) return;
-  if (!pendingSignal || !currentBar) return;
-  if (phase === "entering" || phase === "in_position" || phase === "exiting") return;
-  // Ticks arrive independently of the poll loop, so re-check the claim here too: never buy while
-  // an unsettled leg from a previous entry might still be open.
-  if (entryClaim) return;
-
-  if (currentBar.mins !== pendingSignal.signalMins + 1) {
-    // An arm or an order may still be in flight from this setup's own gate pass; let it land.
-    if (!atmArmInFlight && !marketEntryInFlight) expirePendingSignal(currentBar.mins);
-    return;
-  }
-
-  if (!pendingSignal.entryTimerArmed) {
-    const session = loadKiteSession();
-    if (session?.accessToken) warmEntryPath(session.accessToken);
-    armMomentumEntryTimer();
-  }
-
-  const sec = istSecondsIntoMinute(tickAtMs);
-  if (currentBar.mins === pendingSignal.signalMins + 1) {
-    pendingSignal.liveRsi = refreshLiveNiftyRsi();
-  }
-  if (
-    sec < MOMENTUM_GATE_READ_SEC &&
-    lastSpot != null &&
-    lastSpot > 0 &&
-    momentumGateTickPasses(pendingSignal.side, lastSpot, pendingSignal.signalClose)
-  ) {
-    pendingSignal.momentumGateSeen = true;
-  }
-
-  // A late join or a missed timer still fires the burst once we are past :11.
-  if (sec >= MOMENTUM_ENTRY_SEC && !pendingSignal.entryBurstDone && !momentumEntryTimer) {
-    void runMomentumEntryBurst();
-  }
 }
 
 const inr = (value: number) => `₹${Math.round(value).toLocaleString("en-IN")}`;
@@ -2080,18 +2014,6 @@ async function enterAtMarket(accessToken: string, spotAtGate: number) {
   if (entryClaim) return;
   if (plan.side !== signal.side || plan.signalMins !== signal.signalMins) return;
 
-  const ctx = getIndianMarketContext();
-  await ensureRsiReady(accessToken, ctx.dateIST);
-
-  refreshLiveNiftyRsi();
-  signal.liveRsi = liveNiftyRsi;
-  const rsiBlock = momentumLiveRsiBlocksEntry(liveNiftyRsi);
-  if (rsiBlock.blocked) {
-    pushLog(`Entry blocked — ${rsiBlock.reason ?? "RSI outside allowed bands"}`, "warning");
-    clearPendingSignal();
-    return;
-  }
-
   if (plan.lots <= 0 || plan.quantity <= 0) {
     pushLog(
       `Entry blocked — balance will not cover 1 lot of ${plan.tradingsymbol} at ₹${plan.optionLtp.toFixed(2)}`,
@@ -2101,6 +2023,7 @@ async function enterAtMarket(accessToken: string, spotAtGate: number) {
     return;
   }
 
+  const ctx = getIndianMarketContext();
   const weekday = formatWeekdayFromDateKey(ctx.dateIST);
   if (
     currentBar &&
@@ -2317,7 +2240,7 @@ async function mainLoop() {
 
   if (sessionAlreadyDone(ctx.dateIST) && !entryClaim && phase !== "in_position" && phase !== "exiting") {
     phase = "done";
-    message = `Today's scan finished — idle until tomorrow ${formatIstMins(MOMENTUM_SCALPER_LIVE_MORNING_START_MINS)}`;
+    message = `Today's scan finished — idle until tomorrow ${formatIstMins(MOMENTUM_SCALPER_SCAN_START_MINS)}`;
     scheduleNext(30_000);
     return;
   }
@@ -2385,7 +2308,7 @@ async function mainLoop() {
   if (pastScanWindow) {
     phase = sessionAlreadyDone(ctx.dateIST) ? "done" : "waiting";
     message = sessionAlreadyDone(ctx.dateIST)
-      ? `Today's scan finished — idle until tomorrow ${formatIstMins(MOMENTUM_SCALPER_LIVE_MORNING_START_MINS)}`
+      ? `Today's scan finished — idle until tomorrow ${formatIstMins(MOMENTUM_SCALPER_SCAN_START_MINS)}`
       : `Past today's entry cutoff (${SCHEDULE_LABEL}) — no new entries until tomorrow`;
     scheduleNext(30_000);
     return;
@@ -2403,32 +2326,30 @@ async function mainLoop() {
     phase = "waiting";
     const nextOpen = momentumNextLiveEntryOpenMins(nowMins);
     message =
-      nextOpen != null
-        ? `On hold — next window opens ${formatIstMins(nextOpen)} IST`
-        : DISABLED_MESSAGE;
+      !isPast916EntryWindow()
+        ? "On hold — waiting for the 9:16 trade to finish (after 9:16:30 IST)"
+        : nextOpen != null
+          ? `On hold — scanning opens ${formatIstMins(nextOpen)} IST`
+          : DISABLED_MESSAGE;
     scheduleNext(POLL_MS);
     return;
   }
 
   phase = "scanning";
-  const gateLevel = pendingSignal
-    ? momentumGateLevel(pendingSignal.side, pendingSignal.signalClose).toFixed(2)
-    : "";
   message = pendingSignal
     ? `${pendingSignal.side} signal ${pendingSignal.signalTimeIst} · ` +
-      (pendingSignal.entryBurstDone
+      (pendingSignal.entryAttempted
         ? pendingSignal.momentumGateSeen
           ? pendingSignal.optionMarkPrice != null
             ? `buying at market (₹${pendingSignal.optionMarkPrice.toFixed(2)} premium)`
-            : "gate passed — resolving the ATM leg"
+            : "pullback hit — resolving the ATM leg"
           : "gate failed — no trade"
         : pendingSignal.momentumGateSeen
-          ? pendingSignal.liveRsi != null
-            ? `gate passed · RSI ${pendingSignal.liveRsi.toFixed(1)} · waiting for :${String(MOMENTUM_ENTRY_SEC).padStart(2, "0")}`
-            : `gate passed — RSI warming up · waiting for :${String(MOMENTUM_ENTRY_SEC).padStart(2, "0")}`
-          : `watching first ${MOMENTUM_GATE_READ_SEC}s for ${pendingSignal.side === "CE" ? "≥" : "≤"} ${gateLevel}` +
-            (pendingSignal.liveRsi != null ? ` · RSI ${pendingSignal.liveRsi.toFixed(1)}` : ""))
-    : `Scanning live bars · ±${MOMENTUM_SCALPER_LIVE_RULES.minMovePts} signal · :${String(MOMENTUM_ENTRY_SEC).padStart(2, "0")} market entry after ${MOMENTUM_GATE_READ_SEC}s gate · RSI ${formatMomentumLiveRsiBucketsLabel()} · SL ${MOMENTUM_SCALPER_INITIAL_STOP_PNL_PCT}% P&L`;
+          ? pendingSignal.entryStartPrice != null
+            ? `gate passed from ${pendingSignal.entryStartPrice.toFixed(2)} · waiting for ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback`
+            : "gate passed — waiting for pullback"
+          : `waiting for first tick ${pendingSignal.side === "CE" ? "≥" : "≤"} ${momentumGateLevel(pendingSignal.side, pendingSignal.signalLastTick).toFixed(2)} vs last ${pendingSignal.signalLastTick.toFixed(2)}`)
+    : `Scanning live bars · range ≥ ${MOMENTUM_SCALPER_LIVE_RULES.minMovePts} pts · first-tick gate ±0.2 · ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback entry · SL ${MOMENTUM_SCALPER_INITIAL_STOP_PNL_PCT}% P&L`;
 
   scheduleNext(POLL_MS);
 }
@@ -2552,7 +2473,7 @@ export function setMomentumScalperBotEnabled(next: boolean) {
     return;
   }
   phase = "waiting";
-  message = "Traps enabled — scanning when inside entry windows";
+  message = "Traps enabled — scanning after 9:16:30 through entry cutoff";
   pushLog("Traps enabled", "info");
   const session = loadKiteSession();
   if (session?.accessToken) void warmRsiFromKiteHistory(session.accessToken, ctx.dateIST);
@@ -2566,6 +2487,7 @@ export function startMomentumScalperBot() {
   if (isHoldingPosition()) {
     pushLog("Recovered an open position on startup — managing it out", "warning");
   } else {
+    enabled = false;
     phase = "off";
     message = DISABLED_MESSAGE;
   }

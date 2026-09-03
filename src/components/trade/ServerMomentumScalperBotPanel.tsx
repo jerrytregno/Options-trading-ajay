@@ -143,7 +143,7 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
   const initialStopHoldSec = status?.initialStopHoldSec ?? standardRules.initialStopHoldSec;
   const initialStopInstant = initialStopHoldSec <= 0;
   const scanClose = rules?.tradeWindowCloseIst ?? "15:10";
-  const scanSchedule = status?.scanStartIst ?? "10:30–12:00 & 13:45–15:10";
+  const scanSchedule = status?.scanStartIst ?? "after 9:16:30–15:10";
   const hardStopPnl = status?.hardStopPnlPct ?? standardRules.hardStopPnlPct;
   const profitExitPnlPct = status?.profitExitPnlPct ?? null;
   const profitExitPrice = status?.profitExitPrice ?? null;
@@ -224,58 +224,38 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
             auto-disable; only your button does.
           </li>
           <li>
-            <strong>Entry windows — {scanSchedule} IST.</strong> When armed, new entries are only
-            taken inside these windows (last entry by <strong>{scanClose}</strong> IST). A trade still
-            open when a window ends is <strong>not</strong> cut — it keeps running until its own exit.
+            <strong>Scan window — {scanSchedule} IST.</strong> When armed, new entries start{" "}
+            <strong>after the 9:16 trade finishes (9:16:30)</strong> through{" "}
+            <strong>{scanClose}</strong> IST. A trade still open at cutoff keeps running until its own
+            exit.
           </li>
           <li>
             <strong>Signal candle:</strong> the minute is sized by its{" "}
             <strong>high − low</strong>, not its body — every tick of the minute comes off the
             websocket, so the true extremes are known rather than guessed from the first and last
-            print. A candle that ran more than <strong>{minMove}</strong> pts high to low is a setup,
+            print. A candle that ran at least <strong>{minMove}</strong> pts high to low is a setup,
             and the <strong>body picks the side</strong>: green → CE, red → PE. A minute that closes
             exactly where it opened has no colour and is skipped however wide it ran.
           </li>
           <li>
-            <strong>10-second momentum gate on candle 2.</strong> For the minute after the signal,
-            the bot watches live websocket ticks for the first <strong>10 seconds</strong>. For a
-            green signal Nifty must reach <strong>signal close + 0.2</strong>; for a red signal it
-            must reach <strong>signal close − 0.2</strong>. The open alone is not enough — any tick
-            in that window can clear the gate.
+            <strong>First-tick gate on candle 2.</strong> The signal minute&apos;s{" "}
+            <strong>last websocket tick</strong> is compared to the next minute&apos;s{" "}
+            <strong>first tick</strong>. Green needs first ≥ last + <strong>0.2</strong>; red needs
+            first ≤ last − <strong>0.2</strong>. If the first tick fails, the setup is dropped.
+          </li>
+          <li>
+            <strong>Pullback entry.</strong> Once the gate passes, the start price is that first tick.
+            Green waits for a <strong>2 pt drop</strong> from start → <strong>CE market buy</strong>.
+            Red waits for a <strong>2 pt gain</strong> from start → <strong>PE market buy</strong>.
           </li>
           <li>
             <strong>One loss stops the day.</strong> If a trade closes at a loss (negative premium
-            P&amp;L), Traps disables itself for the rest of that session — including the afternoon
-            window — and does not take new setups until the next trading day.
+            P&amp;L), Traps disables itself for the rest of that session and does not take new setups
+            until the next trading day.
           </li>
           <li>
-            <strong>RSI filter (live, always on).</strong> Wilder RSI(14) on Nifty 1-min closes —
-            primed from Zerodha session history at window open, then updated on every websocket tick.
-            At <strong>:11</strong> the bot only buys if RSI is in{" "}
-            <strong>{status?.liveRsiBucketsIst ?? "0–10, 40–50, 70–100"}</strong>. Outside those bands
-            the setup is dropped even when the momentum gate passed.
-            {status?.liveNiftyRsi != null ? (
-              <>
-                {" "}
-                Current RSI: <strong>{status.liveNiftyRsi.toFixed(1)}</strong>.
-              </>
-            ) : null}
-          </li>
-          <li>
-            <strong>Entry at :11 — market.</strong> If the gate was seen, the bot resolves the ATM
-            leg at second <strong>:11</strong> of that same minute, quotes the premium, sizes against
-            a freshly read balance and sends a <strong>MIS market buy</strong>. If the gate was never
-            seen, the setup is dropped — no order goes out.
-          </li>
-          <li>
-            <strong>ATM only.</strong> The strike is chosen from the live Nifty spot at entry — not
-            from the signal candle close — so the leg matches where the index actually is at :11.
-          </li>
-          <li>
-            <strong>It no longer waits for a ₹0.5 retrace.</strong> The old entry rested a limit
-            under the marked premium for 50 seconds and dropped the setup if the option never traded
-            down to it. That skipped exactly the setups that ran straight from the signal, so the bot
-            now crosses the spread instead of missing them.
+            <strong>ATM at pullback.</strong> The strike is chosen from the live Nifty spot when the
+            2-pt pullback prints — not from the signal candle close.
           </li>
           <li>
             <strong>Short of margin → smaller, not skipped.</strong> Sizing runs off the last traded
@@ -421,10 +401,18 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
         {status.message}
       </p>
 
-      {!status.nineSixteenSettled && (
+      {!status.nineSixteenSettled && status.enabled && (
         <p className="ms-bot-warn ms-bot-warn--hold">
-          <strong>On hold.</strong> Waiting for the next entry window ({scanSchedule} IST). Bars are
-          still being built from ticks in the meantime.
+          <strong>On hold.</strong> Waiting for the 9:16 trade to finish (after{" "}
+          <strong>9:16:30 IST</strong>) or outside the entry window ({scanSchedule}). Bars are still
+          being built from ticks in the meantime.
+        </p>
+      )}
+
+      {!status.enabled && !status.stoppedForLossToday && (
+        <p className="ms-bot-warn ms-bot-warn--hold">
+          <strong>Disabled.</strong> Press <strong>Enable bot</strong> to arm Traps — nothing runs until
+          you do.
         </p>
       )}
 
@@ -458,19 +446,6 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
           <span className="pat-metric-hint">single MIS market order · never split</span>
         </div>
         <div className="pat-metric">
-          <span className="pat-metric-label">Nifty RSI(14)</span>
-          <span className="pat-metric-value">
-            {status.pendingSignal?.liveRsi != null
-              ? status.pendingSignal.liveRsi.toFixed(1)
-              : status.liveNiftyRsi != null
-                ? status.liveNiftyRsi.toFixed(1)
-                : "—"}
-          </span>
-          <span className="pat-metric-hint">
-            entry only in {status.liveRsiBucketsIst ?? "0–10, 40–50, 70–100"}
-          </span>
-        </div>
-        <div className="pat-metric">
           <span className="pat-metric-label">Last bar (WS)</span>
           <span className="pat-metric-value">{status.lastBarTimeIst ?? "—"}</span>
         </div>
@@ -484,9 +459,7 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
             <span className="pat-metric-hint">
               {status.pendingSignal.optionMarkPrice != null
                 ? `${status.pendingSignal.optionTradingsymbol ?? "option"} at ₹${status.pendingSignal.optionMarkPrice.toFixed(2)} · buying at market`
-                : status.pendingSignal.liveRsi != null
-                  ? `RSI ${status.pendingSignal.liveRsi.toFixed(1)} · watching the 10s gate`
-                  : "watching the 10s gate"}
+                : "first-tick gate → 2 pt pullback entry"}
             </span>
           </div>
         )}

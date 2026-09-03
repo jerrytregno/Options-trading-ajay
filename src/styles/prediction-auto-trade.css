@@ -177,6 +177,12 @@
   line-height: 1.1;
 }
 
+.pat-pnl-pct {
+  font-size: 1rem;
+  font-weight: 600;
+  opacity: 0.9;
+}
+
 .pat-pnl-bar {
   height: 6px;
   border-radius: 999px;
@@ -507,6 +513,45 @@
 
 .ns916-stat-hard-stop--breach .pat-stat-value {
   color: var(--down, #ef4444);
+}
+
+.ns916-exit-banner {
+  padding: 0.85rem 1rem;
+  border-left: 3px solid var(--up, #4ade80);
+  background: color-mix(in srgb, var(--up, #4ade80) 8%, var(--card));
+}
+
+.ns916-exit-banner strong {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--up, #4ade80);
+}
+
+.ns916-exit-banner p {
+  margin: 0;
+  line-height: 1.5;
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.875rem;
+}
+
+.ns916-stat-tp-order--live {
+  border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+}
+
+.ns916-stat-tp-order--live .pat-stat-value {
+  color: var(--primary, #6366f1);
+}
+
+.ns916-stat-tp-order--partial .pat-stat-value {
+  color: #fbbf24;
+}
+
+.ns916-stat-tp-order--done .pat-stat-value {
+  color: var(--up, #4ade80);
+}
+
+.ns916-stat-tp-order--warn .pat-stat-value {
+  color: #fbbf24;
 }
 
 /* Rung-by-rung view of the Traps bot's take-profit / stop ladder. */

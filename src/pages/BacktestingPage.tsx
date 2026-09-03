@@ -47,10 +47,11 @@ import {
 } from "@/types/nine-fifteen";
 import { cn, formatNumber } from "@/lib/utils";
 import { formatWeekdayFromDateKey } from "@/lib/market-time";
-import { buildWeekdayNineFifteenAverages } from "@/lib/weekday-nine-fifteen";
+import { buildWeekdayNineFifteenAverages, type WeekdayNineFifteenMetric } from "@/lib/weekday-nine-fifteen";
 import {
   buildNineSixteenBodyBuckets,
   strategyTradesForBodyBuckets,
+  trade915EntrySize,
 } from "@/lib/nine-sixteen-body-buckets";
 import {
   buildSmallBodyDirectionWinPointGrid,
@@ -143,12 +144,27 @@ function WinHourlyBreakdown({
   );
 }
 
-function WeekdayNineFifteenAverages({ signalFloor }: { signalFloor: number }) {
+function WeekdayNineFifteenAverages({
+  signalFloor,
+  metric = "body",
+  redOnlySignal = false,
+  signalExclusive = false,
+}: {
+  signalFloor: number;
+  metric?: WeekdayNineFifteenMetric;
+  redOnlySignal?: boolean;
+  signalExclusive?: boolean;
+}) {
   const index = useBacktestIndex();
   const rows = useBacktestSessions();
   const buckets = useMemo(
-    () => buildWeekdayNineFifteenAverages(rows, signalFloor),
-    [rows, signalFloor],
+    () =>
+      buildWeekdayNineFifteenAverages(rows, signalFloor, {
+        metric,
+        redOnlySignal,
+        signalExclusive,
+      }),
+    [rows, signalFloor, metric, redOnlySignal, signalExclusive],
   );
 
   const totalSessions = buckets.reduce((sum, b) => sum + b.sessions, 0);
@@ -164,10 +180,15 @@ function WeekdayNineFifteenAverages({ signalFloor }: { signalFloor: number }) {
         Average 9:15 candle by weekday
       </h4>
       <p className="text-muted nf-weekday-avg-hint">
-        Mean <strong>|9:15 close − 9:15 open|</strong> in {index.shortLabel} points across{" "}
-        <strong>all {totalSessions} sessions</strong> in the sample — every trading day, not only the
-        days a trade was taken. <em>Signal</em> counts the days whose body cleared the live |Δ| ≥{" "}
-        {signalFloor} floor.
+        Mean{" "}
+        <strong>
+          {metric === "range" ? "9:15 high − 9:15 low" : "|9:15 close − 9:15 open|"}
+        </strong>{" "}
+        in {index.shortLabel} points across <strong>all {totalSessions} sessions</strong> in the sample
+        — every trading day, not only the days a trade was taken. <em>Signal</em> counts the days
+        {redOnlySignal ? " with a red 9:15 candle whose " : " whose "}
+        {metric === "range" ? "range" : "body"} cleared{" "}
+        {signalExclusive ? ">" : "≥"} {signalFloor}.
       </p>
       <div className="nf-weekday-avg-grid">
         {buckets.map((b) => (
@@ -202,9 +223,10 @@ function WeekdayNineFifteenAverages({ signalFloor }: { signalFloor: number }) {
         ))}
       </div>
       <p className="text-muted nf-weekday-avg-foot">
-        {widest.weekday} has the biggest 9:15 candle on average at{" "}
-        {formatNumber(widest.avgAbsChange, 2)} pts. A larger average body means more days clear the
-        |Δ| ≥ {signalFloor} entry filter, not that those days win more often.
+        {widest.weekday} has the biggest 9:15 {metric === "range" ? "range" : "body"} on average at{" "}
+        {formatNumber(widest.avgAbsChange, 2)} pts. A larger average{" "}
+        {metric === "range" ? "range" : "body"} means more days clear the entry filter, not that those
+        days win more often.
       </p>
     </div>
   );
@@ -216,6 +238,8 @@ function NineSixteenBodyHistogram({
   maxAbsDiffExclusive,
   smallBodyPutStats,
   smallBodySplitBuckets,
+  metric = "body",
+  minAbsDiffExclusive = false,
 }: {
   stats: NineFifteenCePeStrategyStats;
   minAbsDiff: number;
@@ -223,6 +247,8 @@ function NineSixteenBodyHistogram({
   /** 0–10.9 |Δ| split backtest merged into the histogram. */
   smallBodyPutStats?: NineFifteenCePeStrategyStats;
   smallBodySplitBuckets?: NineFifteenSmallBodySplitBuckets;
+  metric?: WeekdayNineFifteenMetric;
+  minAbsDiffExclusive?: boolean;
 }) {
   const index = useBacktestIndex();
   const trades = useMemo(() => {
@@ -231,6 +257,7 @@ function NineSixteenBodyHistogram({
       stats.failures,
       minAbsDiff,
       maxAbsDiffExclusive,
+      minAbsDiffExclusive,
     );
     const small = smallBodyPutStats
       ? strategyTradesForBodyBuckets(
@@ -247,6 +274,7 @@ function NineSixteenBodyHistogram({
     smallBodyPutStats,
     minAbsDiff,
     maxAbsDiffExclusive,
+    minAbsDiffExclusive,
   ]);
 
   const buckets = useMemo(
@@ -273,9 +301,19 @@ function NineSixteenBodyHistogram({
       </h4>
       <p className="text-muted nf-body-hist-hint">
         Each bar counts a <strong>9:16:00 entry</strong>, bucketed by{" "}
-        <strong>|9:15 close − 9:15 open|</strong> in {index.shortLabel} points ({total} trade
-        {total === 1 ? "" : "s"} total). Green = win, red = loss. Consolidated rule (|Δ| ≥{" "}
-        {minAbsDiff}): UP→CE / DOWN→PE.{" "}
+        <strong>
+          {metric === "range" ? "9:15 high − 9:15 low" : "|9:15 close − 9:15 open|"}
+        </strong>{" "}
+        in {index.shortLabel} points ({total} trade
+        {total === 1 ? "" : "s"} total). Green = win, red = loss.
+        {metric === "body" ? (
+          <>
+            {" "}
+            Consolidated rule (|Δ| ≥ {minAbsDiff}): UP→CE / DOWN→PE.
+          </>
+        ) : (
+          <> Red 9:15 only · range ≥ {minAbsDiff} · PE @ 9:16.</>
+        )}{" "}
         {smallPutCount > 0 && (
           <>
             <strong>0–10.9 |Δ|</strong> (live skip):{" "}
@@ -827,6 +865,9 @@ function FollowStrategyWinsPanel({
   hourlyHitRuleLabel,
   smallBodyPutStats,
   smallBodySplitBuckets,
+  candleMetric = "body",
+  redOnlyWeekdaySignal = false,
+  minAbsDiffExclusive = false,
 }: {
   stats: NineFifteenCePeStrategyStats;
   targetPoints: number;
@@ -838,15 +879,22 @@ function FollowStrategyWinsPanel({
   hourlyHitRuleLabel?: string;
   smallBodyPutStats?: NineFifteenCePeStrategyStats;
   smallBodySplitBuckets?: NineFifteenSmallBodySplitBuckets;
+  candleMetric?: WeekdayNineFifteenMetric;
+  redOnlyWeekdaySignal?: boolean;
+  minAbsDiffExclusive?: boolean;
 }) {
   const index = useBacktestIndex();
   const sc = (points: number) => points * index.pointScale;
+  const passesMin = (t: { change: number; candleRange915?: number }) =>
+    minAbsDiffExclusive
+      ? trade915EntrySize(t) > minAbsDiff
+      : trade915EntrySize(t) >= minAbsDiff;
   const wins =
     maxAbsDiffExclusive != null
       ? (stats.successes ?? []).filter(
-          (t) => Math.abs(t.change) >= minAbsDiff && Math.abs(t.change) < maxAbsDiffExclusive,
+          (t) => passesMin(t) && trade915EntrySize(t) < maxAbsDiffExclusive,
         )
-      : (stats.successes ?? []).filter((t) => Math.abs(t.change) >= minAbsDiff);
+      : (stats.successes ?? []).filter((t) => passesMin(t));
   if (wins.length === 0) return null;
 
   const bandTitle =
@@ -884,13 +932,20 @@ function FollowStrategyWinsPanel({
               "when ±25 / ±20@10:01 / ±15@11:01 was first hit"
             }
           />
-          <WeekdayNineFifteenAverages signalFloor={minAbsDiff} />
+          <WeekdayNineFifteenAverages
+            signalFloor={minAbsDiff}
+            metric={candleMetric}
+            redOnlySignal={redOnlyWeekdaySignal}
+            signalExclusive={minAbsDiffExclusive}
+          />
           <NineSixteenBodyHistogram
             stats={stats}
             minAbsDiff={minAbsDiff}
             maxAbsDiffExclusive={maxAbsDiffExclusive}
             smallBodyPutStats={smallBodyPutStats}
             smallBodySplitBuckets={smallBodySplitBuckets}
+            metric={candleMetric}
+            minAbsDiffExclusive={minAbsDiffExclusive}
           />
         </>
       )}
@@ -2443,10 +2498,15 @@ function ConsolidatedBacktestResults({
   winIntro,
   lossIntro,
   footnote,
+  winHeading = "Winning trades — live consolidated (both bands)",
+  lossTitle = "Loss trades — live consolidated",
   smallBodyPutStats,
   smallBodySplitBuckets,
   smallBodyPutFilterStats,
   smallBodyDirectionFollow,
+  candleMetric = "body",
+  redOnlyWeekdaySignal = false,
+  minAbsDiffExclusive = false,
 }: {
   consolidated: NineFifteenCePeStrategyStats;
   consolidatedFilter: NineFifteenFollowFilterStats;
@@ -2462,10 +2522,15 @@ function ConsolidatedBacktestResults({
   lossIntro: ReactNode;
   /** Replaces the default band summary line above the stats card. */
   footnote?: ReactNode;
+  winHeading?: string;
+  lossTitle?: string;
   smallBodyPutStats?: NineFifteenCePeStrategyStats;
   smallBodyPutFilterStats?: NineFifteenFollowFilterStats;
   smallBodySplitBuckets?: NineFifteenSmallBodySplitBuckets;
   smallBodyDirectionFollow?: NineFifteenCePeStrategyStats;
+  candleMetric?: WeekdayNineFifteenMetric;
+  redOnlyWeekdaySignal?: boolean;
+  minAbsDiffExclusive?: boolean;
 }) {
   return (
     <>
@@ -2509,11 +2574,14 @@ function ConsolidatedBacktestResults({
         targetPoints={guideTargetPoints}
         minAbsDiff={liveFloor}
         showHourlyBreakdown={showHourlyWinBreakdown}
-        heading="Winning trades — live consolidated (both bands)"
+        heading={winHeading}
         winIntro={winIntro}
         hourlyHitRuleLabel="when the band’s index exit was first hit"
         smallBodyPutStats={smallBodyPutStats}
         smallBodySplitBuckets={smallBodySplitBuckets}
+        candleMetric={candleMetric}
+        redOnlyWeekdaySignal={redOnlyWeekdaySignal}
+        minAbsDiffExclusive={minAbsDiffExclusive}
       />
 
       {smallBodyPutStats && smallBodyPutFilterStats && (
@@ -2565,7 +2633,7 @@ function ConsolidatedBacktestResults({
 
       {(consolidated.failures ?? []).length > 0 && (
         <div className="nf-failures-block">
-          <h3 className="nf-failures-title">Loss trades — live consolidated</h3>
+          <h3 className="nf-failures-title">{lossTitle}</h3>
           <p className="nf-failures-intro text-muted">{lossIntro}</p>
           <StrategyFailuresPanel
             stats={consolidated}
@@ -2649,6 +2717,83 @@ function NiftyConfirm917StrategyBlock({
             <strong>1-min candle chart</strong> (9:15–15:30).
           </>
         }
+      />
+    </div>
+  );
+}
+
+function RedPeMainBacktestSection({
+  follow,
+  filterStats,
+  guideTargetPoints,
+  historyLabel = "last 1 year",
+  sessions,
+  showHourlyWinBreakdown,
+  showAlt20After1010OnLoss,
+}: {
+  follow: NineFifteenCePeStrategyStats;
+  filterStats: NineFifteenFollowFilterStats;
+  guideTargetPoints: number;
+  historyLabel?: string;
+  sessions: number;
+  showHourlyWinBreakdown?: boolean;
+  showAlt20After1010OnLoss?: boolean;
+}) {
+  const index = useBacktestIndex();
+  const sc = (points: number) => points * index.pointScale;
+  const mainBand = filterStats.minAbsDiff;
+  const exclusive = filterStats.minAbsDiffExclusive === true;
+  const sizeCompare = exclusive ? ">" : "≥";
+  const skippedLabel = exclusive ? `|Δ| ≤ ${mainBand}` : `|Δ| < ${mainBand}`;
+  const expiryDay = index.expiryWeekday;
+
+  return (
+    <div className="card nf-cepe-guide nf-red-pe-main-first">
+      <h2 className="card-title">
+        Red 9:15 · |Δ| {sizeCompare} {mainBand} — PE @ 9:16 ({historyLabel})
+      </h2>
+      <p className="nf-cepe-steps text-muted">
+        Filtered to <strong>red 9:15 candles only</strong> with{" "}
+        <strong>|Δ| {sizeCompare} {sc(mainBand)}</strong> (9:15 open − close). Entry ={" "}
+        <strong>PE BUY @ 9:16:00 Kite open</strong>. Main-band index exits: ±{sc(25)} / ±
+        {sc(20)}@10:01 / ±{sc(15)}@11:01 · <strong>{expiryDay}</strong> flat ±{sc(10)} from 9:16.
+        Backtest only — live bot unchanged.
+      </p>
+      <ConsolidatedBacktestResults
+        consolidated={follow}
+        consolidatedFilter={filterStats}
+        followFilterStats={filterStats}
+        guideTargetPoints={guideTargetPoints}
+        historyLabel={historyLabel}
+        sessions={sessions}
+        liveFloor={filterStats.minAbsDiff}
+        minAbsDiffExclusive={exclusive}
+        showHourlyWinBreakdown={showHourlyWinBreakdown}
+        showAlt20After1010OnLoss={showAlt20After1010OnLoss}
+        redOnlyWeekdaySignal
+        footnote={
+          <>
+            Red · |Δ| {sizeCompare} {mainBand} only: {follow.targetHits}/{follow.tradeDays} won (
+            {formatNumber(follow.targetHitPct, 1)}%). {filterStats.skippedSmallBar} red days skipped (
+            {skippedLabel}). Green and flat 9:15 days are not traded.
+          </>
+        }
+        winIntro={
+          <>
+            Red 9:15 only · <strong>PE @ 9:16:00 Kite open</strong>. Win when Nifty hits the main-band
+            exit: ±{sc(25)} before 10:01 / ±{sc(20)} from 10:01 / ±{sc(15)} from 11:01 ·{" "}
+            <strong>{expiryDay}</strong> flat ±{sc(10)} from 9:16.
+          </>
+        }
+        lossIntro={
+          <>
+            Red 9:15 with |Δ| {sizeCompare} {mainBand}; PE entered at 9:16 but the main-band index
+            exit never hit. Expand a day for the full-session{" "}
+            <strong>1-min candle chart</strong> (9:15–15:30).
+          </>
+        }
+        winHeading="Winning trades — red 9:15 · PE @ 9:16"
+        lossTitle="Loss trades — red 9:15 · PE @ 9:16"
       />
     </div>
   );
@@ -3124,6 +3269,30 @@ export default function BacktestingPage() {
                       {data.cePeGuide.todaySignal.note}
                     </span>
                   </div>
+                )}
+
+                {data.liveRedPeMainFollow && data.liveRedPeMainFilterStats && (
+                  <RedPeMainBacktestSection
+                    follow={data.liveRedPeMainFollow}
+                    filterStats={data.liveRedPeMainFilterStats}
+                    guideTargetPoints={data.cePeGuide.targetPoints}
+                    historyLabel="last 1 year · dual-band live exits"
+                    sessions={data.nseSessionsOneYear}
+                    showHourlyWinBreakdown
+                    showAlt20After1010OnLoss
+                  />
+                )}
+
+                {data.liveRedPeBody10Follow && data.liveRedPeBody10FilterStats && (
+                  <RedPeMainBacktestSection
+                    follow={data.liveRedPeBody10Follow}
+                    filterStats={data.liveRedPeBody10FilterStats}
+                    guideTargetPoints={data.cePeGuide.targetPoints}
+                    historyLabel="last 1 year · dual-band live exits"
+                    sessions={data.nseSessionsOneYear}
+                    showHourlyWinBreakdown
+                    showAlt20After1010OnLoss
+                  />
                 )}
 
                 <CePeStrategyTable

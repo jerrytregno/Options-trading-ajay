@@ -16,7 +16,26 @@ export interface WeekdayNineFifteenBucket {
 }
 
 /** Only the fields the weekday average needs, so callers can pass a full row or a test fixture. */
-type SessionLike = Pick<NineFifteenCandleRow, "date" | "change">;
+type SessionLike = Pick<NineFifteenCandleRow, "date" | "change" | "high" | "low" | "direction">;
+
+export type WeekdayNineFifteenMetric = "body" | "range";
+
+function session915Measure(row: SessionLike, metric: WeekdayNineFifteenMetric): number {
+  if (metric === "range") return row.high - row.low;
+  return Math.abs(row.change);
+}
+
+function session915Signal(
+  row: SessionLike,
+  signalFloor: number,
+  metric: WeekdayNineFifteenMetric,
+  redOnly: boolean,
+  exclusive: boolean,
+): boolean {
+  if (redOnly && row.direction !== "down") return false;
+  const measure = session915Measure(row, metric);
+  return exclusive ? measure > signalFloor : measure >= signalFloor;
+}
 
 /**
  * Averages every session in the sample, not only the days the strategy traded. Restricting this to
@@ -27,25 +46,29 @@ type SessionLike = Pick<NineFifteenCandleRow, "date" | "change">;
 export function buildWeekdayNineFifteenAverages(
   rows: SessionLike[],
   signalFloor: number,
+  options?: { metric?: WeekdayNineFifteenMetric; redOnlySignal?: boolean; signalExclusive?: boolean },
 ): WeekdayNineFifteenBucket[] {
+  const metric = options?.metric ?? "body";
+  const redOnlySignal = options?.redOnlySignal ?? false;
+  const signalExclusive = options?.signalExclusive ?? false;
   const totals = new Map<string, { sessions: number; abs: number; signed: number; signals: number }>();
 
   for (const row of rows) {
-    if (!Number.isFinite(row.change)) continue;
+    if (!Number.isFinite(row.change) || !Number.isFinite(row.high) || !Number.isFinite(row.low)) continue;
     const weekday = formatWeekdayFromDateKey(row.date);
-    const abs = Math.abs(row.change);
+    const abs = session915Measure(row, metric);
     const bucket = totals.get(weekday);
     if (bucket) {
       bucket.sessions += 1;
       bucket.abs += abs;
       bucket.signed += row.change;
-      if (abs >= signalFloor) bucket.signals += 1;
+      if (session915Signal(row, signalFloor, metric, redOnlySignal, signalExclusive)) bucket.signals += 1;
     } else {
       totals.set(weekday, {
         sessions: 1,
         abs,
         signed: row.change,
-        signals: abs >= signalFloor ? 1 : 0,
+        signals: session915Signal(row, signalFloor, metric, redOnlySignal, signalExclusive) ? 1 : 0,
       });
     }
   }

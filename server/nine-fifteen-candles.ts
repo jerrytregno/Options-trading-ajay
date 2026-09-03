@@ -3171,6 +3171,217 @@ export function buildLiveSmallBodyDirectionFollowStats(
   };
 }
 
+/** Red 9:15 candle with |Δ| ≥ main threshold — PE entry @ 9:16 (main-band exits only). */
+function liveRedPeMainRows(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+): NineFifteenCandleRow[] {
+  return rows.filter(
+    (row) => row.direction === "down" && Math.abs(row.change) >= points.followMinAbsDiff,
+  );
+}
+
+function liveRedPeMainHit(
+  row: NineFifteenCandleRow,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+): boolean {
+  return consolidatedTargetHitForRow(row, "main", "PE", variant, profile) != null;
+}
+
+function buildRedPeMainTradeDayDetail(
+  row: NineFifteenCandleRow,
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+): NineFifteenCePeFailureTrade {
+  const side = "PE" as const;
+  const targetPoints = consolidatedDisplayTargetForBand(row.date, "main", variant, points, profile);
+  const targetHit = consolidatedTargetHitForRow(row, "main", side, variant, profile);
+  const entryPx = entryIndexPrice(row);
+  const base = buildTradeDayDetail(row, targetPoints, side, points);
+  return {
+    ...base,
+    side,
+    targetPoints,
+    targetHit,
+    targetHitAt: targetHit?.timeIst ?? null,
+    exitTargetIndexPrice: entryPx != null ? entryPx - targetPoints : null,
+    winConfirmed: targetHit != null,
+  };
+}
+
+export function buildLiveRedPeMainFollowStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+): NineFifteenCePeStrategyStats {
+  const taken = liveRedPeMainRows(rows, points);
+  const tradeDays = taken.length;
+  const successes = taken
+    .filter((row) => liveRedPeMainHit(row, profile, variant))
+    .map((row) => buildRedPeMainTradeDayDetail(row, points, profile, variant))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const failures = taken
+    .filter((row) => !liveRedPeMainHit(row, profile, variant))
+    .map((row) => buildRedPeMainTradeDayDetail(row, points, profile, variant))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const targetHits = successes.length;
+
+  const checkpointHits = {} as NineFifteenCePeStrategyStats["checkpointHits"];
+  for (const cp of NINE_FIFTEEN_TIME_CHECKPOINTS) {
+    const hits = taken.filter((row) => {
+      const targetPoints = consolidatedDisplayTargetForBand(row.date, "main", variant, points, profile);
+      const snap = row.checkpoints?.[cp];
+      if (!snap) return false;
+      const level = (targetPoints / points.scale) as NineFifteenCePeTarget;
+      return snap.downLevels[level] ?? false;
+    }).length;
+    checkpointHits[cp] = {
+      targetHits: hits,
+      targetHitPct: tradeDays > 0 ? (hits / tradeDays) * 100 : 0,
+    };
+  }
+
+  const expiry = expiryWeekdayShort(profile);
+  const label =
+    `Red 9:15 · |Δ|≥${points.followMinAbsDiff} → PE @ 9:16 · main-band exits ` +
+    `(±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01 · ${expiry} ±${points.breakoutExpiryDayTarget} flat)`;
+
+  return {
+    label,
+    side: "PE",
+    sampleDays: rows.length,
+    tradeDays,
+    targetHits,
+    targetHitPct: tradeDays > 0 ? (targetHits / tradeDays) * 100 : 0,
+    checkpointHits,
+    failures,
+    successes,
+  };
+}
+
+export function computeLiveRedPeMainFilterStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+): NineFifteenFollowFilterStats {
+  const redDays = rows.filter((row) => row.direction === "down");
+  const filtered = liveRedPeMainRows(rows, points);
+  const wins = filtered.filter((row) => liveRedPeMainHit(row, profile, variant)).length;
+  const filteredTrades = filtered.length;
+  return {
+    minAbsDiff: points.followMinAbsDiff,
+    targetPoints: points.followBacktestTarget,
+    totalFollowTrades: redDays.length,
+    filteredTrades,
+    wins,
+    losses: filteredTrades - wins,
+    winPct: filteredTrades > 0 ? (wins / filteredTrades) * 100 : 0,
+    skippedSmallBar: redDays.length - filteredTrades,
+    display: {
+      filterTitle:
+        `Red 9:15 · |Δ| ≥ ${points.followMinAbsDiff} · PE @ 9:16 · main-band exits ` +
+        `(±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01)`,
+      takenLabel: `Trades taken (red · |Δ| ≥ ${points.followMinAbsDiff})`,
+      skippedLabel: `Skipped red days (|Δ| < ${points.followMinAbsDiff})`,
+    },
+  };
+}
+
+/** Red 9:15 body strictly above this many index points (open→close). */
+export const LIVE_RED_PE_BODY10_MIN = 10;
+
+/** Red 9:15 candle with |open−close| > 10 — PE entry @ 9:16. */
+function liveRedPeBody10Rows(rows: NineFifteenCandleRow[]): NineFifteenCandleRow[] {
+  return rows.filter(
+    (row) => row.direction === "down" && Math.abs(row.change) > LIVE_RED_PE_BODY10_MIN,
+  );
+}
+
+export function buildLiveRedPeBody10FollowStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+): NineFifteenCePeStrategyStats {
+  const taken = liveRedPeBody10Rows(rows);
+  const tradeDays = taken.length;
+  const successes = taken
+    .filter((row) => liveRedPeMainHit(row, profile, variant))
+    .map((row) => buildRedPeMainTradeDayDetail(row, points, profile, variant))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const failures = taken
+    .filter((row) => !liveRedPeMainHit(row, profile, variant))
+    .map((row) => buildRedPeMainTradeDayDetail(row, points, profile, variant))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const targetHits = successes.length;
+
+  const checkpointHits = {} as NineFifteenCePeStrategyStats["checkpointHits"];
+  for (const cp of NINE_FIFTEEN_TIME_CHECKPOINTS) {
+    const hits = taken.filter((row) => {
+      const targetPoints = consolidatedDisplayTargetForBand(row.date, "main", variant, points, profile);
+      const snap = row.checkpoints?.[cp];
+      if (!snap) return false;
+      const level = (targetPoints / points.scale) as NineFifteenCePeTarget;
+      return snap.downLevels[level] ?? false;
+    }).length;
+    checkpointHits[cp] = {
+      targetHits: hits,
+      targetHitPct: tradeDays > 0 ? (hits / tradeDays) * 100 : 0,
+    };
+  }
+
+  const expiry = expiryWeekdayShort(profile);
+  const label =
+    `Red 9:15 · |Δ|>${LIVE_RED_PE_BODY10_MIN} → PE @ 9:16 · main-band exits ` +
+    `(±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01 · ${expiry} ±${points.breakoutExpiryDayTarget} flat)`;
+
+  return {
+    label,
+    side: "PE",
+    sampleDays: rows.length,
+    tradeDays,
+    targetHits,
+    targetHitPct: tradeDays > 0 ? (targetHits / tradeDays) * 100 : 0,
+    checkpointHits,
+    failures,
+    successes,
+  };
+}
+
+export function computeLiveRedPeBody10FilterStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+): NineFifteenFollowFilterStats {
+  const redDays = rows.filter((row) => row.direction === "down");
+  const filtered = liveRedPeBody10Rows(rows);
+  const wins = filtered.filter((row) => liveRedPeMainHit(row, profile, variant)).length;
+  const filteredTrades = filtered.length;
+  return {
+    minAbsDiff: LIVE_RED_PE_BODY10_MIN,
+    minAbsDiffExclusive: true,
+    targetPoints: points.followBacktestTarget,
+    totalFollowTrades: redDays.length,
+    filteredTrades,
+    wins,
+    losses: filteredTrades - wins,
+    winPct: filteredTrades > 0 ? (wins / filteredTrades) * 100 : 0,
+    skippedSmallBar: redDays.length - filteredTrades,
+    display: {
+      filterTitle:
+        `Red 9:15 · |Δ| > ${LIVE_RED_PE_BODY10_MIN} · PE @ 9:16 · main-band exits ` +
+        `(±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01)`,
+      takenLabel: `Trades taken (red · |Δ| > ${LIVE_RED_PE_BODY10_MIN})`,
+      skippedLabel: `Skipped red days (|Δ| ≤ ${LIVE_RED_PE_BODY10_MIN})`,
+    },
+  };
+}
+
 function buildLiveConsolidatedFlatVariants(
   rows: NineFifteenCandleRow[],
   points: IndexPoints,
@@ -3380,6 +3591,10 @@ function buildFollowBacktestBlock(
     liveSmallBodyPutFilterStats: computeLiveSmallBodyPutFilterStats(rows, points, profile),
     liveSmallBodySplitBuckets: buildLiveSmallBodySplitBuckets(rows, points, profile),
     liveSmallBodyDirectionFollow: buildLiveSmallBodyDirectionFollowStats(rows, points, profile),
+    liveRedPeMainFollow: buildLiveRedPeMainFollowStats(rows, points, profile),
+    liveRedPeMainFilterStats: computeLiveRedPeMainFilterStats(rows, points, profile),
+    liveRedPeBody10Follow: buildLiveRedPeBody10FollowStats(rows, points, profile),
+    liveRedPeBody10FilterStats: computeLiveRedPeBody10FilterStats(rows, points, profile),
     liveConsolidatedFollowAlt: buildLiveConsolidatedFollowStats(rows, points, profile, "tighter"),
     liveConsolidatedFilterStatsAlt: computeLiveConsolidatedFilterStats(rows, points, profile, "tighter"),
     liveConsolidatedFlatVariants: buildLiveConsolidatedFlatVariants(rows, points, profile),
@@ -4096,7 +4311,7 @@ function detachMidTradeRows(result: NineFifteenCandlesResult, profile: IndexProf
 
 /** Bump when the shape or maths of the result changes — invalidates the on-disk payload. */
 const CACHE_VERSION =
-  "v117:nifty-small-body-direction-follow-win-grid";
+  "v120:nifty-red-pe-body10-follow-backtest";
 /**
  * Completed sessions never change, so the only thing a rebuild adds is today's session. A short
  * TTL just meant a 4–6 minute rebuild every half hour, which pegs this 2 GB host and slows down
@@ -4410,6 +4625,10 @@ async function buildNineFifteenCandleHistory(
     liveSmallBodyPutFilterStats: block1y.liveSmallBodyPutFilterStats,
     liveSmallBodySplitBuckets: block1y.liveSmallBodySplitBuckets,
     liveSmallBodyDirectionFollow: block1y.liveSmallBodyDirectionFollow,
+    liveRedPeMainFollow: block1y.liveRedPeMainFollow,
+    liveRedPeMainFilterStats: block1y.liveRedPeMainFilterStats,
+    liveRedPeBody10Follow: block1y.liveRedPeBody10Follow,
+    liveRedPeBody10FilterStats: block1y.liveRedPeBody10FilterStats,
     liveConsolidatedFollowAlt: block1y.liveConsolidatedFollowAlt,
     liveConsolidatedFilterStatsAlt: block1y.liveConsolidatedFilterStatsAlt,
     liveConsolidatedFlatVariants: block1y.liveConsolidatedFlatVariants,

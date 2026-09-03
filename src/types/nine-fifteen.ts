@@ -486,7 +486,7 @@ export interface NineFifteenCandlesResult {
   nearMissFollow: NineFifteenCePeStrategyStats;
   nearMissFollowFilterStats: NineFifteenFollowFilterStats;
   /**
-   * Live bot consolidation: |Δ|≥15 with main tiered exits + 11≤|Δ|<15 with near-miss exits.
+   * Backtest consolidation (historical dual-band study): main + near-miss. Live 9:16 bot enters main only.
    */
   liveConsolidatedFollow: NineFifteenCePeStrategyStats;
   liveConsolidatedFilterStats: NineFifteenFollowFilterStats;
@@ -496,6 +496,12 @@ export interface NineFifteenCandlesResult {
   liveSmallBodySplitBuckets?: NineFifteenSmallBodySplitBuckets;
   /** |9:15 Δ| &lt; 11 follow candle: UP→CE · DOWN→PE @ 9:16 (same exits). */
   liveSmallBodyDirectionFollow?: NineFifteenCePeStrategyStats;
+  /** Red 9:15 · |Δ| ≥ 15 → PE @ 9:16 · main-band exits only (backtest). */
+  liveRedPeMainFollow?: NineFifteenCePeStrategyStats;
+  liveRedPeMainFilterStats?: NineFifteenFollowFilterStats;
+  /** Red 9:15 · |Δ| > 10 (body) → PE @ 9:16 · main-band exits only (backtest). */
+  liveRedPeBody10Follow?: NineFifteenCePeStrategyStats;
+  liveRedPeBody10FilterStats?: NineFifteenFollowFilterStats;
   /** Same entries as `liveConsolidatedFollow` but tighter tiered exits. */
   liveConsolidatedFollowAlt: NineFifteenCePeStrategyStats;
   liveConsolidatedFilterStatsAlt: NineFifteenFollowFilterStats;
@@ -578,6 +584,12 @@ export interface NineFifteenFollowBacktestBlock {
   liveSmallBodyPutFilterStats?: NineFifteenFollowFilterStats;
   liveSmallBodySplitBuckets?: NineFifteenSmallBodySplitBuckets;
   liveSmallBodyDirectionFollow?: NineFifteenCePeStrategyStats;
+  /** Red 9:15 · |Δ| ≥ 15 → PE @ 9:16 · main-band exits only (backtest). */
+  liveRedPeMainFollow?: NineFifteenCePeStrategyStats;
+  liveRedPeMainFilterStats?: NineFifteenFollowFilterStats;
+  /** Red 9:15 · |Δ| > 10 (body) → PE @ 9:16 · main-band exits only (backtest). */
+  liveRedPeBody10Follow?: NineFifteenCePeStrategyStats;
+  liveRedPeBody10FilterStats?: NineFifteenFollowFilterStats;
   liveConsolidatedFollowAlt: NineFifteenCePeStrategyStats;
   liveConsolidatedFilterStatsAlt: NineFifteenFollowFilterStats;
   liveConsolidatedFlatVariants: NineFifteenConsolidatedFlatVariant[];
@@ -592,6 +604,8 @@ export interface NineFifteenFollowBacktestBlock {
 
 export interface NineFifteenFollowFilterStats {
   minAbsDiff: number;
+  /** When true, entry requires |Δ| strictly above minAbsDiff (not ≥). */
+  minAbsDiffExclusive?: boolean;
   /** When set, band is minAbsDiff ≤ |Δ| < maxAbsDiffExclusive (near-miss study). */
   maxAbsDiffExclusive?: number;
   targetPoints: number;
@@ -641,6 +655,8 @@ export interface NineFifteenCePeFailureTrade {
   close915: number;
   /** close915 − open915 */
   change: number;
+  /** 9:15 high − low when the entry filter uses candle range instead of body. */
+  candleRange915?: number;
   /** Prior session close (15:30) and gap vs 9:15 open. */
   prevDayClose?: number | null;
   gapFromPrevClose?: number | null;

@@ -18,18 +18,8 @@ import {
   type IndexProfile,
 } from "./nine-fifteen-candles.js";
 import { getNineSixteenBotStatus, getNineSixteenBotStatusLive, getNineSixteenBotLiveTick, listBotTradeLogs, setNineFifteenBotEnabled, setNineSixteenBotEnabled } from "./nine-sixteen-bot.js";
-import {
-  TRAPS_BACKTEST_DEFAULT_CAPITAL,
-  TRAPS_BACKTEST_DEFAULT_MAX_LOTS,
-  TRAPS_BACKTEST_DEFAULT_SAFETY_PCT,
-  TRAPS_BACKTEST_DEFAULT_STANDARD_STOP_PCT,
-  TRAPS_BACKTEST_LIVE_MIN_BODY_PTS,
-  TRAPS_BACKTEST_MAX_STANDARD_STOP_PCT,
-  TRAPS_BACKTEST_MIN_STANDARD_STOP_PCT,
-  TRAPS_BACKTEST_RELAXED_MIN_BODY_PTS,
-  buildTrapsBacktest,
-} from "./traps-backtest.js";
-import type { TrapsBacktestResult } from "../src/types/traps-backtest.js";
+import { ensureHighMinus5Backtest } from "./nine-fifteen-high-minus5-backtest.js";
+import { ensureNiftyOneHourBacktest, NIFTY_ONE_HOUR_DEFAULT_DAYS } from "./nifty-one-hour-backtest.js";
 import {
   getMomentumScalperBotStatus,
   getMomentumScalperBotStatusLive,
@@ -545,83 +535,43 @@ app.get("/api/kite/index-session-minutes", async (req, res) => {
   }
 });
 
-/**
- * Traps backtest over a short date range, replayed against the real option candles the bot would
- * have traded. Each run costs one Nifty history call plus one per distinct ATM contract per day,
- * so completed runs are memoised until the process restarts.
- */
-const trapsBacktestCache = new Map<string, TrapsBacktestResult>();
-
-async function handleTrapsBacktest(
-  req: express.Request,
-  res: express.Response,
-  minBodyPts: number,
-) {
+app.get("/api/kite/nine-fifteen-high-minus5-backtest", async (req, res) => {
   const accessToken = req.cookies[TOKEN_COOKIE];
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
 
-  const from = String(req.query.from ?? "").trim();
-  const to = String(req.query.to ?? "").trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
-    return res.status(400).json({ error: "Query from=YYYY-MM-DD and to=YYYY-MM-DD required" });
-  }
-  if (from > to) {
-    return res.status(400).json({ error: "from must be on or before to" });
-  }
-
-  const capital = Math.max(
-    10_000,
-    Math.round(Number(req.query.capital ?? TRAPS_BACKTEST_DEFAULT_CAPITAL) || TRAPS_BACKTEST_DEFAULT_CAPITAL),
+  const days = Math.min(
+    Math.max(Number(req.query.days ?? NINE_FIFTEEN_DEFAULT_HISTORY_DAYS), 30),
+    NINE_FIFTEEN_DEFAULT_HISTORY_DAYS,
   );
-  const maxLots = Math.min(
-    TRAPS_BACKTEST_DEFAULT_MAX_LOTS,
-    Math.max(1, Math.round(Number(req.query.lots ?? TRAPS_BACKTEST_DEFAULT_MAX_LOTS) || TRAPS_BACKTEST_DEFAULT_MAX_LOTS)),
-  );
-  const standardStopPct = Math.min(
-    TRAPS_BACKTEST_MAX_STANDARD_STOP_PCT,
-    Math.max(
-      TRAPS_BACKTEST_MIN_STANDARD_STOP_PCT,
-      Math.round(
-        Number(req.query.stop ?? TRAPS_BACKTEST_DEFAULT_STANDARD_STOP_PCT) ||
-          TRAPS_BACKTEST_DEFAULT_STANDARD_STOP_PCT,
-      ),
-    ),
-  );
-  const rsiFilter = req.query.rsiFilter === "1" || req.query.rsiFilter === "true";
-
-  const cacheKey = `${from}|${to}|${capital}|${maxLots}|body${minBodyPts}|stop${standardStopPct}|rsi${rsiFilter ? 1 : 0}`;
-  if (req.query.refresh !== "1") {
-    const cached = trapsBacktestCache.get(cacheKey);
-    if (cached) return res.json({ data: cached, cached: true });
-  }
+  const force = req.query.refresh === "1";
 
   try {
-    const result = await buildTrapsBacktest(accessToken, {
-      from,
-      to,
-      capital,
-      maxLots,
-      premiumSafetyPct: TRAPS_BACKTEST_DEFAULT_SAFETY_PCT,
-      minBodyPts,
-      standardStopPct,
-      rsiFilter,
-    });
-    trapsBacktestCache.set(cacheKey, result);
-    return res.json({ data: result, cached: false });
+    const { data, cached, builtAt } = await ensureHighMinus5Backtest(accessToken, days, force);
+    return res.json({ data, cached, builtAt });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to build the Traps backtest";
+    const message = error instanceof Error ? error.message : "Failed to build 9:15 high−5 backtest";
     return res.status(502).json({ error: message });
   }
-}
+});
 
-app.get("/api/kite/traps-backtest", (req, res) =>
-  void handleTrapsBacktest(req, res, TRAPS_BACKTEST_LIVE_MIN_BODY_PTS),
-);
+app.get("/api/kite/nifty-one-hour-backtest", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
 
-/** Same engine as traps-backtest but signal body > 1 pt instead of live Traps' > 2 pt. */
-app.get("/api/kite/traps-backtest-1pt", (req, res) =>
-  void handleTrapsBacktest(req, res, TRAPS_BACKTEST_RELAXED_MIN_BODY_PTS),
-);
+  const days = Math.min(
+    Math.max(Number(req.query.days ?? NIFTY_ONE_HOUR_DEFAULT_DAYS), 30),
+    NIFTY_ONE_HOUR_DEFAULT_DAYS,
+  );
+  const force = req.query.refresh === "1";
+
+  try {
+    const { data, cached, builtAt } = await ensureNiftyOneHourBacktest(accessToken, days, force);
+    return res.json({ data, cached, builtAt });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to build NIFTY 50 1-hour backtest";
+    return res.status(502).json({ error: message });
+  }
+});
 
 /** Full NSE session 1-min Nifty 50 candles for one IST date (09:15–15:30). */
 app.get("/api/kite/nifty-session-minutes", async (req, res) => {

@@ -1,19 +1,15 @@
 /**
- * The 9:15 trade: the ten-second read, its own P&L ladder, and the red-only gate it puts on the
+ * The 9:15 trade: the five-second read, its +5% take-profit limit exit, and the red-only gate it puts on the
  * 9:16 trade that follows it.
  *
  * Run: npx tsx scripts/check-nine-fifteen-trade.ts
  */
 import {
   decideNineFifteenEntry,
-  evaluateNineFifteenExit,
-  nextNineFifteenLockedPct,
-  nineFifteenTargetPct,
-  nineFifteenStopPct,
   decide915Entry,
   build915BarFromCaptured,
-  NINE_FIFTEEN_TRAIL_ARM_PCT,
-  NINE_FIFTEEN_TRAIL_STEP_PCT,
+  NINE_FIFTEEN_MIN_DROP_PTS,
+  NINE_FIFTEEN_TAKE_PROFIT_PCT,
   NINE_FIFTEEN_ENTRY_SEC,
   NINE_FIFTEEN_SIGNAL_READ_SEC,
   NINE_FIFTEEN_ENTRY_WINDOW_END_SEC,
@@ -24,6 +20,12 @@ import {
   shouldHardStopNineSixteen,
   computeHardStopSpot,
   getHardStopStartLabel,
+  nineFifteenTakeProfitLimitPrice,
+  nineFifteenTakeProfitAmount,
+  nineFifteenDeployedCapital,
+  shouldExitNineFifteenTakeProfit,
+  getNineFifteenLadderLabel,
+  formatNineFifteenExitSummary,
 } from "../server/nine-sixteen-logic.js";
 
 let failures = 0;
@@ -42,27 +44,33 @@ function ist(h: number, m: number, s: number, ms = 0): number {
   return Date.UTC(2026, 7, 31, h - 5, m - 30, s, ms);
 }
 
-console.log("\n--- the 10-second read decides red or green ---");
-check("red buys the PE", decideNineFifteenEntry(24_800, 24_790), {
+console.log("\n--- the five-second read decides red or green ---");
+check("red with 10 pt drop buys the PE", decideNineFifteenEntry(24_800, 24_790), {
   action: "enter",
   leg: "PE_BUY",
   dropPts: 10,
 });
 check(
-  "a one-paisa fall is still red — there is no minimum here",
+  "a one-paisa fall is too small — need at least 5 pts",
   decideNineFifteenEntry(24_800, 24_799.95).action,
-  "enter",
+  "skip",
 );
+check("exactly 5 pts down enters", decideNineFifteenEntry(24_800, 24_795), {
+  action: "enter",
+  leg: "PE_BUY",
+  dropPts: 5,
+});
+check("4.9 pts down is skipped", decideNineFifteenEntry(24_800, 24_795.1).action, "skip");
 check("green is skipped", decideNineFifteenEntry(24_800, 24_812).action, "skip");
 check("flat is skipped", decideNineFifteenEntry(24_800, 24_800).action, "skip");
 check("a missing open is skipped", decideNineFifteenEntry(0, 24_790).action, "skip");
 check("a missing read is skipped", decideNineFifteenEntry(24_800, 0).action, "skip");
 
 console.log("\n--- timing gates ---");
-check("the read is due at 9:15:10.000", isPastNineFifteenSignalRead(ist(9, 15, 10)), true);
-check("not at 9:15:09.999", isPastNineFifteenSignalRead(ist(9, 15, 9, 999)), false);
-check("entry opens at 9:15:11", isReadyForNineFifteenEntry(ist(9, 15, 11)), true);
-check("entry is not open at 9:15:10", isReadyForNineFifteenEntry(ist(9, 15, 10)), false);
+check("the read is due at 9:15:05.000", isPastNineFifteenSignalRead(ist(9, 15, 5)), true);
+check("not at 9:15:04.999", isPastNineFifteenSignalRead(ist(9, 15, 4, 999)), false);
+check("entry opens at 9:15:06", isReadyForNineFifteenEntry(ist(9, 15, 6)), true);
+check("entry is not open at 9:15:05", isReadyForNineFifteenEntry(ist(9, 15, 5)), false);
 check("entry still open at 9:15:20", isReadyForNineFifteenEntry(ist(9, 15, 20)), true);
 check("entry window is gone at 9:15:21", isPastNineFifteenEntryWindow(ist(9, 15, 21)), true);
 check("the minute is not over at 9:15:59", isPastNineFifteenMinute(ist(9, 15, 59)), false);
@@ -74,80 +82,31 @@ check(
   true,
 );
 
-console.log("\n--- the rungs are 3, 5, 7, 9 … ---");
-check("nothing locks below +3%", nextNineFifteenLockedPct(0, 2.99), 0);
-check("+3% exactly locks the first rung", nextNineFifteenLockedPct(0, 3), 3);
-check("+4.9% still sits on the 3% rung", nextNineFifteenLockedPct(0, 4.9), 3);
-check("+5% locks the second", nextNineFifteenLockedPct(0, 5), 5);
-check("+6.9% still sits on the 5% rung", nextNineFifteenLockedPct(0, 6.9), 5);
-check("+7% locks the third", nextNineFifteenLockedPct(0, 7), 7);
-check("+9% locks the fourth", nextNineFifteenLockedPct(0, 9), 9);
-check("a jump straight to +12% locks +11%", nextNineFifteenLockedPct(0, 12), 11);
-check("the ladder never steps back down", nextNineFifteenLockedPct(7, 3), 7);
-check("an implausible reading is ignored", nextNineFifteenLockedPct(5, 400), 5);
+console.log("\n--- +5% take-profit limit on capital deployed ---");
+check("take-profit pct is 5", NINE_FIFTEEN_TAKE_PROFIT_PCT, 5);
+check("limit price is entry × 1.05", nineFifteenTakeProfitLimitPrice(100), 105);
+check("limit price rounds to paisa", nineFifteenTakeProfitLimitPrice(153.33), 161);
+check("deployed capital is entry × qty", nineFifteenDeployedCapital(100, 650), 65_000);
+check("profit aim is 5% of deployed", nineFifteenTakeProfitAmount(100, 1000), 5000);
+check("₹1L deployed → ₹5K profit aim", nineFifteenTakeProfitAmount(100, 1000), 100_000 * 0.05);
+check("does not exit below target", shouldExitNineFifteenTakeProfit(4999, 100, 1000), false);
+check("exits at target", shouldExitNineFifteenTakeProfit(5000, 100, 1000), true);
+check("label mentions +5% limit", getNineFifteenLadderLabel().includes("+5%"), true);
 
-check("the first target is +3%", nineFifteenTargetPct(0), NINE_FIFTEEN_TRAIL_ARM_PCT);
-check("locked +3% aims at +5%", nineFifteenTargetPct(3), 5);
-check("locked +5% aims at +7%", nineFifteenTargetPct(5), 7);
 check(
-  "targets step by the ladder's own step",
-  nineFifteenTargetPct(9) - nineFifteenTargetPct(7),
-  NINE_FIFTEEN_TRAIL_STEP_PCT,
+  "exit summary names limit fill and P&L",
+  formatNineFifteenExitSummary({
+    exitPrice: 105,
+    quantity: 1000,
+    entryPrice: 100,
+    pnl: 5000,
+    via: "limit",
+  }).includes("TRADE EXITED"),
+  true,
 );
 
-check("no stop before the first rung", nineFifteenStopPct(0), null);
-check("the stop becomes the locked rung", nineFifteenStopPct(5), 5);
-
-console.log("\n--- no initial stop before the ladder arms ---");
-check("-10% holds", evaluateNineFifteenExit(0, -10).exit, null);
-check("-14% holds", evaluateNineFifteenExit(0, -14).exit, null);
-check(
-  "a deep loss after a rung locks still exits on the trail",
-  evaluateNineFifteenExit(3, -14).exit,
-  { reason: "trail-stop", lockedPnlPct: 3 },
-);
-
-console.log("\n--- reaching a rung ratchets, it never sells ---");
-{
-  const atRung = evaluateNineFifteenExit(0, 3);
-  check("touching +3% locks it", atRung.lockedPnlPct, 3);
-  check("and does not exit on that same reading", atRung.exit, null);
-}
-{
-  const spike = evaluateNineFifteenExit(0, 7.4);
-  check("a spike straight to +7.4% locks +7%", spike.lockedPnlPct, 7);
-  check("and still does not sell on the way up", spike.exit, null);
-}
-check("holding above the floor holds", evaluateNineFifteenExit(3, 4.2).exit, null);
-check("coming back down to the floor exactly sells", evaluateNineFifteenExit(3, 3).exit, {
-  reason: "trail-stop",
-  lockedPnlPct: 3,
-});
-check("slipping under the floor sells", evaluateNineFifteenExit(5, 4.8).exit, {
-  reason: "trail-stop",
-  lockedPnlPct: 5,
-});
-
-console.log("\n--- a full path: 0 → +5.2% → +3% ---");
-{
-  let locked = 0;
-  const path = [0.4, 2.9, 3.1, 4.4, 5.2, 4.6, 3.0];
-  const events: string[] = [];
-  for (const pct of path) {
-    const evaluation = evaluateNineFifteenExit(locked, pct);
-    if (evaluation.lockedPnlPct > locked) {
-      events.push(`lock+${evaluation.lockedPnlPct}@${pct}`);
-    }
-    locked = evaluation.lockedPnlPct;
-    if (evaluation.exit) {
-      events.push(`exit@${pct}`);
-      break;
-    }
-  }
-  // +3.1 locks 3, +5.2 locks 5, and the fade sells the moment it is back at +5%'s floor — the
-  // pullback to 4.6 is already below the locked 5, so that is where it goes, not at 3.
-  check("locks then sells on the first slip below the floor", events, ["lock+3@3.1", "lock+5@5.2", "exit@4.6"]);
-}
+console.log("\n--- 9:15 entry minimum drop ---");
+check("minimum drop is 5 pts", NINE_FIFTEEN_MIN_DROP_PTS, 5);
 
 console.log("\n--- the 9:16 trade now takes red candles only ---");
 const bar = (open: number, close: number) =>
@@ -158,20 +117,17 @@ check("a 20 pt fall enters the PE on the main band", decide915Entry(bar(24_800, 
   leg: "PE_BUY",
   exitMode: "main",
 });
-check("a 12 pt fall enters the PE on the near-miss band", decide915Entry(bar(24_800, 24_788)), {
-  action: "enter",
-  leg: "PE_BUY",
-  exitMode: "near_miss",
-});
+check("a 12 pt fall is under the 15 pt main floor", decide915Entry(bar(24_800, 24_788)).action, "skip");
 check("a 20 pt rise is skipped — no CE side any more", decide915Entry(bar(24_800, 24_820)).action, "skip");
 check("a 40 pt rise is skipped too", decide915Entry(bar(24_800, 24_840)).action, "skip");
-check("a 7 pt fall is still under the 11 pt floor", decide915Entry(bar(24_800, 24_793)).action, "skip");
+check("a 7 pt fall is still under the 15 pt floor", decide915Entry(bar(24_800, 24_793)).action, "skip");
 check("a flat candle is skipped", decide915Entry(bar(24_800, 24_800)).action, "skip");
-check(
-  "exactly 11 pts down is the edge of the near-miss band",
-  decide915Entry(bar(24_800, 24_789)),
-  { action: "enter", leg: "PE_BUY", exitMode: "near_miss" },
-);
+check("exactly 14 pts down is still under the main band", decide915Entry(bar(24_800, 24_786)).action, "skip");
+check("exactly 15 pts down enters the main band", decide915Entry(bar(24_800, 24_785)), {
+  action: "enter",
+  leg: "PE_BUY",
+  exitMode: "main",
+});
 
 console.log("\n--- 10:00 hard stop (±30 from entry spot) ---");
 const entrySpot = 24_000;
@@ -194,6 +150,7 @@ console.log("\n--- both legs armed by default on a fresh load ---");
   check("no 9:15 leg claimed yet", status.tradeSlot, "nine-sixteen");
   check("nothing settled before the day starts", status.nineFifteenSettled, false);
   check("the 9:16 trade is not blocked", status.nineFifteenBlocked916, false);
+  check("9:15 take-profit pct is 5", status.nineFifteenTakeProfitPct, 5);
   // Only an explicit boolean true may arm either leg — the toggle routes compare with ===.
   for (const value of ["true", "1", 1, {}] as unknown[]) {
     check(`payload ${JSON.stringify(value)} does not arm`, value === true, false);
