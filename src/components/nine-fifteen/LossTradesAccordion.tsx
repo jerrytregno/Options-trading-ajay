@@ -30,6 +30,30 @@ function rsiClass(value: number | null | undefined): string {
   return "";
 }
 
+function TargetGapAt1000Summary({ gap }: { gap: NonNullable<NineFifteenCePeFailureTrade["targetGapAt1000"]> }) {
+  return (
+    <span className="text-sm text-muted">
+      @10:00{" "}
+      <span className="font-mono">
+        {formatNumber(gap.pointsFromTarget, 2)} pts from target
+      </span>
+      {" · Nifty "}
+      <span className="font-mono">{formatNumber(gap.indexPrice, 2)}</span>
+      {" · target "}
+      <span className="font-mono">{formatNumber(gap.targetIndexPrice, 2)}</span>
+    </span>
+  );
+}
+
+function TargetGapAt1000Meta({ gap }: { gap: NonNullable<NineFifteenCePeFailureTrade["targetGapAt1000"]> }) {
+  return (
+    <>
+      {" "}
+      · @10:00 Nifty {formatNumber(gap.indexPrice, 2)} vs target{" "}
+      {formatNumber(gap.targetIndexPrice, 2)} ({formatNumber(gap.pointsFromTarget, 2)} pts away)
+    </>
+  );
+}
 function DirectionBadge({ direction }: { direction: "up" | "down" | "flat" }) {
   if (direction === "up") return <span className="nf-direction nf-direction--up">Up</span>;
   if (direction === "down") return <span className="nf-direction nf-direction--down">Down</span>;
@@ -212,16 +236,28 @@ function SessionMinuteChart({
   );
 }
 
-function LossDayAccordionItem({
+/** Win target first hit at or after 10:00 IST (10 AM hour bucket and later). */
+export function isWinAfterTenAm(trade: NineFifteenCePeFailureTrade): boolean {
+  const raw = trade.targetHit?.timeIst ?? trade.targetHitAt;
+  if (!raw) return false;
+  const match = /^(\d{1,2}):/.exec(raw.trim());
+  if (!match) return false;
+  const hour = Number(match[1]);
+  return Number.isFinite(hour) && hour >= 10;
+}
+
+function SessionDayAccordionItem({
   trade,
   targetPoints,
   switchTarget,
   showAlt20After1010,
+  variant = "loss",
 }: {
   trade: NineFifteenCePeFailureTrade;
   targetPoints: number;
   switchTarget?: SwitchTarget;
   showAlt20After1010?: boolean;
+  variant?: "loss" | "win";
 }) {
   const index = useBacktestIndex();
   const [open, setOpen] = useState(false);
@@ -255,17 +291,19 @@ function LossDayAccordionItem({
     return () => {
       cancelled = true;
     };
-  }, [open, candles, trade.date]);
+  }, [open, candles, trade.date, index.key]);
 
   const entry = trade.entryAt?.indexPrice ?? null;
   const shortfall =
     trade.maxMoveInDirection < targetPoints
       ? targetPoints - trade.maxMoveInDirection
       : 0;
+  const effectiveTarget = trade.targetPoints ?? targetPoints;
+  const hit = trade.targetHit ?? null;
 
   return (
     <details
-      className="nf-loss-day"
+      className={cn("nf-loss-day", variant === "win" && "nf-loss-day--win")}
       onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
     >
       <summary className="nf-loss-day-summary">
@@ -301,14 +339,53 @@ function LossDayAccordionItem({
             {entry != null ? formatNumber(entry, 2) : "—"}
           </span>
         </span>
-        <span className="text-sm text-muted">
-          Best {formatNumber(trade.maxMoveInDirection, 2)} pts
-          {shortfall > 0 ? ` · need ${formatNumber(shortfall, 2)} more` : ""}
-        </span>
-        {showAlt20After1010 && trade.altTargetAfter1010?.wouldWin && (
+        {variant === "win" && hit && (
+          <span className="text-sm text-up">
+            Hit{" "}
+            <span className="font-mono">
+              {hit.timeIst} · {hit.levelLabel} @ {formatNumber(hit.indexPrice, 2)}
+            </span>
+          </span>
+        )}
+        {variant === "win" && trade.targetGapAt1000 && (
+          <TargetGapAt1000Summary gap={trade.targetGapAt1000} />
+        )}
+        {variant === "loss" && (
+          <span className="text-sm text-muted">
+            Best {formatNumber(trade.maxMoveInDirection, 2)} pts
+            {shortfall > 0 ? ` · need ${formatNumber(shortfall, 2)} more` : ""}
+          </span>
+        )}
+        {variant === "loss" && trade.targetGapAt1000 && (
+          <TargetGapAt1000Summary gap={trade.targetGapAt1000} />
+        )}
+        {variant === "loss" && trade.nrmlCarry && (
+          <span
+            className={cn(
+              "text-sm nf-loss-day-nrml",
+              trade.nrmlCarry.wouldWin ? "text-up" : "text-muted",
+            )}
+          >
+            NRML → {trade.nrmlCarry.deadlineLabel}:{" "}
+            <strong>{trade.nrmlCarry.wouldWin ? "Won" : "Loss"}</strong>
+            {trade.nrmlCarry.wouldWin && trade.nrmlCarry.hit && trade.nrmlCarry.hitDate && (
+              <>
+                {" "}
+                · {trade.nrmlCarry.hitDate} {trade.nrmlCarry.hit.timeIst}
+              </>
+            )}
+            {!trade.nrmlCarry.wouldWin && (
+              <>
+                {" "}
+                · carry best {formatNumber(trade.nrmlCarry.maxMoveInDirection, 2)} pts
+              </>
+            )}
+          </span>
+        )}
+        {variant === "loss" && showAlt20After1010 && trade.altTargetAfter1010?.wouldWin && (
           <span className="nf-loss-day-alt text-up">alt ±20 hit</span>
         )}
-        {showAlt20After1010 && trade.altTarget10After1010?.wouldWin && (
+        {variant === "loss" && showAlt20After1010 && trade.altTarget10After1010?.wouldWin && (
           <span className="nf-loss-day-alt text-up">alt ±10 hit</span>
         )}
       </summary>
@@ -344,6 +421,16 @@ function LossDayAccordionItem({
               · After {switchTarget.afterIst.slice(0, 5)}: ±{switchTarget.points}
             </>
           )}
+          {variant === "loss" && trade.nrmlCarry && (
+            <>
+              {" "}
+              · NRML carry to {trade.nrmlCarry.deadlineLabel}
+              {trade.nrmlCarry.wouldWin && trade.nrmlCarry.hit
+                ? ` · won ${trade.nrmlCarry.hitDate} ${trade.nrmlCarry.hit.timeIst}`
+                : ` · still short after carry (best ${formatNumber(trade.nrmlCarry.maxMoveInDirection, 2)} pts post-entry)`}
+            </>
+          )}
+          {trade.targetGapAt1000 && <TargetGapAt1000Meta gap={trade.targetGapAt1000} />}
           {" "}
           · Full session 1-min candles (9:15–15:30)
         </div>
@@ -363,8 +450,8 @@ function LossDayAccordionItem({
               candles={candles}
               entryPrice={entry}
               side={trade.side}
-              targetPoints={targetPoints}
-              switchTarget={switchTarget}
+              targetPoints={effectiveTarget}
+              switchTarget={variant === "loss" ? switchTarget : undefined}
             />
           </div>
         )}
@@ -390,11 +477,12 @@ export function LossTradesAccordion({
   return (
     <div className="nf-loss-accordion">
       <p className="nf-loss-accordion-hint text-muted text-sm">
-        Expand a loss day to load that session’s {index.label} 1-min candles (9:15–15:30). Entry and
-        target levels are overlaid.
+        Expand a loss day to load that session’s {index.label} 1-min candles (9:15–15:30). Each row
+        shows Nifty at <strong>10:00:00 IST</strong> vs the exit target. Entry and target levels are
+        overlaid on the chart.
       </p>
       {trades.map((trade) => (
-        <LossDayAccordionItem
+        <SessionDayAccordionItem
           key={trade.date}
           trade={trade}
           targetPoints={trade.targetPoints ?? targetPoints}
@@ -405,8 +493,47 @@ export function LossTradesAccordion({
               ? { afterIst: "10:01:00", points: 10 }
               : undefined)
           }
+          variant="loss"
         />
       ))}
     </div>
+  );
+}
+
+export function LateWinTradesAccordion({
+  trades,
+  targetPoints,
+}: {
+  trades: NineFifteenCePeFailureTrade[];
+  targetPoints: number;
+}) {
+  const index = useBacktestIndex();
+  const lateWins = trades.filter(isWinAfterTenAm);
+  if (lateWins.length === 0) return null;
+
+  return (
+    <details className="nf-failures-details nf-wins-late-details">
+      <summary className="nf-failures-summary">
+        <span className="nf-failures-rule">Wins after 10:00 AM IST</span>
+        <span className="nf-failures-count text-muted">
+          {lateWins.length} win{lateWins.length === 1 ? "" : "s"} · expand a day for 1-min chart
+        </span>
+      </summary>
+      <div className="nf-loss-accordion">
+        <p className="nf-loss-accordion-hint text-muted text-sm">
+          Target hit at or after 10:00 AM — each row shows how many index points Nifty was from the
+          exit target at <strong>10:00:00 IST</strong> (10:00 bar open). Expand to load that session’s{" "}
+          {index.label} 1-min candles (9:15–15:30). Entry and exit levels are overlaid.
+        </p>
+        {lateWins.map((trade) => (
+          <SessionDayAccordionItem
+            key={trade.date}
+            trade={trade}
+            targetPoints={trade.targetPoints ?? targetPoints}
+            variant="win"
+          />
+        ))}
+      </div>
+    </details>
   );
 }

@@ -117,10 +117,8 @@ const nifty = await snapshot(NIFTY_INDEX_PROFILE, 24000, 14);
 console.log(`NIFTY  hash=${nifty.hash}  bytes=${nifty.json.length}`);
 console.log(
   `  instrument=${nifty.result.instrument}` +
-    `  sessions=${nifty.result.midBacktest1m.sessionsScanned}` +
-    `  midSignals=${nifty.result.midBacktest1m.totalSignals}` +
-    `  midTarget=${nifty.result.midBacktest1m.targetPoints}` +
-    `  midStop=${nifty.result.midBacktest1m.stopPoints}`,
+    `  sessions=${nifty.result.nseSessionsOneYear}` +
+    `  rows=${nifty.result.rows.length}`,
 );
 
 if (jsonOut) {

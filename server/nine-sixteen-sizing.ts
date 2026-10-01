@@ -1,4 +1,53 @@
-import { fetchEquityAvailableBalance } from "./kite-client.js";
+import { roundToOptionTick } from "../src/lib/kite-orders.js";
+import { fetchEquityAvailableBalance, fetchOptionLtp } from "./kite-client.js";
+
+/** Gap between the two /quote reads — Kite allows one request per second. */
+export const NINE_SIXTEEN_ENTRY_LTP_CONFIRM_DELAY_MS = 1000;
+/** Log when the first quote is this much above the second (stale open tick). */
+export const NINE_SIXTEEN_ENTRY_LTP_SPIKE_WARN_PCT = 3;
+
+export function conservativeEntryLtpFromQuotes(
+  firstLtp: number,
+  secondLtp: number,
+): { ltp: number; entryLimitPrice: number; spikePct: number; staleFirstQuote: boolean } {
+  const ltp = Math.min(firstLtp, secondLtp);
+  const entryLimitPrice = roundToOptionTick(secondLtp);
+  const spikePct =
+    secondLtp > 0 && firstLtp > secondLtp ? ((firstLtp - secondLtp) / secondLtp) * 100 : 0;
+  return {
+    ltp,
+    entryLimitPrice,
+    spikePct,
+    staleFirstQuote: spikePct >= NINE_SIXTEEN_ENTRY_LTP_SPIKE_WARN_PCT,
+  };
+}
+
+/** REST fallback when websocket ticks are unavailable (two /quote reads 1s apart). */
+export async function fetchConservativeOptionLtpForEntry(
+  accessToken: string,
+  tradingsymbol: string,
+): Promise<{
+  ltp: number;
+  entryLimitPrice: number;
+  firstLtp: number;
+  secondLtp: number;
+  spikePct: number;
+  staleFirstQuote: boolean;
+}> {
+  const firstLtp = await fetchOptionLtp(accessToken, tradingsymbol);
+  if (firstLtp <= 0) throw new Error("Option LTP unavailable for sizing");
+
+  await new Promise((resolve) => setTimeout(resolve, NINE_SIXTEEN_ENTRY_LTP_CONFIRM_DELAY_MS));
+
+  const secondLtp = await fetchOptionLtp(accessToken, tradingsymbol);
+  if (secondLtp <= 0) throw new Error("Option LTP confirm fetch unavailable");
+
+  const { ltp, entryLimitPrice, spikePct, staleFirstQuote } = conservativeEntryLtpFromQuotes(
+    firstLtp,
+    secondLtp,
+  );
+  return { ltp, entryLimitPrice, firstLtp, secondLtp, spikePct, staleFirstQuote };
+}
 
 /** Optional reserve fraction of balance (default 0 = use full available). */
 function balanceBufferPct(): number {
@@ -94,6 +143,27 @@ export function computeAffordableLots(input: {
   if (cap != null) lots = Math.min(lots, cap);
 
   return { lots: Math.max(0, lots), costPerLot, usableBalance };
+}
+
+/**
+ * Pick the next size to try after the broker refused the current one for funds.
+ *
+ * Zerodha usually quotes the required and available margin back, and scaling the lot count by that
+ * ratio lands on an affordable size in one step. Without those figures there is nothing to compute
+ * from, so it steps down a single lot. Either way the result is always at least one lot smaller,
+ * so the retry loop cannot spin on the same quantity.
+ */
+export function nextEntryLotsAfterMarginReject(
+  currentLots: number,
+  shortfall: { required: number; available: number } | null,
+): number {
+  if (currentLots <= 1) return 0;
+  let next = currentLots - 1;
+  if (shortfall && shortfall.required > 0) {
+    const scaled = Math.floor((currentLots * shortfall.available) / shortfall.required);
+    if (scaled < next) next = scaled;
+  }
+  return Math.max(0, next);
 }
 
 export async function resolveEntryQuantity(

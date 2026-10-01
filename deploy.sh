@@ -19,8 +19,12 @@ if [[ "$GIT_PULL" == "1" ]]; then
   fi
 fi
 
-echo "==> npm install"
-npm install
+if [[ "${SKIP_NPM_INSTALL:-0}" == "1" ]]; then
+  echo "==> skipping npm install (SKIP_NPM_INSTALL=1)"
+else
+  echo "==> npm install"
+  npm install
+fi
 
 echo "==> npm run build"
 npm run build

@@ -11,15 +11,29 @@ import express from "express";
 import {
   ensureNineFifteenPayload,
   isMarketHoursIst,
-  isValidMidRunKey,
-  midRowsFile,
   NIFTY_INDEX_PROFILE,
+  NINE_FIFTEEN_BACKTEST_MAX_SESSIONS,
   NINE_FIFTEEN_DEFAULT_HISTORY_DAYS,
+  NINE_FIFTEEN_MAX_HISTORY_DAYS,
+  sliceNineFifteenCandlesResult,
   type IndexProfile,
 } from "./nine-fifteen-candles.js";
-import { getNineSixteenBotStatus, getNineSixteenBotStatusLive, getNineSixteenBotLiveTick, listBotTradeLogs, setNineFifteenBotEnabled, setNineSixteenBotEnabled } from "./nine-sixteen-bot.js";
-import { ensureHighMinus5Backtest } from "./nine-fifteen-high-minus5-backtest.js";
+import type { NineFifteenCandlesResult } from "../src/types/nine-fifteen.js";
+import {
+  getNineSixteenBotStatus,
+  getNineSixteenBotStatusLive,
+  getNineSixteenBotLiveTick,
+  listBotTradeLogs,
+  setNineFifteenBotEnabled,
+  setNineSixteenBotEnabled,
+} from "./nine-sixteen-bot.js";
+import {
+  ensureHighMinus5Backtest,
+  NINE_FIFTEEN_HIGH_MINUS5_DEFAULT_DAYS,
+} from "./nine-fifteen-high-minus5-backtest.js";
 import { ensureNiftyOneHourBacktest, NIFTY_ONE_HOUR_DEFAULT_DAYS } from "./nifty-one-hour-backtest.js";
+import { ensureNiftyRsiBacktest, NIFTY_RSI_DEFAULT_DAYS } from "./nifty-rsi-backtest.js";
+import { ensureNiftyRsiSpeedBacktest, NIFTY_RSI_SPEED_DEFAULT_DAYS } from "./nifty-rsi-speed-backtest.js";
 import {
   getMomentumScalperBotStatus,
   getMomentumScalperBotStatusLive,
@@ -398,12 +412,39 @@ app.get("/api/kite/nine-fifteen-candles", async (req, res) => {
 
   const days = Math.min(
     Math.max(Number(req.query.days ?? NINE_FIFTEEN_DEFAULT_HISTORY_DAYS), 30),
-    NINE_FIFTEEN_DEFAULT_HISTORY_DAYS,
+    NINE_FIFTEEN_MAX_HISTORY_DAYS,
   );
   const force = req.query.refresh === "1";
 
   try {
-    const { gzipPath } = await ensureNineFifteenPayload(accessToken, days, force, profile);
+    const windowRaw = req.query.windowSessions;
+    const windowSessions =
+      windowRaw != null && String(windowRaw).trim() !== ""
+        ? Math.max(1, Math.min(Math.round(Number(windowRaw)), NINE_FIFTEEN_BACKTEST_MAX_SESSIONS))
+        : null;
+
+    const { gzipPath } = await ensureNineFifteenPayload(
+      accessToken,
+      days,
+      force,
+      profile,
+      windowSessions ?? 0,
+    );
+
+    if (windowSessions != null && Number.isFinite(windowSessions)) {
+      const full = (
+        JSON.parse(zlib.gunzipSync(fs.readFileSync(gzipPath)).toString()) as {
+          data: NineFifteenCandlesResult;
+        }
+      ).data;
+      const sliced = sliceNineFifteenCandlesResult(full, windowSessions, profile);
+      if (sliced.nseSessionsOneYear < windowSessions) {
+        return res.status(502).json({
+          error: `Only ${sliced.nseSessionsOneYear} sessions in cache (need ${windowSessions}) — hit Refresh to rebuild`,
+        });
+      }
+      return res.json({ data: { ...sliced, rows: [] } });
+    }
 
     /**
      * The cached file is already the gzipped response body, so stream it rather than reading it
@@ -427,39 +468,6 @@ app.get("/api/kite/nine-fifteen-candles", async (req, res) => {
     const message = error instanceof Error ? error.message : "Failed to load 9:15 candles";
     return res.status(502).json({ error: message });
   }
-});
-
-/** Trade rows for one mid-backtest run, fetched only when a grid cell is expanded. */
-app.get("/api/kite/mid-trade-rows", async (req, res) => {
-  const accessToken = req.cookies[TOKEN_COOKIE];
-  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
-
-  const profile = resolveIndexProfile(req.query.index);
-  if (!profile) {
-    return res.status(400).json({ error: "Query index must be nifty" });
-  }
-
-  const runKey = String(req.query.run ?? "");
-  if (!isValidMidRunKey(runKey)) {
-    return res.status(400).json({ error: "Invalid run key" });
-  }
-
-  const file = midRowsFile(profile, runKey);
-  if (!fs.existsSync(file)) {
-    return res.status(404).json({ error: "Trade rows not built yet — reload the backtest first" });
-  }
-
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.setHeader("Vary", "Accept-Encoding");
-  const acceptsGzip = /\bgzip\b/i.test(String(req.headers["accept-encoding"] ?? ""));
-  if (acceptsGzip) res.setHeader("Content-Encoding", "gzip");
-
-  const source = fs.createReadStream(file);
-  source.on("error", () => {
-    if (!res.headersSent) res.status(502).json({ error: "Trade rows unreadable" });
-    else res.end();
-  });
-  return acceptsGzip ? source.pipe(res) : source.pipe(zlib.createGunzip()).pipe(res);
 });
 
 type SessionMinuteCandle = {
@@ -540,8 +548,8 @@ app.get("/api/kite/nine-fifteen-high-minus5-backtest", async (req, res) => {
   if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
 
   const days = Math.min(
-    Math.max(Number(req.query.days ?? NINE_FIFTEEN_DEFAULT_HISTORY_DAYS), 30),
-    NINE_FIFTEEN_DEFAULT_HISTORY_DAYS,
+    Math.max(Number(req.query.days ?? NINE_FIFTEEN_HIGH_MINUS5_DEFAULT_DAYS), 30),
+    NINE_FIFTEEN_BACKTEST_MAX_SESSIONS,
   );
   const force = req.query.refresh === "1";
 
@@ -569,6 +577,44 @@ app.get("/api/kite/nifty-one-hour-backtest", async (req, res) => {
     return res.json({ data, cached, builtAt });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to build NIFTY 50 1-hour backtest";
+    return res.status(502).json({ error: message });
+  }
+});
+
+app.get("/api/kite/nifty-rsi-speed-backtest", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const days = Math.min(
+    Math.max(Number(req.query.days ?? NIFTY_RSI_SPEED_DEFAULT_DAYS), 30),
+    NIFTY_RSI_SPEED_DEFAULT_DAYS,
+  );
+  const force = req.query.refresh === "1";
+
+  try {
+    const { data, cached, builtAt } = await ensureNiftyRsiSpeedBacktest(accessToken, days, force);
+    return res.json({ data, cached, builtAt });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to build RSI Speed-O-Meter backtest";
+    return res.status(502).json({ error: message });
+  }
+});
+
+app.get("/api/kite/nifty-rsi-backtest", async (req, res) => {
+  const accessToken = req.cookies[TOKEN_COOKIE];
+  if (!accessToken) return res.status(401).json({ error: "Not connected to Zerodha" });
+
+  const days = Math.min(
+    Math.max(Number(req.query.days ?? NIFTY_RSI_DEFAULT_DAYS), 30),
+    NIFTY_RSI_DEFAULT_DAYS,
+  );
+  const force = req.query.refresh === "1";
+
+  try {
+    const { data, cached, builtAt } = await ensureNiftyRsiBacktest(accessToken, days, force);
+    return res.json({ data, cached, builtAt });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to build Nifty RSI backtest";
     return res.status(502).json({ error: message });
   }
 });

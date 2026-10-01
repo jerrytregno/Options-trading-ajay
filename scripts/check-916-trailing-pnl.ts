@@ -7,6 +7,8 @@ import {
   nineFifteenTakeProfitLimitPrice,
   nineFifteenTakeProfitAmount,
   shouldExitNineFifteenTakeProfit,
+  shouldExitNineSixteenTakeProfit,
+  formatNineFifteenExitSummary,
   ownLegUnrealisedPnl,
 } from "../server/nine-sixteen-logic.js";
 
@@ -28,10 +30,10 @@ function checkWeekday(label: string, dateIst: string, expectedPct: number) {
 }
 
 checkWeekday("Monday", "2026-08-31", 5);
-checkWeekday("Tuesday", "2026-09-01", 10);
+checkWeekday("Tuesday", "2026-09-01", 7);
 checkWeekday("Wednesday", "2026-09-02", 5);
 checkWeekday("Thursday", "2026-09-03", 5);
-checkWeekday("Friday", "2026-09-04", 10);
+checkWeekday("Friday", "2026-09-04", 7);
 
 {
   const pct = getNineSixteenTakeProfitPct("2026-09-01");
@@ -47,6 +49,22 @@ checkWeekday("Friday", "2026-09-04", 10);
   if (shouldExitNineFifteenTakeProfit(below, entryPrice, quantity, pct)) {
     throw new Error("market backup should not fire below target");
   }
+  if (!shouldExitNineSixteenTakeProfit(atTarget, entryPrice, quantity, pct)) {
+    throw new Error("9:16 market backup helper should fire at target P&L");
+  }
+  const summary = formatNineFifteenExitSummary({
+    exitPrice: nineFifteenTakeProfitLimitPrice(entryPrice, pct),
+    quantity,
+    entryPrice,
+    pnl: atTarget,
+    via: "market",
+    takeProfitPct: pct,
+    legTag: "9:16",
+  });
+  if (!summary.includes("9:16") || !summary.includes("backup")) {
+    throw new Error(`9:16 exit summary missing leg tag: ${summary}`);
+  }
+  console.log(`  exit summary: ${summary}`);
 }
 
 console.log("\nAll 9:16 take-profit checks passed.");

@@ -1,12 +1,27 @@
 export type KiteOrderType = "MARKET" | "LIMIT" | "SL" | "SL-M";
 
-/** Kite API: -1 = auto protection, or 0.01–100 for custom % band. */
+/** Kite API: -1 = auto protection, 0 = none (true MARKET), or 0.01–100 for a % band. */
 export function resolveMarketProtection(envValue?: string) {
   if (envValue == null || envValue.trim() === "") return "-1";
   const num = Number(envValue);
   if (num === -1) return "-1";
+  if (num === 0) return "0";
   if (num > 0 && num <= 100) return String(num);
   return "-1";
+}
+
+/**
+ * MARKET orders via Kite Connect must include market protection — the API rejects
+ * `market_protection: 0` ("Market orders without market protection are not allowed via API").
+ * BUY and SELL both use the env band (default -1 = auto). Partial-fill top-up + margin
+ * downsize on entry handles the extra margin the protected price can require.
+ */
+export function marketProtectionForSide(
+  transactionType: "BUY" | "SELL",
+  envValue?: string,
+): string {
+  void transactionType;
+  return resolveMarketProtection(envValue);
 }
 
 export function orderTypeNeedsMarketProtection(orderType: string) {
@@ -27,7 +42,7 @@ export function normalizeKiteOrderBody(
   if (body.exchange === "NFO" && body.product === "CNC") {
     body.product = "NRML";
   }
-  if (orderTypeNeedsMarketProtection(body.order_type) && !body.market_protection) {
+  if (orderTypeNeedsMarketProtection(body.order_type) && body.market_protection == null) {
     body.market_protection = marketProtection;
   }
   return body;

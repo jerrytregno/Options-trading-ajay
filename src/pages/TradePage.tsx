@@ -613,7 +613,7 @@ export default function TradePage() {
           <div>
             <h1 className="page-title">Trades</h1>
             <p className="page-subtitle text-muted">
-              All three bots · Zerodha fills reconciled, then saved to Firebase on each visit
+              All bots · Zerodha fills reconciled, then saved to Firebase on each visit
             </p>
           </div>
           <div className="trade-page-actions">

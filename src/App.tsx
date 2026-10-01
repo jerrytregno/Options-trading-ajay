@@ -8,6 +8,8 @@ import TradePage from "@/pages/TradePage";
 import LogTestPage from "@/pages/LogTestPage";
 import NineFifteenBacktestPage from "@/pages/NineFifteenBacktestPage";
 import NiftyOneHourBacktestPage from "@/pages/NiftyOneHourBacktestPage";
+import NiftyRsiBacktestPage from "@/pages/NiftyRsiBacktestPage";
+import NiftyRsiSpeedBacktestPage from "@/pages/NiftyRsiSpeedBacktestPage";
 
 export default function App() {
   return (
@@ -19,6 +21,8 @@ export default function App() {
       <Route path="/dashboard/backtesting" element={<BacktestingPage />} />
       <Route path="/dashboard/nine-fifteen-backtest" element={<NineFifteenBacktestPage />} />
       <Route path="/dashboard/nifty-one-hour" element={<NiftyOneHourBacktestPage />} />
+      <Route path="/dashboard/nifty-rsi" element={<NiftyRsiBacktestPage />} />
+      <Route path="/dashboard/nifty-rsi-speed" element={<NiftyRsiSpeedBacktestPage />} />
       <Route path="/dashboard/log-test" element={<LogTestPage />} />
       <Route path="/dashboard/trades" element={<TradePage />} />
       <Route path="/dashboard/portfolio" element={<PortfolioPage />} />

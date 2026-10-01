@@ -50,4 +50,23 @@ console.log(`Sessions:       ${openAtOpen.sessions}`);
 console.log(`Win (in 9:15):  ${openAtOpen.wins}  (${openAtOpen.inMinuteWinPct}% of entered)`);
 console.log(`Late win:       ${openAtOpen.lateWins}`);
 console.log(`Loss:           ${openAtOpen.losses}`);
-console.log(`TP hit rate:    ${openAtOpen.winRatePct}%`);
+console.log(`TP hit rate:    ${openAtOpen.winRatePct}%\n`);
+
+const fdRed = data.fullDay.redOpenMinus5.stats;
+const fdGreen = data.fullDay.greenOpenPlus5.stats;
+
+console.log("=== Full day · Open − 5 · red candles (9:20–15:00) ===");
+console.log(`Signal minutes:  ${fdRed.sessions}  (${data.fullDay.redOpenMinus5.tradingDays} days)`);
+console.log(`Win (signal min): ${fdRed.wins}  (${fdRed.inMinuteWinPct}% of entered)`);
+console.log(`Late win:       ${fdRed.lateWins}`);
+console.log(`Loss:           ${fdRed.losses}`);
+console.log(`No entry:       ${fdRed.noEntry}`);
+console.log(`TP hit rate:    ${fdRed.winRatePct}%\n`);
+
+console.log("=== Full day · Open + 5 · green candles (9:20–15:00) ===");
+console.log(`Signal minutes:  ${fdGreen.sessions}  (${data.fullDay.greenOpenPlus5.tradingDays} days)`);
+console.log(`Win (signal min): ${fdGreen.wins}  (${fdGreen.inMinuteWinPct}% of entered)`);
+console.log(`Late win:       ${fdGreen.lateWins}`);
+console.log(`Loss:           ${fdGreen.losses}`);
+console.log(`No entry:       ${fdGreen.noEntry}`);
+console.log(`TP hit rate:    ${fdGreen.winRatePct}%`);

@@ -14,25 +14,17 @@ interface ExitRuleSummary {
 }
 
 const STANDARD_RULES_FALLBACK: ExitRuleSummary = {
-  armPct: 0.5,
-  stepPct: 0.5,
-  initialStopPnlPct: -4,
-  initialStopHoldSec: 0,
+  armPct: 1,
+  stepPct: 0,
+  initialStopPnlPct: -2,
+  initialStopHoldSec: 3,
   stopBreachInclusive: true,
-  hardStopPnlPct: -6,
-};
-
-const OPENING_RULES_FALLBACK: ExitRuleSummary = {
-  armPct: 5,
-  stepPct: 5,
-  initialStopPnlPct: -10,
-  initialStopHoldSec: 15,
-  stopBreachInclusive: false,
-  hardStopPnlPct: -20,
+  hardStopPnlPct: 0,
 };
 
 interface BotStatus {
   enabled: boolean;
+  serverDisabled?: boolean;
   phase: string;
   dateIST: string;
   weekday: string;
@@ -46,6 +38,7 @@ interface BotStatus {
   };
   wsConnected: boolean;
   tradesToday: number;
+  lossesToday?: number;
   stoppedForLossToday?: boolean;
   maxLots?: number;
   plannedLots?: number | null;
@@ -85,6 +78,8 @@ interface BotStatus {
   exitRules?: Record<"standard" | "opening", ExitRuleSummary>;
   profitExitPnlPct?: number | null;
   profitExitPrice?: number | null;
+  profitExitArmed?: boolean;
+  profitExitOrderStatus?: string;
   profitExitGivebackPct?: number;
   forceExitIst?: string;
   liveNiftyRsi?: number | null;
@@ -137,31 +132,16 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
   const rules = status?.rules;
   const minMove = rules?.minMovePts ?? 2;
   const standardRules = status?.exitRules?.standard ?? STANDARD_RULES_FALLBACK;
-  const openingRules = status?.exitRules?.opening ?? OPENING_RULES_FALLBACK;
-  // These describe the *live* trade's frozen ladder, so they follow the active profile.
   const initialStopPnl = status?.initialStopPnlPct ?? standardRules.initialStopPnlPct;
   const initialStopHoldSec = status?.initialStopHoldSec ?? standardRules.initialStopHoldSec;
-  const initialStopInstant = initialStopHoldSec <= 0;
   const scanClose = rules?.tradeWindowCloseIst ?? "15:30";
   const scanSchedule = status?.scanStartIst ?? "after 9:16:30–15:30";
-  const hardStopPnl = status?.hardStopPnlPct ?? standardRules.hardStopPnlPct;
-  const profitExitPnlPct = status?.profitExitPnlPct ?? null;
   const profitExitPrice = status?.profitExitPrice ?? null;
-  const profitExitGiveback = status?.profitExitGivebackPct ?? 0.1;
   const maxLots = status?.maxLots ?? 25;
   const plannedLots = status?.plannedLots ?? null;
   const premiumSafetyPct = status?.premiumSafetyPct ?? 2;
   const forceExit = status?.forceExitIst ?? "15:25";
   const pnlArm = status?.pnlArmPct ?? standardRules.armPct;
-  const pnlStep = status?.pnlStepPct ?? standardRules.stepPct;
-  const exitProfile = status?.exitProfile ?? null;
-  const isOpeningTrade = exitProfile === "opening";
-  const activeStopIsInclusive = isOpeningTrade
-    ? openingRules.stopBreachInclusive
-    : standardRules.stopBreachInclusive;
-  const nextRungAfter = (rules: ExitRuleSummary) => rules.armPct + rules.stepPct;
-  const firstLadderTarget = pnlArm === 0.5 ? 0.7 : pnlArm + pnlStep;
-  const locked = status?.pnlLockedPct ?? 0;
 
   if (!connected) {
     return (
@@ -200,11 +180,15 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
           <button
             type="button"
             className={cn("btn btn-sm", status.enabled ? "btn-secondary" : "btn-primary")}
-            disabled={loading || status.stoppedForLossToday === true}
+            disabled={loading || status.stoppedForLossToday === true || status.serverDisabled === true}
             onClick={() => void toggle(!status.enabled)}
           >
             <Bot size={14} />
-            {status.enabled ? "Disable bot" : "Enable bot"}
+            {status.serverDisabled
+              ? "Disabled on server"
+              : status.enabled
+                ? "Disable bot"
+                : "Enable bot"}
           </button>
           <button type="button" className="btn btn-secondary btn-sm" onClick={() => void load()}>
             <RefreshCw size={14} />
@@ -220,8 +204,7 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
         <ol className="ms-bot-instructions-list">
           <li>
             <strong>Manual arm only.</strong> Traps starts <strong>disabled</strong> every day — press{" "}
-            <strong>Enable</strong> in this panel to arm it. The schedule does not auto-enable or
-            auto-disable; only your button does.
+            <strong>Enable</strong> in this panel to arm it. Nothing runs until you do.
           </li>
           <li>
             <strong>Scan window — {scanSchedule} IST.</strong> When armed, new entries start{" "}
@@ -238,6 +221,12 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
             exactly where it opened has no colour and is skipped however wide it ran.
           </li>
           <li>
+            <strong>RSI filter.</strong> Wilder RSI(14) on Nifty 1-min closes from{" "}
+            <strong>Zerodha historical candles</strong> must sit between{" "}
+            <strong>{status?.liveRsiBucketsIst ?? "40–60"}</strong> (inclusive) when the signal candle
+            closes and again when the pullback entry fires. Outside that band → no trade.
+          </li>
+          <li>
             <strong>First-second gate on candle 2.</strong> The signal minute&apos;s{" "}
             <strong>last websocket tick</strong> is compared to every tick in the next minute&apos;s{" "}
             <strong>first second</strong>. Green needs any tick ≥ last + <strong>0.1</strong>; red needs
@@ -245,14 +234,14 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
           </li>
           <li>
             <strong>Pullback entry.</strong> Once the gate passes, the start price is the first tick of
-            candle 2.
-            Green waits for a <strong>2 pt drop</strong> from start → <strong>CE market buy</strong>.
-            Red waits for a <strong>2 pt gain</strong> from start → <strong>PE market buy</strong>.
+            candle 2. Green waits for a <strong>2 pt drop</strong> from start →{" "}
+            <strong>CE market buy</strong>. Red waits for a <strong>2 pt gain</strong> from start →{" "}
+            <strong>PE market buy</strong>.
           </li>
           <li>
-            <strong>One loss stops the day.</strong> If a trade closes at a loss (negative premium
-            P&amp;L), Traps disables itself for the rest of that session and does not take new setups
-            until the next trading day.
+            <strong>Two losses stop the day.</strong> If two Traps trades close at a loss (negative
+            premium P&amp;L), the bot disables itself for the rest of that session and does not take new
+            setups until the next trading day. One loss keeps scanning.
           </li>
           <li>
             <strong>ATM at pullback.</strong> The strike is chosen from the live Nifty spot when the
@@ -260,81 +249,29 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
           </li>
           <li>
             <strong>Short of margin → smaller, not skipped.</strong> Sizing runs off the last traded
-            price while a market buy lifts the ask, so a refusal for funds is treated as a sizing
-            miss: the order is re-sent a size down until it fits. A refusal that already filled part
-            of the quantity is never retried — those lots are held and managed as the position.
+            price with a small premium buffer; a refusal for funds is treated as a sizing miss: the
+            order is re-sent a size down until it fits. A refusal that already filled part of the
+            quantity is never retried — those lots are held and managed as the position.
           </li>
           <li>
-            <strong>Standard ladder on every entry:</strong> initial stop{" "}
-            <strong>
-              {standardRules.initialStopPnlPct}% P&amp;L
-              {standardRules.initialStopHoldSec > 0
-                ? ` (${standardRules.initialStopHoldSec}s hold)`
-                : " (instant, no hold)"}
-            </strong>
-            , then rungs at <strong>+{standardRules.armPct}%</strong>, <strong>+1%</strong>, and{" "}
-            <strong>+{standardRules.stepPct}%</strong> from there (1.5%, 2%, 2.5%, …). Reaching a rung
-            only moves the ladder on; nothing is sold until price comes back down to it.
+            <strong>Take profit at entry.</strong> The moment the MIS market buy fills, a resting{" "}
+            <strong>limit sell at +{pnlArm}%</strong> on capital deployed is placed on Kite
+            {profitExitPrice != null ? ` (≈ ₹${formatNumber(profitExitPrice, 2)} per unit today)` : ""}.
+            Retries instantly if Kite rejects placement.
           </li>
           <li>
-            <strong>Initial stop (current trade).</strong> From entry until the first profit rung locks, the stop is{" "}
-            <strong>{initialStopPnl}% of premium paid</strong>
-            {initialStopInstant ? (
-              <> — exit <strong>immediately</strong> when P&amp;L reaches that level.</>
-            ) : (
-              <>
-                {" "}
-                with a <strong>{initialStopHoldSec}s recovery window</strong>: the timer starts the moment P&amp;L
-                {activeStopIsInclusive ? " touches " : " drops past "}
-                {initialStopPnl}%, keeps running while it stays there or worse, and is{" "}
-                <strong>cancelled instantly</strong> the moment P&amp;L recovers to{" "}
-                {activeStopIsInclusive
-                  ? `better than ${initialStopPnl}%`
-                  : `${initialStopPnl}% or better`}
-                . Reaching {initialStopHoldSec}s exits.
-              </>
-            )}{" "}
-            Exits use <strong>option P&amp;L % only</strong>.
+            <strong>Stop loss — −2% for 3 seconds.</strong> While in position, P&amp;L at or below{" "}
+            <strong>{initialStopPnl}%</strong> must hold for{" "}
+            <strong>{initialStopHoldSec} continuous seconds</strong> before a market sell. Recover above
+            {initialStopPnl}% in that window and the timer resets. Exits use <strong>option P&amp;L % only</strong>.
           </li>
           <li>
-            <strong>Hard stop at {hardStopPnl}% — no hold, no limit.</strong> A loss this deep exits
-            on the spot at market <em>even when a profit rung is already locked</em>, which is the
-            one case the initial stop no longer covers.
-            {initialStopInstant ? (
-              <>
-                {" "}
-                Before any rung locks it is unreachable — the {initialStopPnl}% stop fires first and
-                fires instantly.
-              </>
-            ) : (
-              <>
-                {" "}
-                It is also the floor under the {initialStopHoldSec}s hold: without it a collapse and
-                a wobble were treated the same, and any single print back above {initialStopPnl}%
-                reset the clock from zero.
-              </>
-            )}
+            <strong>Market backup at +{pnlArm}%.</strong> If the limit has not filled and unrealised P&amp;L
+            reaches the same <strong>+{pnlArm}%</strong> target, the bot squares off at market.
           </li>
           <li>
-            <strong>No exit order is placed when the trade is entered.</strong> The bot only watches
-            live P&amp;L. Until the first rung locks the trade is held on the {initialStopPnl}% stop
-            alone — no take-profit is working at the exchange.
-          </li>
-          <li>
-            <strong>The exit fires on the way back down, not on the way up.</strong> Reaching{" "}
-            <strong>+{pnlArm}%</strong> locks +{pnlArm}% as the floor and points the target at{" "}
-            <strong>+{firstLadderTarget}%</strong>. When P&amp;L falls back to the locked floor, the bot
-            instantly places a <strong>resting MIS limit sell</strong> at{" "}
-            <strong>{profitExitGiveback}% under that floor</strong> (+{pnlArm}% floor → aim ~+
-            {(pnlArm - profitExitGiveback).toFixed(2).replace(/\.?0+$/, "")}%) and retries until Kite
-            accepts it. If the limit is stuck, a <strong>market backup</strong> fires at the same giveback
-            level.
-          </li>
-          <li>
-            <strong>Stops cross at market.</strong> The initial stop at {initialStopPnl}% P&amp;L
-            {initialStopInstant ? "" : ` (${initialStopHoldSec}s hold)`} and the hard stop at{" "}
-            {hardStopPnl}% send a plain market sell — no limit. The {forceExit} square-off and a
-            manual close do the same.
+            <strong>Stops cross at market.</strong> The −2% (3s) stop, market backup, {forceExit}{" "}
+            square-off, and manual close all send plain market sells — no limit.
           </li>
           <li>
             <strong>No new trade until the last one is flat.</strong> If lots are still open after
@@ -343,24 +280,10 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
             fresh entry.
           </li>
           <li>
-            <strong>Below {pnlArm}% P&amp;L:</strong> target is <strong>+{pnlArm}%</strong> and the stop stays at{" "}
-            <strong>{initialStopPnl}% P&amp;L</strong>
-            {initialStopInstant ? " (instant exit)" : ` (${initialStopHoldSec}s hold)`}. Nothing is locked yet.
-          </li>
-          <li>
-            <strong>The ladder, rung by rung.</strong> +0.5% reached → floor +0.5%, target +0.7%.
-            +0.7% reached → floor +0.7%, target +1%. +1% reached → floor +1%, target +1.5%. +1.5% →
-            floor +1.5%, target +2%. From there every <strong>+{pnlStep}%</strong> repeats the same
-            move. Each floor is sold at <strong>{profitExitGiveback}% below itself</strong> when price
-            returns to it — so +0.5% exits near +0.4%, +0.7% near +0.6%, +1% exits near +0.9%, +1.5%
-            near +1.4%, +2% near +1.9%.
-          </li>
-          <li>
             <strong>The cutoff never cuts a live trade.</strong> {scanClose} only stops <em>new</em> entries. A
-            position already open keeps running its own P&amp;L ladder past that time — it closes when the trade
-            closes. The single exception is a safety square-off at <strong>{forceExit}</strong>, because Zerodha
-            auto-squares MIS legs shortly after and the bot must book the trade itself rather than have the broker
-            close it silently.
+            position already open keeps running until its limit fills, stop fires, or backup exits. The
+            safety square-off at <strong>{forceExit}</strong> applies because Zerodha auto-squares MIS legs
+            shortly after.
           </li>
           <li>
             <strong>Size — one order, at most {maxLots} lot{maxLots === 1 ? "" : "s"}.</strong> The entry is a
@@ -376,8 +299,8 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
             balance won&apos;t stretch, the lot count comes down right there.
           </li>
           <li>
-            <strong>Head-room on sizing.</strong> A market buy pays the ask and charges on top of the
-            last traded price, so sizing adds <strong>{premiumSafetyPct}%</strong> head-room to keep
+            <strong>Head-room on sizing.</strong> The limit sits below LTP but charges still apply on top
+            of the quoted premium, so sizing adds <strong>{premiumSafetyPct}%</strong> head-room to keep
             the order inside the balance.
           </li>
           <li>
@@ -390,7 +313,13 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
 
       <div className="pat-status-row">
         <span className={cn("pat-badge", status.enabled ? "pat-badge--on" : "pat-badge--off")}>
-          {status.stoppedForLossToday ? "Stopped (loss)" : status.enabled ? "Enabled" : "Disabled"}
+          {status.serverDisabled
+            ? "Off (server)"
+            : status.stoppedForLossToday
+              ? "Stopped (2 losses)"
+              : status.enabled
+                ? "Enabled"
+                : "Disabled"}
         </span>
         <span className="pat-badge">{status.phase}</span>
         <span className={cn("pat-badge", status.wsConnected ? "pat-badge--on" : "pat-badge--off")}>
@@ -411,19 +340,18 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
         </p>
       )}
 
-      {!status.enabled && !status.stoppedForLossToday && (
+      {status.serverDisabled && (
         <p className="ms-bot-warn ms-bot-warn--hold">
-          <strong>Disabled.</strong> Press <strong>Enable bot</strong> to arm Traps — nothing runs until
-          you do.
+          <strong>Disabled on server.</strong> Traps is turned off via{" "}
+          <strong>MOMENTUM_SCALPER_BOT_ENABLED=0</strong> — no new entries until the env is changed and
+          the server restarts.
         </p>
       )}
 
-      {isOpeningTrade && (
-        <p className="ms-bot-warn">
-          <strong>Opening-window trade.</strong> Using the {openingRules.armPct}% ladder (frozen at entry) — initial
-          stop below {openingRules.initialStopPnlPct}% held {openingRules.initialStopHoldSec}s, then +
-          {openingRules.armPct}% / +{nextRungAfter(openingRules)}% / +
-          {nextRungAfter(openingRules) + openingRules.stepPct}% …
+      {!status.enabled && !status.stoppedForLossToday && !status.serverDisabled && (
+        <p className="ms-bot-warn ms-bot-warn--hold">
+          <strong>Disabled.</strong> Press <strong>Enable bot</strong> to arm Traps — nothing runs until
+          you do.
         </p>
       )}
 
@@ -433,6 +361,13 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
           <span className="pat-metric-value">
             {status.lastSpot != null ? formatNumber(status.lastSpot, 2) : "—"}
           </span>
+        </div>
+        <div className="pat-metric">
+          <span className="pat-metric-label">RSI(14)</span>
+          <span className="pat-metric-value">
+            {status.liveNiftyRsi != null ? formatNumber(status.liveNiftyRsi, 1) : "—"}
+          </span>
+          <span className="pat-metric-hint">Zerodha 1-min · need {status.liveRsiBucketsIst ?? "40–60"}</span>
         </div>
         <div className="pat-metric">
           <span className="pat-metric-label">Trades today</span>
@@ -459,6 +394,9 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
               {Math.abs(status.pendingSignal.movePts)} pt range
             </span>
             <span className="pat-metric-hint">
+              {status.pendingSignal.liveRsi != null
+                ? `RSI ${formatNumber(status.pendingSignal.liveRsi, 1)} · `
+                : ""}
               {status.pendingSignal.optionMarkPrice != null
                 ? `${status.pendingSignal.optionTradingsymbol ?? "option"} at ₹${status.pendingSignal.optionMarkPrice.toFixed(2)} · buying at market`
                 : "first-second gate → 2 pt pullback entry"}
@@ -480,29 +418,16 @@ export function ServerMomentumScalperBotPanel({ connected }: { connected: boolea
               </span>
             </div>
             <div className="pat-metric">
-              <span className="pat-metric-label">
-                {locked > 0 ? "Trailing stop / target" : "Stop (P&L) / next target"}
-              </span>
+              <span className="pat-metric-label">TP limit / stop</span>
               <span className="pat-metric-value">
-                {locked > 0 ? (
-                  <>
-                    SL {locked}% / TP {status.pnlTargetPct ?? locked + pnlStep}%
-                  </>
-                ) : (
-                  <>
-                    Stop {initialStopPnl}%
-                    {initialStopInstant ? " (instant)" : ` (${initialStopHoldSec}s hold)`} · target +{pnlArm}%
-                  </>
-                )}
+                +{pnlArm}% limit
+                {profitExitPrice != null ? ` @ ₹${formatNumber(profitExitPrice, 2)}` : ""} · stop{" "}
+                {initialStopPnl}% ({initialStopHoldSec}s)
               </span>
               <span className="pat-metric-hint">
-                {locked > 0
-                  ? profitExitPrice != null
-                    ? `back to +${locked}% sells @ ₹${profitExitPrice.toFixed(2)} (~+${profitExitPnlPct}%)`
-                    : `floor +${locked}% · sells ~+${profitExitPnlPct ?? locked - profitExitGiveback}% on a fall back`
-                  : initialStopInstant
-                    ? `next target +${pnlArm}% · instant exit at ${initialStopPnl}%`
-                    : `next target +${pnlArm}% · exits if P&L holds at ${initialStopPnl}% or worse for ${initialStopHoldSec}s`}
+                {status.profitExitArmed
+                  ? `limit ${status.profitExitOrderStatus ?? "pending"} on Kite · market backup at +${pnlArm}%`
+                  : `limit placed at entry · backup at +${pnlArm}%`}
               </span>
             </div>
             <div className="pat-metric">

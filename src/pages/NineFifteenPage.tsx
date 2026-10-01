@@ -18,8 +18,7 @@ export default function NineFifteenPage() {
               9:15 Candle
             </h1>
             <p className="page-subtitle">
-              Morning legs at 9:15 and 9:16 IST · Traps scans after 9:16:30 · enable each bot separately on the panels
-              below
+              9:15 + 9:16 morning legs armed on server · Traps off on server
             </p>
           </div>
         </header>
@@ -34,11 +33,11 @@ export default function NineFifteenPage() {
           <div className="nf-live-rules-grid">
             {/* —— 9:15 trade —— */}
             <div className="nf-live-rules-col">
-              <h3 className="nf-live-rules-heading text-down">9:15 trade · PE at 9:15:11</h3>
+              <h3 className="nf-live-rules-heading">9:15 trade · PE or CE at 9:15:11</h3>
               <p className="nf-live-rules-lead text-muted">
-                Short-only burst on the opening minute. Exit: resting <strong>+3% (Mon/Wed/Thu) or +5% (Tue/Fri) take-profit limit</strong> on
-                capital deployed at fill, plus a <strong>10:00 hard stop</strong> on adverse Nifty movement from
-                the entry spot.
+                Burst on the opening minute — red ≥ 5 pts → ATM PE · green ≥ 10 pts → ATM CE. Exit: resting
+                take-profit limit — <strong>PE: Mon/Tue 5%</strong> · <strong>Wed/Thu/Fri 3%</strong> ·{" "}
+                <strong>CE: 3% every day</strong> on capital deployed at fill.
               </p>
               <h4 className="nf-live-rules-subheading">Entry</h4>
               <ol className="nf-live-rules-list">
@@ -50,70 +49,88 @@ export default function NineFifteenPage() {
                   <strong>Read direction at 9:15:10</strong> — last tick strictly before 10 seconds vs that open.
                   <ul className="nf-live-rules-sublist">
                     <li>
-                      <strong>Red ≥ 5 pts</strong> (open − mark ≥ <strong>5</strong> at 9:15:10) → arm{" "}
-                      <strong>ATM PE</strong> market buy at <strong>9:15:11.000</strong>
+                      <strong>Red ≥ 5 pts</strong> (open − mark ≥ <strong>5</strong> at 9:15:10) →{" "}
+                      <strong>ATM PE</strong> at <strong>9:15:11.000</strong>
                     </li>
                     <li>
-                      <strong>Red &lt; 5 pts, green, or flat</strong> → no 9:15 trade
+                      <strong>Green ≥ 10 pts</strong> (mark − open ≥ <strong>10</strong> at 9:15:10) →{" "}
+                      <strong>ATM CE</strong> at <strong>9:15:11.000</strong>
+                    </li>
+                    <li>
+                      <strong>Red &lt; 5 pts</strong> or <strong>green &lt; 10 pts</strong> or flat → no 9:15 trade
                     </li>
                   </ul>
                 </li>
                 <li>
-                  <strong>Order window</strong> — retries until <strong>9:15:20</strong>; miss → no 9:15 leg
-                  today.
+                  <strong>Order window</strong> — insufficient-fund downsize retries until <strong>9:15:15</strong>{" "}
+                  (skip 9:15 leg if not in by 9:15:16); partial top-ups until <strong>9:15:20</strong>.
                 </li>
                 <li>
-                  ATM PE is pre-resolved at <strong>9:15:04</strong> so :11 is placement only.
+                  ATM CE + PE are pre-resolved at <strong>9:15:04</strong> so :11 is placement only.
+                </li>
+                <li>
+                  <strong>Sizing &amp; orders</strong> — full available balance; max <strong>25 lots</strong> per
+                  Kite order (split in parallel if larger). <strong>Entry = NRML market BUY</strong> at the live
+                  print (fast fill at 9:15:11 — not a limit entry). Sizing uses two REST LTP reads 1s apart
+                  (size on the lower quote).
+                </li>
+                <li>
+                  <strong>Partial fill / margin short</strong> — on insufficient funds at 9:15:11, reduce{" "}
+                  <strong>1 lot</strong> (or Kite&apos;s scaled size) and retry instantly until{" "}
+                  <strong>9:15:15</strong>. After a partial fill, top-up until <strong>9:15:20</strong> with the same
+                  downsize logic.
                 </li>
               </ol>
-              <h4 className="nf-live-rules-subheading">Exit (take-profit limit + hard stop)</h4>
-              <p className="nf-live-rules-callout">
-                <strong>Hard stop — from 10:00 IST only · 30 pts adverse on Nifty</strong> (this leg is PE only:
-                exit at market when spot <strong>≥ entry spot + 30</strong> — measured from the Nifty spot at
-                fill, not from the 9:15 open).
-              </p>
+              <h4 className="nf-live-rules-subheading">Exit (take-profit limit)</h4>
               <ol className="nf-live-rules-list">
                 <li>
-                  <strong>Take profit — % on capital deployed</strong> (entry premium × quantity, not Nifty
-                  index %). The moment the 9:15:11 PE buy fills, a resting <strong>limit sell</strong> is placed
-                  at the price that locks in:
+                  <strong>Take profit — LIMIT sell only</strong> (% on capital deployed = entry premium × quantity,
+                  not Nifty index %). Limit price is entry × (1 + weekday %), rounded to the nearest{" "}
+                  <strong>₹0.05</strong> (NSE option price step). The moment the 9:15:11 buy fills, a resting{" "}
+                  <strong>limit sell</strong> is placed at the price that locks in:
                   <ul className="nf-live-rules-sublist">
                     <li>
-                      <strong>Monday, Wednesday, Thursday → 3%</strong> profit on deployed capital (e.g. ₹1,00,000
-                      deployed → ₹3,000 aim)
+                      <strong>PE (put buy)</strong> — <strong>Mon/Tue → 5%</strong> · <strong>Wed/Thu/Fri → 3%</strong>{" "}
+                      on deployed capital
                     </li>
                     <li>
-                      <strong>Tuesday, Friday → 5%</strong> profit on deployed capital (e.g. ₹1,00,000 deployed →
-                      ₹5,000 aim)
+                      <strong>CE (call buy)</strong> — <strong>3% every weekday</strong> on deployed capital
                     </li>
                   </ul>
                   If placement fails, the bot retries instantly until the limit is live on Kite.
                 </li>
                 <li>
                   <strong>No trailing ladder</strong> — there is no option P&amp;L stop before the limit fills.
-                  From <strong>10:00 IST</strong>, if Nifty spot is <strong>≥ entry spot + 30</strong> (30 index
-                  pts against the PE from your entry spot), the bot exits at market. If still open at{" "}
-                  <strong>3:25 PM</strong>, it is squared off at market regardless of P&amp;L.
+                  If still open at <strong>3:25 PM</strong>, it is squared off at market regardless of P&amp;L.
                 </li>
                 <li>
                   <strong>Market backup</strong> — if the limit never fills and unrealised P&amp;L reaches the
-                  day&apos;s target (<strong>3%</strong> Mon/Wed/Thu · <strong>5%</strong> Tue/Fri on capital
-                  deployed), the bot squares off at market.
+                  day&apos;s target (PE weekday % or CE 3%), the bot squares off at market.
+                </li>
+                <li>
+                  <strong>Hard stop — from 10:00 AM IST</strong> — exit at market if Nifty moves{" "}
+                  <strong>30 points against</strong> the entry direction from the spot at fill:{" "}
+                  <strong>PE</strong> when spot ≥ entry + 30. Runs alongside the take-profit limit; whichever
+                  hits first closes the leg.
+                </li>
+                <li>
+                  <strong>Small-body exit @ 9:16:01</strong> — if the 9:15 leg is still open when the{" "}
+                  <strong>websocket 9:15:59 close</strong> seals and <strong>|close − open| &lt; 5</strong>, exit
+                  at market on the <strong>first Nifty WS tick at 9:16:01</strong>, whatever the P&amp;L.
                 </li>
               </ol>
               <p className="nf-live-rules-foot text-muted">
-                If the 9:15 leg is flat before <strong>9:15:59</strong>, the 9:16 leg may still run. If it is
-                still open at <strong>9:16:00</strong>, the 9:16 trade is skipped for the day.
+                When the 9:15 leg closes before 9:16:00, the 9:16 decision still runs at 9:16:01 unless the
+                9:15 trade is still open or the 9:15 candle closed green.
               </p>
             </div>
 
             {/* —— 9:16 trade —— */}
             <div className="nf-live-rules-col">
-              <h3 className="nf-live-rules-heading text-down">9:16 trade · PE on a red 9:15 bar</h3>
+              <h3 className="nf-live-rules-heading">9:16 trade · PE at 9:16:01</h3>
               <p className="nf-live-rules-lead text-muted">
-                Uses the <strong>sealed 9:15 candle</strong> (open from the first tick 9:15:00–15, close from the
-                last tick before 9:16:00). <strong>PE only</strong> — a green 9:15 close is skipped, not bought
-                as a CE.
+                Second morning leg on the same server bot — red 9:15 candle with |Δ| ≥ 15 buys ATM PE at
+                9:16:01. Always armed on the server alongside the 9:15 trade.
               </p>
               <h4 className="nf-live-rules-subheading">Entry</h4>
               <ol className="nf-live-rules-list">
@@ -133,43 +150,81 @@ export default function NineFifteenPage() {
                   </ul>
                 </li>
                 <li>
-                  <strong>Order at 9:16:00.000</strong> (dedicated timer, not the poll loop) · window until{" "}
-                  <strong>9:16:30</strong>.
+                  <strong>9:15 close from websocket</strong> — last Nifty tick strictly before{" "}
+                  <strong>9:16:00</strong> (logged as 9:15:59 close).
+                </li>
+                <li>
+                  <strong>Order at 9:16:01.000</strong> (dedicated timer) · option websocket armed from{" "}
+                  <strong>9:15:58</strong> (ATM CE + PE pre-resolved) · collect the{" "}
+                  <strong>1st and 2nd option websocket ticks in the 9:16:01 second</strong> on the entry leg.
+                </li>
+                <li>
+                  <strong>Entry = NRML limit BUY</strong> at the <strong>2nd tick</strong> (limit price rounded to
+                  nearest <strong>₹0.05</strong>) · size lots on the <strong>lower</strong> of the two ticks · log
+                  if the 1st tick is ≥ <strong>3%</strong> above the 2nd · <strong>market backup in 8s</strong> if
+                  the limit does not fill · retries until <strong>9:16:30</strong>.
                 </li>
                 <li>
                   <strong>Blocked</strong> when the 9:15 leg is still open at 9:16:00, or when 9:15 closed
                   green.
                 </li>
-                <li>ATM weekly PE · <strong>MIS market</strong> · max <strong>25 lots</strong> per order (split in parallel if larger).</li>
+                <li>
+                  <strong>Partial fill / margin short</strong> — tops up missing qty until <strong>9:16:30</strong>;
+                  on insufficient margin, steps lots down instantly (25 → 24 → 23…) from Kite&apos;s quoted figures.
+                </li>
               </ol>
-              <h4 className="nf-live-rules-subheading">Exit (take-profit limit + hard stop)</h4>
-              <p className="nf-live-rules-callout">
-                <strong>Hard stop — from 10:00 IST only · 30 pts adverse on Nifty</strong> (PE: exit at market
-                when spot <strong>≥ entry spot + 30</strong> — from the Nifty spot at fill, not the 9:15 open).
-              </p>
+              <h4 className="nf-live-rules-subheading">Exit (take-profit limit + parallel index exit)</h4>
               <ol className="nf-live-rules-list">
                 <li>
-                  <strong>Take-profit limit on capital deployed</strong> — profit is measured as a{" "}
-                  <strong>% of capital deployed</strong> (entry premium × quantity). The moment the 9:16 entry
-                  fills, a resting <strong>limit sell</strong> is placed at that profit aim; if Kite rejects
-                  placement, the bot retries instantly until the order is accepted.
+                  <strong>Take-profit — LIMIT sell only</strong> (% on capital deployed = entry premium × quantity).
+                  Limit price is entry × (1 + weekday %), rounded to the nearest <strong>₹0.05</strong>. The moment
+                  the 9:16 limit entry fills, a resting <strong>limit sell</strong> is placed at that profit aim;
+                  if Kite rejects placement, the bot retries instantly until the order is accepted.
                   <ul className="nf-live-rules-sublist">
                     <li>
                       <strong>Monday, Wednesday &amp; Thursday</strong> — <strong>+5%</strong> profit on capital
                       deployed
                     </li>
                     <li>
-                      <strong>Tuesday &amp; Friday</strong> — <strong>+10%</strong> profit on capital deployed
-                    </li>
-                    <li>
-                      <strong>Market backup</strong> — if the limit does not fill but live P&amp;L reaches the
-                      same %, square off at market (same as the 9:15 leg).
-                    </li>
-                    <li>
-                      <strong>No trailing ladder</strong> — there is no option P&amp;L stop before the limit
-                      fills or the market backup fires.
+                      <strong>Tuesday &amp; Friday</strong> — <strong>+7%</strong> profit on capital deployed
                     </li>
                   </ul>
+                </li>
+                <li>
+                  <strong>Market backup</strong> — if the take-profit limit never fills and unrealised P&amp;L
+                  reaches the day&apos;s target (Mon/Wed/Thu <strong>+5%</strong> · Tue/Fri <strong>+7%</strong> on
+                  capital deployed), the bot cancels the limit and squares off at market — same behaviour as the
+                  9:15 leg.
+                </li>
+                <li>
+                  <strong>Parallel Nifty index exit — MARKET sell</strong> (runs alongside the TP limit;{" "}
+                  <strong>whichever hits first</strong> closes the leg). Measured from the Nifty spot at fill:
+                  <ul className="nf-live-rules-sublist">
+                    <li>
+                      <strong>9:16:00 open ≤ 9:15:59 close</strong> (both red) → exit at market when Nifty ≤{" "}
+                      <strong>entry spot − 12</strong> (until 9:17:00)
+                    </li>
+                    <li>
+                      <strong>9:16:00 open &gt; 9:15:59 close</strong> (green gap at 9:16) → exit at market when Nifty ≤{" "}
+                      <strong>entry spot − 8</strong> (until 9:17:00)
+                    </li>
+                    <li>
+                      <strong>9:16 minute closes green</strong> — 9:16:59 last WS tick &gt; 9:15:59 last WS tick → from{" "}
+                      <strong>9:17:00</strong> exit at market when Nifty ≤ <strong>entry spot − 6</strong>
+                    </li>
+                  </ul>
+                  9:15:59 close = last Nifty websocket tick in the 9:15:59 second; 9:16:00 open = first Nifty
+                  websocket tick in the 9:16:00 second; 9:16:59 close = last tick in the 9:16:59 second (even a tick
+                  slightly below 9:15:59 close counts the 9:16:00 open as red; slightly above counts as green).
+                </li>
+                <li>
+                  <strong>No trailing ladder</strong> — there is no option P&amp;L stop before the limit fills,
+                  the index target, the hard stop, or the market backup fires.
+                </li>
+                <li>
+                  <strong>Hard stop — from 10:00 AM IST</strong> — same as the 9:15 leg: exit at market when Nifty
+                  is <strong>30 pts adverse</strong> from entry spot (PE ≥ entry + 30 · CE ≤ entry − 30). Runs
+                  alongside the take-profit limit and parallel index exit; first wins.
                 </li>
                 <li>
                   <strong>3:25 PM</strong> force square-off if still open.
@@ -184,13 +239,13 @@ export default function NineFifteenPage() {
           <p className="nf-live-rules-lead text-muted">
             Separate strategy on the panel below — not tied to the 9:15 candle. Starts scanning after the
             9:16 morning trade entry window closes (9:16:30 IST), through the afternoon entry cutoff. Disabled
-            until you press Enable on the panel.
+            until you press Enable on the panel; two losing trades stop the day.
           </p>
           <div className="nf-live-rules-grid nf-live-rules-grid--single">
             <div className="nf-live-rules-col">
               <ol className="nf-live-rules-list">
                 <li>
-                  <strong>Signal candle:</strong> high − low ≥ <strong>5 pts</strong>; green body → CE idea,
+                  <strong>Signal candle:</strong> high − low ≥ <strong>3 pts</strong>; green body → CE idea,
                   red → PE.
                 </li>
                 <li>
@@ -202,14 +257,17 @@ export default function NineFifteenPage() {
                 <li>
                   <strong>Pullback entry:</strong> once the gate passes, green waits for a{" "}
                   <strong>2 pt drop</strong> from the first tick of candle 2 (call buy); red waits for a{" "}
-                  <strong>2 pt gain</strong> from that first tick (put buy). <strong>MIS market buy</strong> on
-                  the ATM leg when the pullback prints.
+                  <strong>2 pt gain</strong> from that first tick (put buy). <strong>MIS market buy</strong> when
+                  the pullback prints.
                 </li>
                 <li>
-                  <strong>Exit ladder:</strong> initial stop <strong>−4%</strong> P&amp;L (instant, no hold) ·
-                  rungs at <strong>+0.5%</strong>, <strong>+0.7%</strong>, <strong>+1%</strong>, then{" "}
-                  <strong>+0.5%</strong> steps.
-                  Profit exits fire on the way back down to a locked rung, not when the rung is first reached.
+                  <strong>RSI filter:</strong> Wilder RSI(14) on 1-min Nifty closes must be between{" "}
+                  <strong>40 and 60</strong> when the signal forms and at entry.
+                </li>
+                <li>
+                  <strong>Exit:</strong> on fill, resting <strong>limit sell at +1%</strong> on deployed
+                  capital · stop <strong>−2% P&amp;L held 3 seconds</strong> · market backup at +1% if the
+                  limit has not filled.
                 </li>
               </ol>
             </div>

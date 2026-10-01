@@ -11,7 +11,6 @@ import type {
   NineFifteenCePeFailureTrade,
   NineFifteenCePeGuide,
   NineFifteenCePeStrategyStats,
-  NineFifteenConsolidatedFlatVariant,
   NineFifteenCePeTarget,
   NineFifteenCheckpointLevels,
   NineFifteenDirection,
@@ -19,18 +18,12 @@ import type {
   NineFifteenFollowBacktestBlock,
   NineFifteenLevelSummary,
   NineFifteenMfePeak,
-  NineFifteenMidBacktestStats,
-  NineFifteenMidSideSplit,
-  NineFifteenMidGrid,
-  NineFifteenMidGridCell,
-  NineFifteenMidGridRow,
-  NineFifteenMidSignalThreshold,
-  NineFifteenMidStopLevel,
-  NineFifteenMidTradeRow,
+  NineFifteenNrmlCarryOutcome,
   NineFifteenOptionSide,
   NineFifteenRupeLevel,
   NineFifteenTimeCheckpoint,
   NineFifteenTargetHit,
+  NineFifteenTargetGapAtCheckpoint,
   NineFifteenTradeEntry,
   NineFifteenTuesdayTargetRow,
   NineFifteenTuesdayTargetStats,
@@ -53,11 +46,14 @@ import {
   NINE_SIXTEEN_INDEX_TARGET_15_START_MINUTE,
   NINE_SIXTEEN_INDEX_TARGET_20,
   NINE_SIXTEEN_INDEX_TARGET_20_START_MINUTE,
-  NINE_SIXTEEN_ENTRY_SEC,
+  NINE_SIXTEEN_BACKTEST_ENTRY_SEC,
+  NINE_SIXTEEN_MIN_915_ABS_DIFF,
+  NINE_SIXTEEN_HYBRID_INDEX_TARGET_RED_CONFIRM,
+  NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_GAP,
 } from "./nine-sixteen-logic.js";
 
 /** Backtest entry: Kite 9:16 candle open (real 1-min data). */
-const BACKTEST_ENTRY_SEC_OF_DAY = NINE_SIXTEEN_ENTRY_SEC;
+const BACKTEST_ENTRY_SEC_OF_DAY = NINE_SIXTEEN_BACKTEST_ENTRY_SEC;
 
 export interface IndexProfile {
   id: "nifty";
@@ -99,10 +95,13 @@ const SESSION_CLOSE_MINUTES = 15 * 60 + 30;
  * Includes the entry bar's OHLC so a touch during 9:16 counts (aligns with live ~9:16:00 fill).
  */
 const BACKTEST_EXIT_START_MINUTES = SESSION_ENTRY_MINUTES;
+/** NRML carry-forward exit scan ends at this IST minute on expiry Tuesday (3:00 PM). */
+const NRML_CARRY_DEADLINE_MINUTES = 15 * 60;
 export const NINE_FIFTEEN_BACKTEST_TARGET = 30;
 export const NINE_FIFTEEN_BACKTEST_TARGET_20 = 20;
 export const NINE_FIFTEEN_BACKTEST_TARGET_25 = 25;
 export const NINE_FIFTEEN_BACKTEST_TARGET_10 = 10;
+export const NINE_FIFTEEN_BACKTEST_TARGET_8 = 8;
 export const NINE_FIFTEEN_BACKTEST_TARGET_5 = 5;
 export const NINE_FIFTEEN_BACKTEST_TARGET_15 = 15;
 export const NINE_FIFTEEN_FOLLOW_MIN_ABS_DIFF = 15;
@@ -181,55 +180,6 @@ export const NINE_FIFTEEN_BREAKOUT_STOP_ACTIVE_TUESDAY_MINUTE = 11 * 60 + 1;
 /** Tuesday breakout backtest: flat ±10 from 9:16 entry (both main and near-miss). */
 export const NINE_FIFTEEN_BREAKOUT_TUESDAY_TARGET = NINE_FIFTEEN_BACKTEST_TARGET_10;
 
-/**
- * Mid-session backtest (study only, unrelated to the 9:15 signal): a 1-min bar that travels
- * this far from its own open arms a trade in that direction, entered at the next bar's open
- * and raced to ±target from that entry. Signals are only taken between 10:00 and 14:59 IST
- * (bar starts through the 14:30–15:00 bucket; Tuesday entries still cut off at 14:00).
- */
-export const NINE_FIFTEEN_MID_SIGNAL_MOVE = 25;
-/** Looser signal thresholds studied alongside the 25-pt one — more trades, weaker each. */
-export const NINE_FIFTEEN_MID_SIGNAL_MOVE_20 = 20;
-export const NINE_FIFTEEN_MID_SIGNAL_MOVE_15 = 15;
-export const NINE_FIFTEEN_MID_SIGNAL_MOVE_10 = 10;
-export const NINE_FIFTEEN_MID_TARGET = NINE_FIFTEEN_BACKTEST_TARGET_20;
-/** Adverse move that stops the trade — wider than the target, so wins and losses are asymmetric. */
-export const NINE_FIFTEEN_MID_STOP = 70;
-/**
- * Full stop sweep for the +10 take-profit mid study — baseline −70 plus every tighter level.
- * At −10 the stop equals the target, so the trade is finally symmetric.
- */
-export const NINE_FIFTEEN_MID_STOP_LEVELS = [70, 60, 50, 40, 30, 20, 10] as const;
-/** @deprecated Use NINE_FIFTEEN_MID_STOP_LEVELS — tighter-only slice kept for tests. */
-export const NINE_FIFTEEN_MID_STOP_VARIANTS = NINE_FIFTEEN_MID_STOP_LEVELS.slice(1);
-/** 1-min signal thresholds each swept across every stop level at +10 take-profit. */
-export const NINE_FIFTEEN_MID_SIGNAL_THRESHOLDS = [25, 20, 15, 10] as const;
-/**
- * Momentum-confirmation study: two consecutive 1-min candles must each travel this far in the
- * same direction, and the trade opens on the third candle.
- */
-export const NINE_FIFTEEN_MID_TWO_CANDLE_MOVE = 10;
-export const NINE_FIFTEEN_MID_TWO_CANDLE_CONFIRM_BARS = 2;
-/** Exhaustion fade: run lengths (same-colour candles before reversing on the next bar). */
-export const NINE_FIFTEEN_MID_EXHAUSTION_RUN_10 = 10;
-export const NINE_FIFTEEN_MID_EXHAUSTION_RUN_5 = 5;
-/** Colour alone arms the run, so there is no points threshold on the individual candles. */
-export const NINE_FIFTEEN_MID_EXHAUSTION_MOVE = 0;
-/** Signal/entry bar size, aggregated from Kite 1-min candles starting at the 9:15 open. */
-export const NINE_FIFTEEN_MID_BAR_MINUTES = 3;
-export const NINE_FIFTEEN_MID_WINDOW_START_MINUTE = 10 * 60;
-/** Latest signal-bar start minute included in the scan (14:30–15:00 bucket). */
-export const NINE_FIFTEEN_MID_WINDOW_END_MINUTE = 14 * 60 + 59;
-/** Last weekday × time grid row starts here (14:30–15:00; Tuesday column inactive). */
-export const NINE_FIFTEEN_MID_GRID_LAST_SLOT_START = 14 * 60 + 30;
-export const NINE_FIFTEEN_MID_GRID_LAST_SLOT_END = 15 * 60;
-/**
- * A mid-session trade is held until the target or stop prints, or until this cut-off — whichever
- * comes first. Tuesdays are squared off early, so a Tuesday signal whose entry bar would start at
- * or after 14:00 is never taken.
- */
-export const NINE_FIFTEEN_MID_DEADLINE_MINUTE = SESSION_CLOSE_MINUTES;
-export const NINE_FIFTEEN_MID_DEADLINE_MINUTE_TUESDAY = 14 * 60;
 
 /**
  * Every scalable threshold in the engine, resolved once per index. Threaded explicitly rather
@@ -243,6 +193,7 @@ interface IndexPoints {
   backtestTarget20: number;
   backtestTarget15: number;
   backtestTarget10: number;
+  backtestTarget8: number;
   backtestTarget5: number;
   followMinAbsDiff: number;
   nearMissMinAbsDiff: number;
@@ -255,16 +206,6 @@ interface IndexPoints {
   breakoutStopNearMiss: number;
   /** Flat target on the index's own weekly expiry day. */
   breakoutExpiryDayTarget: number;
-  midSignalMove: number;
-  midSignalMove20: number;
-  midSignalMove15: number;
-  midSignalMove10: number;
-  midTarget: number;
-  midStop: number;
-  /** Same order as `NINE_FIFTEEN_MID_STOP_LEVELS`, whose literals stay the record keys. */
-  midStopLevels: number[];
-  midTwoCandleMove: number;
-  midExhaustionMove: number;
   indexTarget20: number;
   indexTarget15: number;
   consolidatedAltMain1: number;
@@ -294,8 +235,9 @@ function buildIndexPoints(profile: IndexProfile): IndexPoints {
     scale,
     backtestTarget25: at(NINE_FIFTEEN_BACKTEST_TARGET_25),
     backtestTarget20: at(NINE_FIFTEEN_BACKTEST_TARGET_20),
-    backtestTarget15: at(NINE_FIFTEEN_BACKTEST_TARGET_15),
-    backtestTarget10: at(NINE_FIFTEEN_BACKTEST_TARGET_10),
+    backtestTarget15: at(NINE_SIXTEEN_HYBRID_INDEX_TARGET_RED_CONFIRM),
+    backtestTarget10: at(NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_GAP),
+    backtestTarget8: at(NINE_FIFTEEN_BACKTEST_TARGET_8),
     backtestTarget5: at(NINE_FIFTEEN_BACKTEST_TARGET_5),
     followMinAbsDiff: at(NINE_FIFTEEN_FOLLOW_MIN_ABS_DIFF),
     nearMissMinAbsDiff: at(NINE_FIFTEEN_NEAR_MISS_MIN_ABS_DIFF),
@@ -307,15 +249,6 @@ function buildIndexPoints(profile: IndexProfile): IndexPoints {
     breakoutStopMain: at(NINE_FIFTEEN_BREAKOUT_STOP_MAIN),
     breakoutStopNearMiss: at(NINE_FIFTEEN_BREAKOUT_STOP_NEAR_MISS),
     breakoutExpiryDayTarget: at(NINE_FIFTEEN_BREAKOUT_TUESDAY_TARGET),
-    midSignalMove: at(NINE_FIFTEEN_MID_SIGNAL_MOVE),
-    midSignalMove20: at(NINE_FIFTEEN_MID_SIGNAL_MOVE_20),
-    midSignalMove15: at(NINE_FIFTEEN_MID_SIGNAL_MOVE_15),
-    midSignalMove10: at(NINE_FIFTEEN_MID_SIGNAL_MOVE_10),
-    midTarget: at(NINE_FIFTEEN_MID_TARGET),
-    midStop: at(NINE_FIFTEEN_MID_STOP),
-    midStopLevels: NINE_FIFTEEN_MID_STOP_LEVELS.map((stop) => at(stop)),
-    midTwoCandleMove: at(NINE_FIFTEEN_MID_TWO_CANDLE_MOVE),
-    midExhaustionMove: at(NINE_FIFTEEN_MID_EXHAUSTION_MOVE),
     indexTarget20: at(NINE_SIXTEEN_INDEX_TARGET_20),
     indexTarget15: at(NINE_SIXTEEN_INDEX_TARGET_15),
     consolidatedAltMain1: at(NINE_FIFTEEN_CONSOL_ALT_MAIN_T1),
@@ -338,11 +271,6 @@ function buildIndexPoints(profile: IndexProfile): IndexPoints {
   };
 }
 
-function midDeadlineMinuteForDate(dateKey: string, profile: IndexProfile): number {
-  return isExpiryWeekday(dateKey, profile)
-    ? NINE_FIFTEEN_MID_DEADLINE_MINUTE_TUESDAY
-    : NINE_FIFTEEN_MID_DEADLINE_MINUTE;
-}
 
 function isExpiryWeekday(dateKey: string, profile: IndexProfile): boolean {
   return formatWeekdayFromDateKey(dateKey) === profile.expiryWeekday;
@@ -384,11 +312,12 @@ function isEntryBasedFollowTarget(targetPoints: number, points: IndexPoints): bo
 const NINE_FIFTEEN_RSI_PERIOD = 14;
 /** Default calendar days requested (~1y NSE sessions). */
 export const NINE_FIFTEEN_DEFAULT_HISTORY_DAYS = 365;
-/** Calendar lookback ceiling — wide enough for ~1y of weekday sessions + holiday buffer. */
+/** Max NSE sessions the backtest page can slice (2 years). */
+export const NINE_FIFTEEN_BACKTEST_MAX_SESSIONS = NSE_SESSIONS_ONE_YEAR * 2;
+/** Calendar lookback ceiling — wide enough for 2y of weekday sessions + holiday buffer. */
 export const NINE_FIFTEEN_MAX_HISTORY_DAYS =
-  Math.ceil(NSE_SESSIONS_ONE_YEAR * (365 / NSE_SESSIONS_ONE_YEAR)) + 120;
-const ONE_YEAR_SESSION_ROWS = NSE_SESSIONS_ONE_YEAR;
-/** Minimum 1-min bars in session (9:15–15:30) to count as a full Kite trading day. */
+  Math.ceil(NINE_FIFTEEN_BACKTEST_MAX_SESSIONS * (365 / NSE_SESSIONS_ONE_YEAR)) + 120;
+
 const MIN_SESSION_MINUTE_BARS = 330;
 const TIME_CHECKPOINTS: { label: NineFifteenTimeCheckpoint; minutes: number }[] = [
   { label: "9:30", minutes: 9 * 60 + 30 },
@@ -617,6 +546,28 @@ function makeTargetHitFromKiteBar(
     timeIst: formatIstHms(c.mins * 60),
     levelLabel,
     indexPrice,
+  };
+}
+
+/** At 10:00 IST open: how many index points still needed to reach entry ± target. */
+function computeTargetGapAt1000(
+  entryPx: number,
+  indexAt1000: number | null | undefined,
+  tradeSide: "CE" | "PE",
+  targetPoints: number,
+): NineFifteenTargetGapAtCheckpoint | null {
+  if (indexAt1000 == null || !Number.isFinite(indexAt1000)) return null;
+  const targetIndexPrice =
+    tradeSide === "CE" ? entryPx + targetPoints : entryPx - targetPoints;
+  const pointsFromTarget =
+    tradeSide === "PE"
+      ? Math.max(0, indexAt1000 - targetIndexPrice)
+      : Math.max(0, targetIndexPrice - indexAt1000);
+  return {
+    checkpointIst: "10:00:00",
+    indexPrice: indexAt1000,
+    targetIndexPrice,
+    pointsFromTarget,
   };
 }
 
@@ -1250,10 +1201,13 @@ function buildRowsFromMinuteMap(
     const dayLevels = buildDayLevelFlags(bar915.open, sessionHigh, sessionLow, points);
     const checkpoints = buildCheckpointSnapshots(bar915.open, sessionCandles, points);
     const bar916 = sessionCandles.find((c) => c.mins === SESSION_ENTRY_MINUTES);
+    const bar1000 = sessionCandles.find((c) => c.mins === 10 * 60);
     const entryAtLive916 = bar916 ? kiteEntryAt916Open(bar916) : null;
     const entryPx = entryAtLive916?.indexPrice ?? bar915.open;
     const hit25 = firstTargetHitsFromKite(entryPx, sessionCandles, points.backtestTarget25);
     const hit15 = firstTargetHitsFromKite(entryPx, sessionCandles, points.backtestTarget15);
+    const hit10 = firstTargetHitsFromKite(entryPx, sessionCandles, points.backtestTarget10);
+    const hit8 = firstTargetHitsFromKite(entryPx, sessionCandles, points.backtestTarget8);
     const tieredMain = tieredIndexTargetHitsFromKite(entryPx, sessionCandles, points);
     const tieredConsolidatedAltMain = tieredIndexTargetHitsFromKiteWithTiers(
       entryPx,
@@ -1454,6 +1408,10 @@ function buildRowsFromMinuteMap(
       firstHitDown25: hit25.down,
       firstHitUp15: hit15.up,
       firstHitDown15: hit15.down,
+      firstHitUp10: hit10.up,
+      firstHitDown10: hit10.down,
+      firstHitUp8: hit8.up,
+      firstHitDown8: hit8.down,
       tiered25Then20Then15Up: tieredMain.up,
       tiered25Then20Then15Down: tieredMain.down,
       tieredConsolidatedAltMainUp: tieredConsolidatedAltMain.up,
@@ -1500,6 +1458,7 @@ function buildRowsFromMinuteMap(
       switch25Then15After1101Down: switch25_15.down,
       rsi915: rsi915 != null ? Number(rsi915.toFixed(2)) : null,
       rsi916: rsi916 != null ? Number(rsi916.toFixed(2)) : null,
+      indexOpenAt1000: bar1000?.open ?? null,
       breakoutStopHit,
       breakoutTuesdayTargetHit,
       breakoutStopPoints,
@@ -1526,10 +1485,16 @@ function buildLevelSummary(
   });
 }
 
+/** Session summary bucket for the 9:15 Kite bar — small bodies count as flat. */
+function summary915CloseBucket(row: NineFifteenCandleRow): NineFifteenDirection {
+  if (Math.abs(row.change) + 1e-9 < NINE_SIXTEEN_MIN_915_ABS_DIFF) return "flat";
+  return row.direction;
+}
+
 function buildSummary(rows: NineFifteenCandleRow[]) {
-  const up = rows.filter((row) => row.direction === "up").length;
-  const down = rows.filter((row) => row.direction === "down").length;
-  const flat = rows.filter((row) => row.direction === "flat").length;
+  const up = rows.filter((row) => summary915CloseBucket(row) === "up").length;
+  const down = rows.filter((row) => summary915CloseBucket(row) === "down").length;
+  const flat = rows.filter((row) => summary915CloseBucket(row) === "flat").length;
   const total = rows.length;
   return {
     total,
@@ -1693,6 +1658,11 @@ function buildTradeDayDetail(
     );
   }
 
+  const targetGapAt1000 =
+    entryPx != null
+      ? computeTargetGapAt1000(entryPx, row.indexOpenAt1000, tradeSide, targetPoints)
+      : null;
+
   return {
     date: row.date,
     side: tradeSide,
@@ -1716,6 +1686,7 @@ function buildTradeDayDetail(
     altTarget10After1010,
     rsi915: row.rsi915 ?? null,
     rsi916: row.rsi916 ?? null,
+    targetGapAt1000,
   };
 }
 
@@ -1892,28 +1863,6 @@ export function computeFollowBandFilterStats(
   };
 }
 
-function buildNearMissFollowStats(
-  rows: NineFifteenCandleRow[],
-  points: IndexPoints,
-  targetPoints = points.nearMissTarget,
-): NineFifteenCePeStrategyStats {
-  const bandRows = followBandTakenRows(
-    rows,
-    points.nearMissMinAbsDiff,
-    points.nearMissMaxAbsDiff,
-  );
-  return strategyStats(
-    `Near-miss band: UP→CE, DOWN→PE (${points.nearMissMinAbsDiff} ≤ |9:15 Δ| < ${points.nearMissMaxAbsDiff}, ±${points.nearMissTarget} until 10:01 then ±${points.nearMissTargetAfter} from 9:16 open)`,
-    rows,
-    bandRows,
-    "MIXED",
-    "follow",
-    targetPoints,
-    points,
-    isEntryBasedFollowTarget(targetPoints, points),
-  );
-}
-
 /** Live dual-band: |Δ| ≥ 15 → main exits; 11 ≤ |Δ| < 15 → near-miss exits. */
 function liveExitModeForRow(
   row: NineFifteenCandleRow,
@@ -2057,96 +2006,18 @@ function consolidatedDisplayTargetForBand(
   return variant === "tighter" ? points.consolidatedAltMain1 : points.followBacktestTarget;
 }
 
-function consolidatedFilterTitle(
-  points: IndexPoints,
-  profile: IndexProfile,
-  variant: ConsolidatedExitVariant,
-): string {
-  const expiry = expiryWeekdayShort(profile);
-  const expiryFlat = formatPtsLabel(points.breakoutExpiryDayTarget);
-  if (variant === "tighter") {
-    const m1 = formatPtsLabel(points.consolidatedAltMain1);
-    const m2 = formatPtsLabel(points.consolidatedAltMain2);
-    const m3 = formatPtsLabel(points.consolidatedAltMain3);
-    const n1 = formatPtsLabel(points.consolidatedAltNear1);
-    const n2 = formatPtsLabel(points.consolidatedAltNear2);
-    return (
-      `Live bot (consolidated · tighter): |Δ| ≥ ${points.followMinAbsDiff} · main ±${m1}→±${m2}@10:01→±${m3}@11:01 · ` +
-      `${points.nearMissMinAbsDiff} ≤ |Δ| < ${points.nearMissMaxAbsDiff} · near-miss ±${n1}→±${n2}@10:01 · ${expiry} ±${expiryFlat} flat · UP→CE, DOWN→PE`
-    );
-  }
-  if (variant === "flat50_40" || variant === "flat40_30" || variant === "flat30_20") {
-    const targets = flatTargetsForVariant(variant, points);
-    const m = formatPtsLabel(targets.main);
-    const n = formatPtsLabel(targets.near);
-    return (
-      `Live bot (consolidated · flat): |Δ| ≥ ${points.followMinAbsDiff} · main ±${m} flat · ` +
-      `${points.nearMissMinAbsDiff} ≤ |Δ| < ${points.nearMissMaxAbsDiff} · near-miss ±${n} flat · ${expiry} ±${expiryFlat} flat · UP→CE, DOWN→PE`
-    );
-  }
-  return (
-    `Live bot (consolidated): |Δ| ≥ ${points.followMinAbsDiff} · main ±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01 · ` +
-    `${points.nearMissMinAbsDiff} ≤ |Δ| < ${points.nearMissMaxAbsDiff} · near-miss ±${points.nearMissTarget}→±${points.nearMissTargetAfter}@10:01 · ${expiry} ±${expiryFlat} flat · UP→CE, DOWN→PE`
-  );
-}
-
-function liveConsolidatedTakenRows(
+function liveConsolidatedBandRows(
   rows: NineFifteenCandleRow[],
   points: IndexPoints,
 ): NineFifteenCandleRow[] {
   return rows.filter((row) => liveExitModeForRow(row, points) != null);
 }
 
-function liveConsolidatedHit(
-  row: NineFifteenCandleRow,
+function liveConsolidatedTakenRows(
+  rows: NineFifteenCandleRow[],
   points: IndexPoints,
-  profile: IndexProfile,
-  variant: ConsolidatedExitVariant = "default",
-): boolean {
-  const mode = liveExitModeForRow(row, points);
-  if (!mode) return false;
-  const tradeSide: "CE" | "PE" = row.direction === "down" ? "PE" : "CE";
-  return consolidatedTargetHitForRow(row, mode, tradeSide, variant, profile) != null;
-}
-
-function buildLiveConsolidatedTradeDayDetail(
-  row: NineFifteenCandleRow,
-  points: IndexPoints,
-  profile: IndexProfile,
-  variant: ConsolidatedExitVariant = "default",
-): NineFifteenCePeFailureTrade {
-  const mode = liveExitModeForRow(row, points)!;
-  const targetPoints = consolidatedDisplayTargetForBand(row.date, mode, variant, points, profile);
-  const tradeSide = failureSideForRow(row, "MIXED");
-  const targetHit = consolidatedTargetHitForRow(row, mode, tradeSide, variant, profile);
-  const entryPx = entryIndexPrice(row);
-  const base = buildTradeDayDetail(row, targetPoints, "MIXED", points);
-  return {
-    ...base,
-    targetPoints,
-    targetHit,
-    targetHitAt: targetHit?.timeIst ?? null,
-    exitTargetIndexPrice:
-      entryPx != null
-        ? tradeSide === "CE"
-          ? entryPx + targetPoints
-          : entryPx - targetPoints
-        : null,
-    winConfirmed: targetHit != null,
-  };
-}
-
-function liveConsolidatedCheckpointHit(
-  row: NineFifteenCandleRow,
-  checkpoint: NineFifteenTimeCheckpoint,
-  points: IndexPoints,
-  profile: IndexProfile,
-  variant: ConsolidatedExitVariant = "default",
-): boolean {
-  const mode = liveExitModeForRow(row, points);
-  if (!mode) return false;
-  const targetPoints = consolidatedDisplayTargetForBand(row.date, mode, variant, points, profile);
-  return checkpointHit(row, checkpoint, targetPoints, "follow", points);
+): NineFifteenCandleRow[] {
+  return liveConsolidatedBandRows(rows, points).filter(is916SameColorConfirmOpen);
 }
 
 function targetPointsForLiveMode(mode: "main" | "near_miss", points: IndexPoints): number {
@@ -2212,7 +2083,7 @@ function buildBreakoutTrade(
   };
 }
 
-function buildBreakoutStats(
+export function buildBreakoutStats(
   rows: NineFifteenCandleRow[],
   config: BreakoutStopConfig,
   stopHitForRow: (row: NineFifteenCandleRow) => NineFifteenTargetHit | null,
@@ -2487,11 +2358,6 @@ interface NiftyConfirm917Bands {
 
 const NIFTY_CONFIRM917_BANDS_30: NiftyConfirm917Bands = {
   main915: NIFTY_CONFIRM917_MAIN915,
-  main916: NIFTY_CONFIRM917_MAIN916,
-};
-
-const NIFTY_CONFIRM917_BANDS_11: NiftyConfirm917Bands = {
-  main915: NIFTY_CONFIRM917_MAIN915_ALT,
   main916: NIFTY_CONFIRM917_MAIN916,
 };
 
@@ -2790,94 +2656,6 @@ export function computeCustom60ConsolidatedFilterStats(
       takenLabel: `Trades taken (|Δ| ≥ ${points.liveMinAbsDiff})`,
       skippedLabel: `Skipped (|Δ| < ${points.liveMinAbsDiff})`,
     },
-  };
-}
-
-export function computeLiveConsolidatedFilterStats(
-  rows: NineFifteenCandleRow[],
-  points: IndexPoints,
-  profile: IndexProfile,
-  variant: ConsolidatedExitVariant = "default",
-): NineFifteenFollowFilterStats {
-  const followRows = rows.filter((row) => row.direction === "up" || row.direction === "down");
-  const filtered = liveConsolidatedTakenRows(rows, points);
-  const wins = filtered.filter((row) => liveConsolidatedHit(row, points, profile, variant)).length;
-  const filteredTrades = filtered.length;
-  return {
-    minAbsDiff: points.liveMinAbsDiff,
-    targetPoints: points.followBacktestTarget,
-    totalFollowTrades: followRows.length,
-    filteredTrades,
-    wins,
-    losses: filteredTrades - wins,
-    winPct: filteredTrades > 0 ? (wins / filteredTrades) * 100 : 0,
-    skippedSmallBar: followRows.length - filteredTrades,
-    display: {
-      filterTitle: consolidatedFilterTitle(points, profile, variant),
-      takenLabel: `Trades taken (|Δ| ≥ ${points.liveMinAbsDiff})`,
-      skippedLabel: `Skipped (|Δ| < ${points.liveMinAbsDiff})`,
-    },
-  };
-}
-
-function buildLiveConsolidatedFollowStats(
-  rows: NineFifteenCandleRow[],
-  points: IndexPoints,
-  profile: IndexProfile,
-  variant: ConsolidatedExitVariant = "default",
-): NineFifteenCePeStrategyStats {
-  const taken = liveConsolidatedTakenRows(rows, points);
-  const tradeDays = taken.length;
-  const sampleDays = rows.length;
-  const successes = taken
-    .filter((row) => liveConsolidatedHit(row, points, profile, variant))
-    .map((row) => buildLiveConsolidatedTradeDayDetail(row, points, profile, variant))
-    .sort((a, b) => b.date.localeCompare(a.date));
-  const failures = taken
-    .filter((row) => !liveConsolidatedHit(row, points, profile, variant))
-    .map((row) => buildLiveConsolidatedTradeDayDetail(row, points, profile, variant))
-    .sort((a, b) => b.date.localeCompare(a.date));
-  const targetHits = successes.length;
-
-  const checkpointHits = {} as NineFifteenCePeStrategyStats["checkpointHits"];
-  for (const cp of NINE_FIFTEEN_TIME_CHECKPOINTS) {
-    const hits = taken.filter((row) =>
-      liveConsolidatedCheckpointHit(row, cp, points, profile, variant),
-    ).length;
-    checkpointHits[cp] = {
-      targetHits: hits,
-      targetHitPct: tradeDays > 0 ? (hits / tradeDays) * 100 : 0,
-    };
-  }
-
-  const label =
-    variant === "tighter"
-      ? `Live consolidated (tighter): UP→CE, DOWN→PE · |Δ|≥${points.followMinAbsDiff} ±${formatPtsLabel(points.consolidatedAltMain1)}→±${formatPtsLabel(points.consolidatedAltMain2)}@10:01→±${formatPtsLabel(points.consolidatedAltMain3)}@11:01 · ` +
-        `${points.nearMissMinAbsDiff}≤|Δ|<${points.nearMissMaxAbsDiff} ±${formatPtsLabel(points.consolidatedAltNear1)}→±${formatPtsLabel(points.consolidatedAltNear2)}@10:01 · ` +
-        `${expiryWeekdayShort(profile)} ±${formatPtsLabel(points.breakoutExpiryDayTarget)} from 9:16 (from 9:16 open)`
-      : variant === "flat50_40" || variant === "flat40_30" || variant === "flat30_20"
-        ? (() => {
-            const flat = flatTargetsForVariant(variant, points);
-            return (
-              `Live consolidated (flat ±${formatPtsLabel(flat.main)}/±${formatPtsLabel(flat.near)}): UP→CE, DOWN→PE · |Δ|≥${points.followMinAbsDiff} main ±${formatPtsLabel(flat.main)} flat · ` +
-              `${points.nearMissMinAbsDiff}≤|Δ|<${points.nearMissMaxAbsDiff} near ±${formatPtsLabel(flat.near)} flat · ` +
-              `${expiryWeekdayShort(profile)} ±${formatPtsLabel(points.breakoutExpiryDayTarget)} from 9:16`
-            );
-          })()
-        : `Live consolidated: UP→CE, DOWN→PE · |Δ|≥${points.followMinAbsDiff} ±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01 · ` +
-          `${points.nearMissMinAbsDiff}≤|Δ|<${points.nearMissMaxAbsDiff} ±${points.nearMissTarget}→±${points.nearMissTargetAfter}@10:01 · ` +
-          `${expiryWeekdayShort(profile)} ±${points.breakoutExpiryDayTarget} from 9:16 (from 9:16 open)`;
-
-  return {
-    label,
-    side: "MIXED",
-    sampleDays,
-    tradeDays,
-    targetHits,
-    targetHitPct: tradeDays > 0 ? (targetHits / tradeDays) * 100 : 0,
-    checkpointHits,
-    failures,
-    successes,
   };
 }
 
@@ -3211,13 +2989,14 @@ function buildRedPeMainTradeDayDetail(
   };
 }
 
-export function buildLiveRedPeMainFollowStats(
+function buildLiveRedPeFollowStats(
   rows: NineFifteenCandleRow[],
+  taken: NineFifteenCandleRow[],
+  label: string,
   points: IndexPoints,
   profile: IndexProfile,
   variant: ConsolidatedExitVariant = "default",
 ): NineFifteenCePeStrategyStats {
-  const taken = liveRedPeMainRows(rows, points);
   const tradeDays = taken.length;
   const successes = taken
     .filter((row) => liveRedPeMainHit(row, profile, variant))
@@ -3244,11 +3023,6 @@ export function buildLiveRedPeMainFollowStats(
     };
   }
 
-  const expiry = expiryWeekdayShort(profile);
-  const label =
-    `Red 9:15 · |Δ|≥${points.followMinAbsDiff} → PE @ 9:16 · main-band exits ` +
-    `(±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01 · ${expiry} ±${points.breakoutExpiryDayTarget} flat)`;
-
   return {
     label,
     side: "PE",
@@ -3260,6 +3034,48 @@ export function buildLiveRedPeMainFollowStats(
     failures,
     successes,
   };
+}
+
+export function buildLiveRedPeMainFollowStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+): NineFifteenCePeStrategyStats {
+  const expiry = expiryWeekdayShort(profile);
+  const label =
+    `Red 9:15 · |Δ|≥${points.followMinAbsDiff} → PE @ 9:16 · main-band exits ` +
+    `(±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01 · ${expiry} ±${points.breakoutExpiryDayTarget} flat)`;
+  return buildLiveRedPeFollowStats(
+    rows,
+    liveRedPeMainRows(rows, points),
+    label,
+    points,
+    profile,
+    variant,
+  );
+}
+
+export function buildLiveRedPeMain916ConfirmFollowStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+  byDate?: MinuteCandlesByDate,
+): NineFifteenCePeStrategyStats {
+  const label =
+    `Red 9:15 · |Δ|≥${points.followMinAbsDiff} → PE @ 9:16 · flat −${points.backtestTarget15} (both red) · flat −${points.backtestTarget10} (green gap @ 9:16)`;
+  const taken = liveRedPe916HybridRows(rows, points);
+  return buildLiveRedPe916HybridFollowStats(
+    rows,
+    taken,
+    label,
+    points,
+    points.backtestTarget10,
+    profile,
+    variant,
+    byDate,
+  );
 }
 
 export function computeLiveRedPeMainFilterStats(
@@ -3291,53 +3107,338 @@ export function computeLiveRedPeMainFilterStats(
   };
 }
 
-/** Red 9:15 body strictly above this many index points (open→close). */
-export const LIVE_RED_PE_BODY10_MIN = 10;
-
-/** Red 9:15 candle with |open−close| > 10 — PE entry @ 9:16. */
-function liveRedPeBody10Rows(rows: NineFifteenCandleRow[]): NineFifteenCandleRow[] {
-  return rows.filter(
-    (row) => row.direction === "down" && Math.abs(row.change) > LIVE_RED_PE_BODY10_MIN,
-  );
+export function computeLiveRedPeMain916ConfirmFilterStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  _profile: IndexProfile,
+  _variant: ConsolidatedExitVariant = "default",
+): NineFifteenFollowFilterStats {
+  const redDays = rows.filter((row) => row.direction === "down");
+  const sizeFiltered = liveRedPeMainRows(rows, points);
+  const filtered = liveRedPe916HybridRows(rows, points);
+  const wins = filtered.filter((row) => liveRedPe916HybridHit(row, points.backtestTarget10, points)).length;
+  const filteredTrades = filtered.length;
+  const redConfirmFlat15Trades = filtered.filter(is916RedConfirmOpen).length;
+  const greenGapFlat10Trades = filtered.filter(is916GreenGapAtOpen).length;
+  return {
+    minAbsDiff: points.followMinAbsDiff,
+    targetPoints: points.followBacktestTarget,
+    totalFollowTrades: redDays.length,
+    filteredTrades,
+    wins,
+    losses: filteredTrades - wins,
+    winPct: filteredTrades > 0 ? (wins / filteredTrades) * 100 : 0,
+    skippedSmallBar: redDays.length - sizeFiltered.length,
+    redConfirmFlat15Trades,
+    greenGapFlat10Trades,
+    display: {
+      filterTitle:
+        `Red 9:15 · |Δ| ≥ ${points.followMinAbsDiff} · PE @ 9:16 · flat −${points.backtestTarget15} (both red) · flat −${points.backtestTarget10} (green gap @ 9:16)`,
+      takenLabel: `Trades taken (red · |Δ| ≥ ${points.followMinAbsDiff})`,
+      skippedLabel: `Skipped red days (|Δ| < ${points.followMinAbsDiff})`,
+      redConfirmLabel: `9:16 open ≤ 9:15 close (flat −${points.backtestTarget15} from 9:16)`,
+      greenGapLabel: `9:16 green gap (flat −${points.backtestTarget10} from 9:16)`,
+    },
+  };
 }
 
-export function buildLiveRedPeBody10FollowStats(
+function liveRedPe916BothRedRows(rows: NineFifteenCandleRow[], points: IndexPoints): NineFifteenCandleRow[] {
+  return liveRedPe916HybridRows(rows, points).filter(is916RedConfirmOpen);
+}
+
+export function buildLiveRedPeMain916BothRedFollowStats(
   rows: NineFifteenCandleRow[],
   points: IndexPoints,
   profile: IndexProfile,
   variant: ConsolidatedExitVariant = "default",
+  byDate?: MinuteCandlesByDate,
 ): NineFifteenCePeStrategyStats {
-  const taken = liveRedPeBody10Rows(rows);
+  const label =
+    `Red 9:15 · |Δ|≥${points.followMinAbsDiff} · PE @ 9:16 · both red only (9:16 open ≤ 9:15 close) · flat −${points.backtestTarget15}`;
+  const taken = liveRedPe916BothRedRows(rows, points);
+  return buildLiveRedPe916HybridFollowStats(
+    rows,
+    taken,
+    label,
+    points,
+    points.backtestTarget10,
+    profile,
+    variant,
+    byDate,
+  );
+}
+
+export function computeLiveRedPeMain916BothRedFilterStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  _profile: IndexProfile,
+  _variant: ConsolidatedExitVariant = "default",
+): NineFifteenFollowFilterStats {
+  const redDays = rows.filter((row) => row.direction === "down");
+  const sizeFiltered = liveRedPeMainRows(rows, points);
+  const hybridAll = liveRedPe916HybridRows(rows, points);
+  const filtered = liveRedPe916BothRedRows(rows, points);
+  const wins = filtered.filter((row) => row.firstHitDown15 != null).length;
+  const filteredTrades = filtered.length;
+  return {
+    minAbsDiff: points.followMinAbsDiff,
+    targetPoints: points.backtestTarget15,
+    totalFollowTrades: redDays.length,
+    filteredTrades,
+    wins,
+    losses: filteredTrades - wins,
+    winPct: filteredTrades > 0 ? (wins / filteredTrades) * 100 : 0,
+    skippedSmallBar: redDays.length - sizeFiltered.length,
+    skipped916Confirm: hybridAll.length - filteredTrades,
+    redConfirmFlat15Trades: filteredTrades,
+    display: {
+      filterTitle:
+        `Red 9:15 · |Δ| ≥ ${points.followMinAbsDiff} · PE @ 9:16 · both red only · flat −${points.backtestTarget15}`,
+      takenLabel: `Trades taken (both red · |Δ| ≥ ${points.followMinAbsDiff})`,
+      skippedLabel: `Skipped red days (|Δ| < ${points.followMinAbsDiff})`,
+      skipped916Label: `Excluded (9:16 open > 9:15 close · green second candle)`,
+      redConfirmLabel: `Both red confirm (flat −${points.backtestTarget15} from 9:16)`,
+    },
+  };
+}
+
+/** Red 9:15 body strictly above this many index points (open→close). */
+export const LIVE_RED_PE_BODY10_MIN = 10;
+
+/**
+ * Red second-candle confirm: skip only when 9:16 gaps up above the 9:15 close (green at open).
+ * Example — 9:15 close 23,960 → enter when 9:16 open ≤ 23,960; skip when open > 23,960.
+ * (Requiring a fixed 0.1-pt gap filtered every day because Kite 9:16 open ≈ 9:15 close.)
+ */
+export function is916RedConfirmOpen(row: NineFifteenCandleRow): boolean {
+  const open916 = row.entryAtLive916?.indexPrice;
+  if (open916 == null || !Number.isFinite(open916)) return false;
+  return open916 <= row.close + 1e-9;
+}
+
+/** Red day where 9:16 gaps up above the 9:15 close (opposite of red confirm). */
+export function is916GreenGapAtOpen(row: NineFifteenCandleRow): boolean {
+  const open916 = row.entryAtLive916?.indexPrice;
+  if (open916 == null || !Number.isFinite(open916)) return false;
+  return open916 > row.close + 1e-9;
+}
+
+function liveRedPeFlatHybridRows(rows: NineFifteenCandleRow[]): NineFifteenCandleRow[] {
+  return rows.filter((row) => is916RedConfirmOpen(row) || is916GreenGapAtOpen(row));
+}
+
+function firstFlatDownHitFromEntry(
+  row: NineFifteenCandleRow,
+  targetPoints: number,
+  points: IndexPoints,
+): NineFifteenTargetHit | null {
+  if (targetPoints === points.backtestTarget15) return row.firstHitDown15 ?? null;
+  if (targetPoints === points.backtestTarget10) return row.firstHitDown10 ?? null;
+  if (targetPoints === points.backtestTarget8) return row.firstHitDown8 ?? null;
+  return null;
+}
+
+function liveRedPe916HybridRows(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+): NineFifteenCandleRow[] {
+  return liveRedPeFlatHybridRows(liveRedPeMainRows(rows, points));
+}
+
+function liveRedPe916HybridHit(row: NineFifteenCandleRow, greenGapTargetPoints: number, points: IndexPoints): boolean {
+  if (is916RedConfirmOpen(row)) return row.firstHitDown15 != null;
+  if (is916GreenGapAtOpen(row)) return firstFlatDownHitFromEntry(row, greenGapTargetPoints, points) != null;
+  return false;
+}
+
+function addCalendarDaysIst(dateKey: string, days: number): string {
+  const d = new Date(`${dateKey}T12:00:00+05:30`);
+  d.setDate(d.getDate() + days);
+  const ist = getIstParts(d);
+  return `${ist.year}-${pad2(ist.month)}-${pad2(ist.day)}`;
+}
+
+/** First expiry weekday strictly after the entry session (Tue entry → next Tue). */
+function nextExpiryTuesdayAfterEntry(entryDateKey: string, profile: IndexProfile): string {
+  let cursor = addCalendarDaysIst(entryDateKey, 1);
+  for (let guard = 0; guard < 14; guard += 1) {
+    if (formatWeekdayFromDateKey(cursor) === profile.expiryWeekday) return cursor;
+    cursor = addCalendarDaysIst(cursor, 1);
+  }
+  return cursor;
+}
+
+function listWeekdayDatesBetween(fromDateKey: string, toDateKey: string): string[] {
+  const out: string[] = [];
+  let cursor = fromDateKey;
+  while (cursor <= toDateKey) {
+    const wd = formatWeekdayFromDateKey(cursor);
+    if (wd !== "Saturday" && wd !== "Sunday") out.push(cursor);
+    cursor = addCalendarDaysIst(cursor, 1);
+  }
+  return out;
+}
+
+function nrmlCarryScanWindow(c: MinuteCandle, isDeadlineDay: boolean): boolean {
+  if (c.mins < SESSION_OPEN_MINUTES) return false;
+  const end = isDeadlineDay ? NRML_CARRY_DEADLINE_MINUTES : SESSION_CLOSE_MINUTES;
+  return c.mins <= end;
+}
+
+function firstPeHitInNrmlCarrySession(
+  entryPrice: number,
+  sessionCandles: MinuteCandle[],
+  targetPoints: number,
+  isDeadlineDay: boolean,
+): NineFifteenTargetHit | null {
+  const ordered = [...sessionCandles].sort((a, b) => a.mins - b.mins);
+  for (const c of ordered) {
+    if (!nrmlCarryScanWindow(c, isDeadlineDay)) continue;
+    if (c.low <= entryPrice - targetPoints) {
+      return makeTargetHitFromKiteBar(c, entryPrice, targetPoints, "down");
+    }
+  }
+  return null;
+}
+
+function computeNrmlCarryOutcome(
+  row: NineFifteenCandleRow,
+  targetPoints: number,
+  byDate: MinuteCandlesByDate,
+  profile: IndexProfile,
+): NineFifteenNrmlCarryOutcome | null {
+  const entryPx = entryIndexPrice(row);
+  if (entryPx == null) return null;
+
+  const deadlineDate = nextExpiryTuesdayAfterEntry(row.date, profile);
+  const carryStart = addCalendarDaysIst(row.date, 1);
+  if (carryStart > deadlineDate) return null;
+
+  const dates = listWeekdayDatesBetween(carryStart, deadlineDate);
+  let bestHit: (NineFifteenTargetHit & { date: string }) | null = null;
+  let carryMaxMove = 0;
+  let dataComplete = true;
+
+  for (const date of dates) {
+    const session = byDate.get(date);
+    if (!session || session.length === 0) {
+      dataComplete = false;
+      continue;
+    }
+    const isDeadline = date === deadlineDate;
+    if (!bestHit) {
+      const hit = firstPeHitInNrmlCarrySession(entryPx, session, targetPoints, isDeadline);
+      if (hit) bestHit = { ...hit, date };
+    }
+    for (const c of session) {
+      if (!nrmlCarryScanWindow(c, isDeadline)) continue;
+      const move = entryPx - c.low;
+      if (move > carryMaxMove) carryMaxMove = move;
+    }
+  }
+
+  const deadlineLabel = `${expiryWeekdayShort(profile)} ${deadlineDate} 15:00 IST`;
+  return {
+    deadlineDate,
+    deadlineLabel,
+    wouldWin: bestHit != null,
+    hit: bestHit
+      ? {
+          timeIst: bestHit.timeIst,
+          levelLabel: bestHit.levelLabel,
+          indexPrice: bestHit.indexPrice,
+        }
+      : null,
+    hitDate: bestHit?.date ?? null,
+    maxMoveInDirection: carryMaxMove,
+    dataComplete,
+  };
+}
+
+function flatDownTargetHitByCheckpoint(
+  hit: NineFifteenTargetHit | null | undefined,
+  cp: NineFifteenTimeCheckpoint,
+): boolean {
+  if (!hit) return false;
+  const cpMinutes = TIME_CHECKPOINTS.find((t) => t.label === cp)?.minutes;
+  if (cpMinutes == null) return false;
+  return minutesFromIstTime(hit.timeIst) <= cpMinutes;
+}
+
+function hybrid916CheckpointHit(
+  row: NineFifteenCandleRow,
+  cp: NineFifteenTimeCheckpoint,
+  greenGapTargetPoints: number,
+  points: IndexPoints,
+): boolean {
+  if (is916RedConfirmOpen(row)) return flatDownTargetHitByCheckpoint(row.firstHitDown15, cp);
+  if (is916GreenGapAtOpen(row)) {
+    return flatDownTargetHitByCheckpoint(
+      firstFlatDownHitFromEntry(row, greenGapTargetPoints, points),
+      cp,
+    );
+  }
+  return false;
+}
+
+function buildRedPe916HybridTradeDayDetail(
+  row: NineFifteenCandleRow,
+  points: IndexPoints,
+  greenGapTargetPoints: number,
+): NineFifteenCePeFailureTrade {
+  const side = "PE" as const;
+  const targetPoints = is916RedConfirmOpen(row) ? points.backtestTarget15 : greenGapTargetPoints;
+  const targetHit = is916RedConfirmOpen(row)
+    ? (row.firstHitDown15 ?? null)
+    : firstFlatDownHitFromEntry(row, greenGapTargetPoints, points);
+  const entryPx = entryIndexPrice(row);
+  const base = buildTradeDayDetail(row, targetPoints, side, points);
+  return {
+    ...base,
+    side,
+    targetPoints,
+    targetHit,
+    targetHitAt: targetHit?.timeIst ?? null,
+    exitTargetIndexPrice: entryPx != null ? entryPx - targetPoints : null,
+    winConfirmed: targetHit != null,
+  };
+}
+
+function buildLiveRedPe916HybridFollowStats(
+  rows: NineFifteenCandleRow[],
+  taken: NineFifteenCandleRow[],
+  label: string,
+  points: IndexPoints,
+  greenGapTargetPoints: number,
+  profile: IndexProfile,
+  _variant: ConsolidatedExitVariant = "default",
+  byDate?: MinuteCandlesByDate,
+): NineFifteenCePeStrategyStats {
   const tradeDays = taken.length;
   const successes = taken
-    .filter((row) => liveRedPeMainHit(row, profile, variant))
-    .map((row) => buildRedPeMainTradeDayDetail(row, points, profile, variant))
+    .filter((row) => liveRedPe916HybridHit(row, greenGapTargetPoints, points))
+    .map((row) => buildRedPe916HybridTradeDayDetail(row, points, greenGapTargetPoints))
     .sort((a, b) => b.date.localeCompare(a.date));
   const failures = taken
-    .filter((row) => !liveRedPeMainHit(row, profile, variant))
-    .map((row) => buildRedPeMainTradeDayDetail(row, points, profile, variant))
+    .filter((row) => !liveRedPe916HybridHit(row, greenGapTargetPoints, points))
+    .map((row) => {
+      const detail = buildRedPe916HybridTradeDayDetail(row, points, greenGapTargetPoints);
+      if (!byDate || detail.winConfirmed) return detail;
+      const targetPoints = detail.targetPoints ?? points.backtestTarget15;
+      const nrmlCarry = computeNrmlCarryOutcome(row, targetPoints, byDate, profile);
+      return nrmlCarry ? { ...detail, nrmlCarry } : detail;
+    })
     .sort((a, b) => b.date.localeCompare(a.date));
   const targetHits = successes.length;
 
   const checkpointHits = {} as NineFifteenCePeStrategyStats["checkpointHits"];
   for (const cp of NINE_FIFTEEN_TIME_CHECKPOINTS) {
-    const hits = taken.filter((row) => {
-      const targetPoints = consolidatedDisplayTargetForBand(row.date, "main", variant, points, profile);
-      const snap = row.checkpoints?.[cp];
-      if (!snap) return false;
-      const level = (targetPoints / points.scale) as NineFifteenCePeTarget;
-      return snap.downLevels[level] ?? false;
-    }).length;
+    const hits = taken.filter((row) => hybrid916CheckpointHit(row, cp, greenGapTargetPoints, points)).length;
     checkpointHits[cp] = {
       targetHits: hits,
       targetHitPct: tradeDays > 0 ? (hits / tradeDays) * 100 : 0,
     };
   }
-
-  const expiry = expiryWeekdayShort(profile);
-  const label =
-    `Red 9:15 · |Δ|>${LIVE_RED_PE_BODY10_MIN} → PE @ 9:16 · main-band exits ` +
-    `(±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01 · ${expiry} ±${points.breakoutExpiryDayTarget} flat)`;
 
   return {
     label,
@@ -3352,14 +3453,106 @@ export function buildLiveRedPeBody10FollowStats(
   };
 }
 
+/** Green second-candle confirm: skip only when 9:16 gaps down below the 9:15 close. */
+export function is916GreenConfirmOpen(row: NineFifteenCandleRow): boolean {
+  const open916 = row.entryAtLive916?.indexPrice;
+  if (open916 == null || !Number.isFinite(open916)) return false;
+  return open916 >= row.close - 1e-9;
+}
+
+/** PE when 9:16 open ≤ 9:15 close; CE when 9:16 open ≥ 9:15 close. */
+export function is916SameColorConfirmOpen(row: NineFifteenCandleRow): boolean {
+  if (row.direction === "down") return is916RedConfirmOpen(row);
+  if (row.direction === "up") return is916GreenConfirmOpen(row);
+  return false;
+}
+
+/** Red 9:15 candle with |Δ| > 10 — PE entry @ 9:16. */
+function liveRedPeBody10Rows(rows: NineFifteenCandleRow[]): NineFifteenCandleRow[] {
+  return rows.filter(
+    (row) => row.direction === "down" && Math.abs(row.change) > LIVE_RED_PE_BODY10_MIN,
+  );
+}
+
+export function buildLiveRedPeBody10FollowStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+): NineFifteenCePeStrategyStats {
+  const label =
+    `Red 9:15 · |Δ|>${LIVE_RED_PE_BODY10_MIN} → PE @ 9:16 · flat −${points.backtestTarget15} (both red) · flat −${points.backtestTarget8} (green gap @ 9:16)`;
+  const taken = liveRedPeFlatHybridRows(liveRedPeBody10Rows(rows));
+  return buildLiveRedPe916HybridFollowStats(
+    rows,
+    taken,
+    label,
+    points,
+    points.backtestTarget8,
+    profile,
+    variant,
+  );
+}
+
+export function buildLiveRedPeBody10_916ConfirmFollowStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+): NineFifteenCePeStrategyStats {
+  const expiry = expiryWeekdayShort(profile);
+  const label =
+    `Red 9:15 · |Δ|>${LIVE_RED_PE_BODY10_MIN} · 9:16 open ≤ 9:15 close → PE @ 9:16 · main-band exits ` +
+    `(±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01 · ${expiry} ±${points.breakoutExpiryDayTarget} flat)`;
+  const taken = liveRedPeBody10Rows(rows).filter(is916RedConfirmOpen);
+  return buildLiveRedPeFollowStats(rows, taken, label, points, profile, variant);
+}
+
 export function computeLiveRedPeBody10FilterStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  _profile: IndexProfile,
+  _variant: ConsolidatedExitVariant = "default",
+): NineFifteenFollowFilterStats {
+  const redDays = rows.filter((row) => row.direction === "down");
+  const sizeFiltered = liveRedPeBody10Rows(rows);
+  const filtered = liveRedPeFlatHybridRows(sizeFiltered);
+  const wins = filtered.filter((row) => liveRedPe916HybridHit(row, points.backtestTarget8, points)).length;
+  const filteredTrades = filtered.length;
+  const redConfirmFlat15Trades = filtered.filter(is916RedConfirmOpen).length;
+  const greenGapFlat10Trades = filtered.filter(is916GreenGapAtOpen).length;
+  return {
+    minAbsDiff: LIVE_RED_PE_BODY10_MIN,
+    minAbsDiffExclusive: true,
+    targetPoints: points.followBacktestTarget,
+    totalFollowTrades: redDays.length,
+    filteredTrades,
+    wins,
+    losses: filteredTrades - wins,
+    winPct: filteredTrades > 0 ? (wins / filteredTrades) * 100 : 0,
+    skippedSmallBar: redDays.length - sizeFiltered.length,
+    redConfirmFlat15Trades,
+    greenGapFlat10Trades,
+    display: {
+      filterTitle:
+        `Red 9:15 · |Δ| > ${LIVE_RED_PE_BODY10_MIN} · PE @ 9:16 · flat −${points.backtestTarget15} (both red) · flat −${points.backtestTarget8} (green gap @ 9:16)`,
+      takenLabel: `Trades taken (red · |Δ| > ${LIVE_RED_PE_BODY10_MIN})`,
+      skippedLabel: `Skipped red days (|Δ| ≤ ${LIVE_RED_PE_BODY10_MIN})`,
+      redConfirmLabel: `9:16 open ≤ 9:15 close (flat −${points.backtestTarget15} from 9:16)`,
+      greenGapLabel: `9:16 green gap (flat −${points.backtestTarget8} from 9:16)`,
+    },
+  };
+}
+
+export function computeLiveRedPeBody10_916ConfirmFilterStats(
   rows: NineFifteenCandleRow[],
   points: IndexPoints,
   profile: IndexProfile,
   variant: ConsolidatedExitVariant = "default",
 ): NineFifteenFollowFilterStats {
   const redDays = rows.filter((row) => row.direction === "down");
-  const filtered = liveRedPeBody10Rows(rows);
+  const sizeFiltered = liveRedPeBody10Rows(rows);
+  const filtered = sizeFiltered.filter(is916RedConfirmOpen);
   const wins = filtered.filter((row) => liveRedPeMainHit(row, profile, variant)).length;
   const filteredTrades = filtered.length;
   return {
@@ -3371,40 +3564,17 @@ export function computeLiveRedPeBody10FilterStats(
     wins,
     losses: filteredTrades - wins,
     winPct: filteredTrades > 0 ? (wins / filteredTrades) * 100 : 0,
-    skippedSmallBar: redDays.length - filteredTrades,
+    skippedSmallBar: redDays.length - sizeFiltered.length,
+    skipped916Confirm: sizeFiltered.length - filteredTrades,
     display: {
       filterTitle:
-        `Red 9:15 · |Δ| > ${LIVE_RED_PE_BODY10_MIN} · PE @ 9:16 · main-band exits ` +
+        `Red 9:15 · |Δ| > ${LIVE_RED_PE_BODY10_MIN} · 9:16 open ≤ 9:15 close · PE @ 9:16 · main-band exits ` +
         `(±${points.backtestTarget25}→±${points.indexTarget20}@10:01→±${points.indexTarget15}@11:01)`,
-      takenLabel: `Trades taken (red · |Δ| > ${LIVE_RED_PE_BODY10_MIN})`,
+      takenLabel: `Trades taken (red · |Δ| > ${LIVE_RED_PE_BODY10_MIN} · 9:16 red confirm)`,
       skippedLabel: `Skipped red days (|Δ| ≤ ${LIVE_RED_PE_BODY10_MIN})`,
+      skipped916Label: `Skipped (9:16 open above 9:15 close — green gap at open)`,
     },
   };
-}
-
-function buildLiveConsolidatedFlatVariants(
-  rows: NineFifteenCandleRow[],
-  points: IndexPoints,
-  profile: IndexProfile,
-): NineFifteenConsolidatedFlatVariant[] {
-  const specs: Array<{
-    id: NineFifteenConsolidatedFlatVariant["id"];
-    variant: "flat50_40" | "flat40_30" | "flat30_20";
-  }> = [
-    { id: "flat50_40", variant: "flat50_40" },
-    { id: "flat40_30", variant: "flat40_30" },
-    { id: "flat30_20", variant: "flat30_20" },
-  ];
-  return specs.map(({ id, variant }) => {
-    const targets = flatTargetsForVariant(variant, points);
-    return {
-      id,
-      mainTargetPoints: targets.main,
-      nearTargetPoints: targets.near,
-      follow: buildLiveConsolidatedFollowStats(rows, points, profile, variant),
-      filterStats: computeLiveConsolidatedFilterStats(rows, points, profile, variant),
-    };
-  });
 }
 
 function buildCePeGuideForTarget(
@@ -3563,6 +3733,7 @@ function buildFollowBacktestBlock(
   includeTodaySignal: boolean,
   points: IndexPoints,
   profile: IndexProfile,
+  byDate?: MinuteCandlesByDate,
 ): NineFifteenFollowBacktestBlock {
   const target = points.followBacktestTarget;
   return {
@@ -3576,39 +3747,47 @@ function buildFollowBacktestBlock(
       points.followMinAbsDiff,
       includeTodaySignal,
     ),
-    followFilterStats: computeFollowFilterStats(rows, points, target, points.followMinAbsDiff),
-    nearMissFollow: buildNearMissFollowStats(rows, points, points.nearMissTarget),
-    nearMissFollowFilterStats: computeFollowBandFilterStats(
+    liveRedPeMain916ConfirmFollow: buildLiveRedPeMain916ConfirmFollowStats(
       rows,
-      points,
-      points.nearMissTarget,
-      points.nearMissMinAbsDiff,
-      points.nearMissMaxAbsDiff,
-    ),
-    liveConsolidatedFollow: buildLiveConsolidatedFollowStats(rows, points, profile),
-    liveConsolidatedFilterStats: computeLiveConsolidatedFilterStats(rows, points, profile),
-    liveSmallBodyPutFollow: buildLiveSmallBodyPutFollowStats(rows, points, profile),
-    liveSmallBodyPutFilterStats: computeLiveSmallBodyPutFilterStats(rows, points, profile),
-    liveSmallBodySplitBuckets: buildLiveSmallBodySplitBuckets(rows, points, profile),
-    liveSmallBodyDirectionFollow: buildLiveSmallBodyDirectionFollowStats(rows, points, profile),
-    liveRedPeMainFollow: buildLiveRedPeMainFollowStats(rows, points, profile),
-    liveRedPeMainFilterStats: computeLiveRedPeMainFilterStats(rows, points, profile),
-    liveRedPeBody10Follow: buildLiveRedPeBody10FollowStats(rows, points, profile),
-    liveRedPeBody10FilterStats: computeLiveRedPeBody10FilterStats(rows, points, profile),
-    liveConsolidatedFollowAlt: buildLiveConsolidatedFollowStats(rows, points, profile, "tighter"),
-    liveConsolidatedFilterStatsAlt: computeLiveConsolidatedFilterStats(rows, points, profile, "tighter"),
-    liveConsolidatedFlatVariants: buildLiveConsolidatedFlatVariants(rows, points, profile),
-    niftyConfirm917Follow: buildNiftyConfirm917FollowStats(rows, points, NIFTY_CONFIRM917_BANDS_30),
-    niftyConfirm917FilterStats: computeNiftyConfirm917FilterStats(rows, NIFTY_CONFIRM917_BANDS_30),
-    niftyConfirm917Follow11: buildNiftyConfirm917FollowStats(rows, points, NIFTY_CONFIRM917_BANDS_11),
-    niftyConfirm917FilterStats11: computeNiftyConfirm917FilterStats(rows, NIFTY_CONFIRM917_BANDS_11),
-    breakout: buildBreakoutStats(
-      rows,
-      breakoutStopTight(points),
-      (row) => row.breakoutStopHit ?? null,
       points,
       profile,
+      "default",
+      byDate,
     ),
+    liveRedPeMain916ConfirmFilterStats: computeLiveRedPeMain916ConfirmFilterStats(rows, points, profile),
+    liveRedPeMain916BothRedFollow: buildLiveRedPeMain916BothRedFollowStats(
+      rows,
+      points,
+      profile,
+      "default",
+      byDate,
+    ),
+    liveRedPeMain916BothRedFilterStats: computeLiveRedPeMain916BothRedFilterStats(rows, points, profile),
+  };
+}
+
+/** Recompute backtest stats for the most recent `maxSessions` rows (newest-first order). */
+export function sliceNineFifteenCandlesResult(
+  full: NineFifteenCandlesResult,
+  maxSessions: number,
+  profile: IndexProfile = NIFTY_INDEX_PROFILE,
+): NineFifteenCandlesResult {
+  const cap = Math.max(1, Math.min(Math.round(maxSessions), full.rows.length));
+  const rows = full.rows.slice(0, cap);
+  const points = buildIndexPoints(profile);
+  const block = buildFollowBacktestBlock(rows, false, points, profile);
+  return {
+    ...full,
+    fromDate: rows[rows.length - 1]?.date ?? full.fromDate,
+    toDate: rows[0]?.date ?? full.toDate,
+    rows,
+    summary: buildSummary(rows),
+    nseSessionsOneYear: rows.length,
+    cePeGuide: block.cePeGuide,
+    liveRedPeMain916ConfirmFollow: block.liveRedPeMain916ConfirmFollow,
+    liveRedPeMain916ConfirmFilterStats: block.liveRedPeMain916ConfirmFilterStats,
+    liveRedPeMain916BothRedFollow: block.liveRedPeMain916BothRedFollow,
+    liveRedPeMain916BothRedFilterStats: block.liveRedPeMain916BothRedFilterStats,
   };
 }
 
@@ -3617,7 +3796,7 @@ function buildFollowBacktestBlock(
  * from the 9:16 entry). Skipped days (|Δ| < 11) are kept in the list so the log covers the
  * whole year, but they are excluded from the hit rate.
  */
-function buildTuesdayTenPointStats(
+export function buildTuesdayTenPointStats(
   rows: NineFifteenCandleRow[],
   points: IndexPoints,
   profile: IndexProfile,
@@ -3665,653 +3844,10 @@ function buildTuesdayTenPointStats(
   };
 }
 
-/**
- * Race one mid-session signal from the entry bar to the day's cut-off: whichever of ±target is
- * touched first ends the trade. When a single bar spans both levels the stop is taken, since
- * minute bars cannot say which came first. A trade that reaches the cut-off without printing
- * either level is squared off there and counted as a `timeout` — it never made the target, so
- * the caller scores it as a loss.
- *
- * The scan keeps running past the exit so a winner can report how much further the index went
- * after the target printed — the points that were left on the table.
- */
-function raceMidTrade(
-  side: "CE" | "PE",
-  entryBar: MinuteCandle,
-  sessionCandles: MinuteCandle[],
-  deadlineMinute: number,
-  targetPoints: number,
-  stopPoints: number,
-): Pick<
-  NineFifteenMidTradeRow,
-  | "outcome"
-  | "exitTimeIst"
-  | "minutesToExit"
-  | "maxFavourablePts"
-  | "maxAdversePts"
-  | "timeoutMovePts"
-  | "beyondTargetPts"
-  | "shortOfTargetPts"
-> {
-  const entryPrice = entryBar.open;
-  const target =
-    side === "CE" ? entryPrice + targetPoints : entryPrice - targetPoints;
-  const stop = side === "CE" ? entryPrice - stopPoints : entryPrice + stopPoints;
-
-  let outcome: NineFifteenMidTradeRow["outcome"] = "timeout";
-  let exitBar: MinuteCandle | null = null;
-  let maxFavourable = 0;
-  let maxAdverse = 0;
-  /** Best move in the trade direction while the position was live, ignoring the exit. */
-  let maxFavourableFull = 0;
-  let lastBar: MinuteCandle | null = null;
-  let settled = false;
-
-  for (const c of sessionCandles) {
-    if (c.mins < entryBar.mins || c.mins > deadlineMinute) continue;
-
-    const favourable = side === "CE" ? c.high - entryPrice : entryPrice - c.low;
-    const adverse = side === "CE" ? entryPrice - c.low : c.high - entryPrice;
-    if (favourable > maxFavourableFull) maxFavourableFull = favourable;
-    if (settled) continue;
-
-    lastBar = c;
-    if (favourable > maxFavourable) maxFavourable = favourable;
-    if (adverse > maxAdverse) maxAdverse = adverse;
-
-    const stopTouched = side === "CE" ? c.low <= stop : c.high >= stop;
-    const targetTouched = side === "CE" ? c.high >= target : c.low <= target;
-    if (stopTouched) {
-      outcome = "stop";
-      exitBar = c;
-      settled = true;
-    } else if (targetTouched) {
-      outcome = "target";
-      exitBar = c;
-      settled = true;
-    }
-  }
-
-  // Nothing printed by the cut-off: square off on the last bar we could still trade.
-  if (!settled) exitBar = lastBar;
-  const lastClose = lastBar?.close ?? entryPrice;
-  const timeoutMove = side === "CE" ? lastClose - entryPrice : entryPrice - lastClose;
-
-  return {
-    outcome,
-    exitTimeIst: exitBar ? formatIstHms(exitBar.mins * 60) : null,
-    minutesToExit: exitBar ? exitBar.mins - entryBar.mins : null,
-    maxFavourablePts: Number(Math.max(0, maxFavourable).toFixed(2)),
-    maxAdversePts: Number(Math.max(0, maxAdverse).toFixed(2)),
-    timeoutMovePts: outcome === "timeout" ? Number(timeoutMove.toFixed(2)) : null,
-    beyondTargetPts:
-      outcome === "target"
-        ? Number(Math.max(0, maxFavourableFull - targetPoints).toFixed(2))
-        : null,
-    shortOfTargetPts:
-      outcome === "target"
-        ? null
-        : Number(Math.max(0, targetPoints - maxFavourable).toFixed(2)),
-  };
-}
-
-/**
- * Roll 1-min candles into fixed `barMinutes` blocks anchored on the 9:15 session open, the way
- * Kite builds its own multi-minute candles. `mins` stays the block's first minute so the ±25
- * race can keep scanning the underlying 1-min bars from there.
- */
-function aggregateSessionBars(sessionCandles: MinuteCandle[], barMinutes: number): MinuteCandle[] {
-  if (barMinutes <= 1) return sessionCandles;
-
-  const blocks: MinuteCandle[] = [];
-  let current: MinuteCandle | null = null;
-  let currentStart = -1;
-
-  for (const c of sessionCandles) {
-    const blockStart =
-      SESSION_OPEN_MINUTES +
-      Math.floor((c.mins - SESSION_OPEN_MINUTES) / barMinutes) * barMinutes;
-
-    if (!current || blockStart !== currentStart) {
-      if (current) blocks.push(current);
-      currentStart = blockStart;
-      current = { mins: blockStart, time: c.time, open: c.open, high: c.high, low: c.low, close: c.close };
-      continue;
-    }
-
-    current.high = Math.max(current.high, c.high);
-    current.low = Math.min(current.low, c.low);
-    current.close = c.close;
-  }
-  if (current) blocks.push(current);
-
-  return blocks;
-}
-
-/** Slot height of the weekday × time grid, in minutes. */
-const NINE_FIFTEEN_MID_GRID_SLOT_MINUTES = 30;
-const MID_GRID_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
-
-function emptyMidGridCell(): NineFifteenMidGridCell {
-  return { wins: 0, losses: 0, timedOut: 0, winPct: null, netPoints: 0 };
-}
-
-function addMidTradeToCell(
-  cell: NineFifteenMidGridCell,
-  row: NineFifteenMidTradeRow,
-  targetPoints: number,
-  stopPoints: number,
-): void {
-  if (row.outcome === "target") {
-    cell.wins += 1;
-    cell.netPoints += targetPoints;
-    return;
-  }
-
-  cell.losses += 1;
-  if (row.outcome === "stop") {
-    cell.netPoints -= stopPoints;
-  } else {
-    cell.timedOut += 1;
-    cell.netPoints += row.timeoutMovePts ?? 0;
-  }
-}
-
-function sealMidGridCell(cell: NineFifteenMidGridCell): NineFifteenMidGridCell {
-  const total = cell.wins + cell.losses;
-  cell.winPct = total > 0 ? (cell.wins / total) * 100 : null;
-  cell.netPoints = Number(cell.netPoints.toFixed(2));
-  return cell;
-}
-
-/** "HH:MM:SS" → minutes past midnight. */
-function minutesFromIstHms(hms: string): number {
-  const [h, m] = hms.split(":");
-  return Number(h) * 60 + Number(m);
-}
-
-function formatIstHm(minuteOfDay: number): string {
-  return formatIstHms(minuteOfDay * 60).slice(0, 5);
-}
-
-/**
- * Lay the mid-session trades out as weekday columns × signal-time rows. Every trade lands in
- * exactly one bucket, keyed on the signal bar's start minute, so the row/column totals add back
- * up to the headline counts.
- */
-function buildMidGrid(
-  rows: NineFifteenMidTradeRow[],
-  targetPoints: number,
-  stopPoints: number,
-  profile: IndexProfile,
-): NineFifteenMidGrid {
-  const slot = NINE_FIFTEEN_MID_GRID_SLOT_MINUTES;
-  const gridRows: NineFifteenMidGridRow[] = [];
-
-  for (
-    let start = NINE_FIFTEEN_MID_WINDOW_START_MINUTE;
-    start <= NINE_FIFTEEN_MID_GRID_LAST_SLOT_START;
-    start += slot
-  ) {
-    const slotEnd =
-      start === NINE_FIFTEEN_MID_GRID_LAST_SLOT_START
-        ? NINE_FIFTEEN_MID_GRID_LAST_SLOT_END
-        : start + slot;
-    gridRows.push({
-      fromIst: formatIstHm(start),
-      toIst: formatIstHm(slotEnd),
-      inactiveWeekdays:
-        start === NINE_FIFTEEN_MID_GRID_LAST_SLOT_START ? [profile.expiryWeekday] : undefined,
-      cells: MID_GRID_WEEKDAYS.map(() => emptyMidGridCell()),
-      total: emptyMidGridCell(),
-    });
-  }
-
-  const columnTotals = MID_GRID_WEEKDAYS.map(() => emptyMidGridCell());
-  const total = emptyMidGridCell();
-
-  for (const row of rows) {
-    const weekday = formatWeekdayFromDateKey(row.date);
-    const column = MID_GRID_WEEKDAYS.indexOf(weekday);
-    const slotIndex = Math.floor(
-      (minutesFromIstHms(row.signalTimeIst) - NINE_FIFTEEN_MID_WINDOW_START_MINUTE) / slot,
-    );
-    const gridRow = gridRows[slotIndex];
-    if (column < 0 || !gridRow) continue;
-    if (gridRow.inactiveWeekdays?.includes(weekday)) continue;
-
-    addMidTradeToCell(gridRow.cells[column], row, targetPoints, stopPoints);
-    addMidTradeToCell(gridRow.total, row, targetPoints, stopPoints);
-    addMidTradeToCell(columnTotals[column], row, targetPoints, stopPoints);
-    addMidTradeToCell(total, row, targetPoints, stopPoints);
-  }
-
-  for (const gridRow of gridRows) {
-    gridRow.cells.forEach(sealMidGridCell);
-    sealMidGridCell(gridRow.total);
-  }
-  columnTotals.forEach(sealMidGridCell);
-  sealMidGridCell(total);
-
-  return { slotMinutes: slot, weekdays: MID_GRID_WEEKDAYS, rows: gridRows, columnTotals, total };
-}
-
-/**
- * Mid-session study: every signal bar in 10:00–14:20 IST that travels at least `signalMovePoints`
- * from its own open, entered at the next bar's open and raced to ±`targetPoints`. The race runs on
- * the underlying 1-min candles so exits keep minute resolution. Signals overlap freely — each
- * qualifying bar is counted on its own, so this is a hit rate per signal, not a day P&L.
- *
- * `confirmBars` > 1 demands that many consecutive bars all clear the threshold in the *same*
- * direction before arming, so entry lands on the bar after the run: 2 means candle 1 and candle 2
- * both move, and the trade opens on candle 3.
- *
- * `fade` flips the side: instead of following the run it bets against it, so a green run buys PE
- * and a red run buys CE. Pair it with `signalMovePoints = 0` to run on candle colour alone.
- */
-function buildMidBacktestStats(
-  byDate: MinuteCandlesByDate,
-  allowedDates: Set<string>,
-  targetPoints: number,
-  points: IndexPoints,
-  profile: IndexProfile,
-  barMinutes = NINE_FIFTEEN_MID_BAR_MINUTES,
-  signalMovePoints = points.midSignalMove,
-  stopPoints = points.midStop,
-  confirmBars = 1,
-  fade = false,
-): NineFifteenMidBacktestStats {
-  const rows: NineFifteenMidTradeRow[] = [];
-  const sessionDates: string[] = [];
-  let skippedAfterDeadline = 0;
-
-  for (const [date, candles] of byDate) {
-    if (!allowedDates.has(date)) continue;
-
-    const sessionCandles = [...candles]
-      .filter((c) => c.mins >= SESSION_OPEN_MINUTES && c.mins <= SESSION_CLOSE_MINUTES)
-      .sort((a, b) => a.mins - b.mins);
-    if (!isValidKiteSessionDay(sessionCandles)) continue;
-    sessionDates.push(date);
-
-    const deadlineMinute = midDeadlineMinuteForDate(date, profile);
-    const signalBars = aggregateSessionBars(sessionCandles, barMinutes);
-
-    for (let i = 0; i < signalBars.length; i += 1) {
-      const signal = signalBars[i];
-      if (
-        signal.mins < NINE_FIFTEEN_MID_WINDOW_START_MINUTE ||
-        signal.mins > NINE_FIFTEEN_MID_WINDOW_END_MINUTE
-      ) {
-        continue;
-      }
-      const move = signal.close - signal.open;
-      // A doji has no direction to trade, so it never arms — and it breaks any run it lands in,
-      // since Math.sign(0) can't match the sign of the bars around it.
-      if (move === 0 || Math.abs(move) < signalMovePoints) continue;
-
-      // Momentum confirmation: the bars leading up to this one must all have cleared the
-      // threshold the same way. A run broken by a flat or opposite bar is not a signal.
-      if (confirmBars > 1) {
-        if (i + 1 < confirmBars) continue;
-        let confirmed = true;
-        for (let back = 1; back < confirmBars; back += 1) {
-          const prior = signalBars[i - back];
-          const priorMove = prior.close - prior.open;
-          if (Math.abs(priorMove) < signalMovePoints || Math.sign(priorMove) !== Math.sign(move)) {
-            confirmed = false;
-            break;
-          }
-        }
-        if (!confirmed) continue;
-      }
-
-      const entryBar = signalBars[i + 1];
-      if (!entryBar) continue;
-      // No point entering at or after the day's square-off — there is no time left to trade.
-      if (entryBar.mins >= deadlineMinute) {
-        skippedAfterDeadline += 1;
-        continue;
-      }
-
-      const rising = fade ? move < 0 : move > 0;
-      const side: "CE" | "PE" = rising ? "CE" : "PE";
-      const entryPrice = entryBar.open;
-
-      rows.push({
-        date,
-        signalTimeIst: formatIstHms(signal.mins * 60),
-        signalMovePts: Number(move.toFixed(2)),
-        side,
-        entryTimeIst: formatIstHms(entryBar.mins * 60),
-        entryIndexPrice: Number(entryPrice.toFixed(2)),
-        targetIndexPrice: Number(
-          (side === "CE" ? entryPrice + targetPoints : entryPrice - targetPoints).toFixed(2),
-        ),
-        stopIndexPrice: Number(
-          (side === "CE" ? entryPrice - stopPoints : entryPrice + stopPoints).toFixed(2),
-        ),
-        deadlineIst: formatIstHms(deadlineMinute * 60),
-        ...raceMidTrade(side, entryBar, sessionCandles, deadlineMinute, targetPoints, stopPoints),
-      });
-    }
-  }
-
-  rows.sort(
-    (a, b) => b.date.localeCompare(a.date) || a.signalTimeIst.localeCompare(b.signalTimeIst),
-  );
-
-  // A trade that never printed the target is a loss, whether it was stopped or ran out of time.
-  const wins = rows.filter((row) => row.outcome === "target");
-  const lossRows = rows.filter((row) => row.outcome !== "target");
-  const losses = lossRows.length;
-  const timedOut = rows.filter((row) => row.outcome === "timeout").length;
-  const minutesToTarget = wins
-    .map((row) => row.minutesToExit)
-    .filter((mins): mins is number => mins != null);
-
-  const mean = (values: number[]): number | null =>
-    values.length > 0 ? values.reduce((sum, v) => sum + v, 0) / values.length : null;
-
-  // Target and stop close exactly on their level, so they book ±target. A timed-out trade is
-  // squared off at the cut-off price, so it books whatever it was actually worth there.
-  const pnlPerTrade = rows.map((row) =>
-    row.outcome === "target"
-      ? targetPoints
-      : row.outcome === "stop"
-        ? -stopPoints
-        : (row.timeoutMovePts ?? 0),
-  );
-  const totalProfitPoints = pnlPerTrade.filter((p) => p > 0).reduce((sum, p) => sum + p, 0);
-  const totalLossPoints = pnlPerTrade.filter((p) => p < 0).reduce((sum, p) => sum - p, 0);
-
-  const beyondTarget = wins
-    .map((row) => row.beyondTargetPts)
-    .filter((v): v is number => v != null);
-  const shortOfTarget = lossRows
-    .map((row) => row.shortOfTargetPts)
-    .filter((v): v is number => v != null);
-
-  return {
-    barMinutes,
-    signalMovePoints,
-    targetPoints,
-    stopPoints,
-    windowFromIst: formatIstHms(NINE_FIFTEEN_MID_WINDOW_START_MINUTE * 60),
-    windowToIst: formatIstHms(NINE_FIFTEEN_MID_WINDOW_END_MINUTE * 60),
-    deadlineIst: formatIstHms(NINE_FIFTEEN_MID_DEADLINE_MINUTE * 60),
-    deadlineIstTuesday: formatIstHms(NINE_FIFTEEN_MID_DEADLINE_MINUTE_TUESDAY * 60),
-    sessionsScanned: sessionDates.length,
-    sessionDates: [...sessionDates].sort((a, b) => b.localeCompare(a)),
-    totalSignals: rows.length,
-    skippedAfterDeadline,
-    ceSignals: rows.filter((row) => row.side === "CE").length,
-    peSignals: rows.filter((row) => row.side === "PE").length,
-    wins: wins.length,
-    losses,
-    timedOut,
-    winPct: rows.length > 0 ? (wins.length / rows.length) * 100 : 0,
-    totalProfitPoints: Number(totalProfitPoints.toFixed(2)),
-    totalLossPoints: Number(totalLossPoints.toFixed(2)),
-    netPoints: Number((totalProfitPoints - totalLossPoints).toFixed(2)),
-    avgMinutesToTarget: mean(minutesToTarget),
-    avgBeyondTargetPts: mean(beyondTarget),
-    maxBeyondTargetPts: beyondTarget.length > 0 ? Math.max(...beyondTarget) : null,
-    avgShortOfTargetPts: mean(shortOfTarget),
-    avgMinutesToStop: mean(
-      rows
-        .filter((row) => row.outcome === "stop")
-        .map((row) => row.minutesToExit)
-        .filter((m): m is number => m != null),
-    ),
-    sideTotals: summarizeMidSides(rows, targetPoints, stopPoints),
-    grid: buildMidGrid(rows, targetPoints, stopPoints, profile),
-    runKey: "",
-    rows,
-    avgTradesPerSession:
-      sessionDates.length > 0 ? Number((rows.length / sessionDates.length).toFixed(2)) : 0,
-  };
-}
-
-function midTradePnl(
-  row: NineFifteenMidTradeRow,
-  targetPoints: number,
-  stopPoints: number,
-): number {
-  return row.outcome === "target"
-    ? targetPoints
-    : row.outcome === "stop"
-      ? -stopPoints
-      : (row.timeoutMovePts ?? 0);
-}
-
-function summarizeMidSides(
-  rows: NineFifteenMidTradeRow[],
-  targetPoints: number,
-  stopPoints: number,
-): NineFifteenMidSideSplit {
-  const totals: NineFifteenMidSideSplit = {
-    CE: { wins: 0, losses: 0, netPoints: 0 },
-    PE: { wins: 0, losses: 0, netPoints: 0 },
-  };
-
-  for (const row of rows) {
-    const side = totals[row.side];
-    if (row.outcome === "target") side.wins += 1;
-    else side.losses += 1;
-    side.netPoints += midTradePnl(row, targetPoints, stopPoints);
-  }
-
-  totals.CE.netPoints = Number(totals.CE.netPoints.toFixed(2));
-  totals.PE.netPoints = Number(totals.PE.netPoints.toFixed(2));
-  return totals;
-}
-
-function midSignalThresholdPoints(
-  points: IndexPoints,
-): Record<NineFifteenMidSignalThreshold, number> {
-  return {
-    25: points.midSignalMove,
-    20: points.midSignalMove20,
-    15: points.midSignalMove15,
-    10: points.midSignalMove10,
-  };
-}
-
-/** +10 target at every stop level for each 1-min signal threshold — four blocks of seven runs. */
-function buildMidTp10BySignalAndStop(
-  byDate: MinuteCandlesByDate,
-  midDates: Set<string>,
-  points: IndexPoints,
-  profile: IndexProfile,
-): Record<NineFifteenMidSignalThreshold, Record<NineFifteenMidStopLevel, NineFifteenMidBacktestStats>> {
-  const out = {} as Record<
-    NineFifteenMidSignalThreshold,
-    Record<NineFifteenMidStopLevel, NineFifteenMidBacktestStats>
-  >;
-  const thresholdPoints = midSignalThresholdPoints(points);
-
-  for (const threshold of NINE_FIFTEEN_MID_SIGNAL_THRESHOLDS) {
-    out[threshold] = Object.fromEntries(
-      NINE_FIFTEEN_MID_STOP_LEVELS.map((stop, i) => [
-        stop,
-        buildMidBacktestStats(
-          byDate,
-          midDates,
-          points.backtestTarget10,
-          points,
-          profile,
-          1,
-          thresholdPoints[threshold],
-          points.midStopLevels[i],
-        ),
-      ]),
-    ) as Record<NineFifteenMidStopLevel, NineFifteenMidBacktestStats>;
-  }
-
-  return out;
-}
-
-/** Same ±10 pt 1-min entry as the block above, but take-profit is +5 instead of +10. */
-function buildMidMove10Tp5ByStop(
-  byDate: MinuteCandlesByDate,
-  midDates: Set<string>,
-  points: IndexPoints,
-  profile: IndexProfile,
-): Record<NineFifteenMidStopLevel, NineFifteenMidBacktestStats> {
-  return Object.fromEntries(
-    NINE_FIFTEEN_MID_STOP_LEVELS.map((stop, i) => [
-      stop,
-      buildMidBacktestStats(
-        byDate,
-        midDates,
-        points.backtestTarget5,
-        points,
-        profile,
-        1,
-        points.midSignalMove10,
-        points.midStopLevels[i],
-      ),
-    ]),
-  ) as Record<NineFifteenMidStopLevel, NineFifteenMidBacktestStats>;
-}
-
-/**
- * candles and the entry lands on the third.
- */
-function buildMidTwoCandleByStop(
-  byDate: MinuteCandlesByDate,
-  midDates: Set<string>,
-  points: IndexPoints,
-  profile: IndexProfile,
-): Record<NineFifteenMidStopLevel, NineFifteenMidBacktestStats> {
-  return Object.fromEntries(
-    NINE_FIFTEEN_MID_STOP_LEVELS.map((stop, i) => [
-      stop,
-      buildMidBacktestStats(
-        byDate,
-        midDates,
-        points.backtestTarget10,
-        points,
-        profile,
-        1,
-        points.midTwoCandleMove,
-        points.midStopLevels[i],
-        NINE_FIFTEEN_MID_TWO_CANDLE_CONFIRM_BARS,
-      ),
-    ]),
-  ) as Record<NineFifteenMidStopLevel, NineFifteenMidBacktestStats>;
-}
-
-/**
- * Fade the run: `confirmBars` same-colour 1-min candles in a row, then buy the opposite side on
- * the next bar and aim for ±`targetPoints` against the run, swept across every stop.
- */
-function buildMidExhaustionByStop(
-  byDate: MinuteCandlesByDate,
-  midDates: Set<string>,
-  confirmBars: number,
-  targetPoints: number,
-  points: IndexPoints,
-  profile: IndexProfile,
-): Record<NineFifteenMidStopLevel, NineFifteenMidBacktestStats> {
-  return Object.fromEntries(
-    NINE_FIFTEEN_MID_STOP_LEVELS.map((stop, i) => [
-      stop,
-      buildMidBacktestStats(
-        byDate,
-        midDates,
-        targetPoints,
-        points,
-        profile,
-        1,
-        points.midExhaustionMove,
-        points.midStopLevels[i],
-        confirmBars,
-        true,
-      ),
-    ]),
-  ) as Record<NineFifteenMidStopLevel, NineFifteenMidBacktestStats>;
-}
-
-/**
- * Every mid-backtest run in the result, paired with the key its trade rows are filed under.
- * `midBacktest1mTp10` aliases a run inside the sweep, so keys are assigned once per object.
- */
-function collectMidRuns(
-  result: NineFifteenCandlesResult,
-): { key: string; stats: NineFifteenMidBacktestStats }[] {
-  const runs: { key: string; stats: NineFifteenMidBacktestStats }[] = [];
-  const seen = new Set<NineFifteenMidBacktestStats>();
-
-  const add = (key: string, stats: NineFifteenMidBacktestStats | undefined) => {
-    if (!stats || seen.has(stats)) return;
-    seen.add(stats);
-    stats.runKey = key;
-    runs.push({ key, stats });
-  };
-
-  add("base", result.midBacktest1m);
-  add("tp15", result.midBacktest1mTp15);
-  for (const [threshold, byStop] of Object.entries(result.midBacktest1mTp10BySignalAndStop ?? {})) {
-    for (const [stop, stats] of Object.entries(byStop)) {
-      add(`sig${threshold}-stop${stop}`, stats);
-    }
-  }
-  const sweeps: [string, Record<string, NineFifteenMidBacktestStats> | undefined][] = [
-    ["mv10tp5", result.midBacktest1mMove10Tp5ByStop],
-    ["twocandle", result.midBacktest1mTwoCandleTp10ByStop],
-    ["fade10", result.midBacktest1mExhaustion10Tp10ByStop],
-    ["fade5", result.midBacktest1mExhaustion5Tp10ByStop],
-  ];
-  for (const [prefix, byStop] of sweeps) {
-    for (const [stop, stats] of Object.entries(byStop ?? {})) {
-      add(`${prefix}-stop${stop}`, stats);
-    }
-  }
-  // Alias — must carry the same key as the sweep entry it points at.
-  if (result.midBacktest1mTp10) {
-    result.midBacktest1mTp10.runKey = result.midBacktest1mTp10.runKey || "sig25-stop70";
-  }
-
-  return runs;
-}
-
-function midRowsDir(profile: IndexProfile): string {
-  return `${payloadBase(profile)}-rows`;
-}
-
-export function midRowsFile(profile: IndexProfile, runKey: string): string {
-  return path.join(midRowsDir(profile), `${runKey}.json.gz`);
-}
-
-/** Only `[A-Za-z0-9_-]` keys are ever generated, so anything else is a path-traversal attempt. */
-export function isValidMidRunKey(runKey: string): boolean {
-  return /^[A-Za-z0-9_-]{1,64}$/.test(runKey);
-}
-
-/**
- * Writes each run's trade rows to its own gzip file and drops them from the payload. The rows
- * are 93% of the bytes but are only read when someone expands a grid cell, so serving them
- * separately takes the page payload from ~55 MB to ~4 MB.
- */
-function detachMidTradeRows(result: NineFifteenCandlesResult, profile: IndexProfile): void {
-  const dir = midRowsDir(profile);
-  fs.mkdirSync(dir, { recursive: true });
-
-  for (const { key, stats } of collectMidRuns(result)) {
-    const rows = stats.rows ?? [];
-    const file = midRowsFile(profile, key);
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, zlib.gzipSync(JSON.stringify({ data: rows })));
-    fs.renameSync(tmp, file);
-    delete stats.rows;
-  }
-}
 
 /** Bump when the shape or maths of the result changes — invalidates the on-disk payload. */
 const CACHE_VERSION =
-  "v120:nifty-red-pe-body10-follow-backtest";
+  "v140:summary-flat-under-15";
 /**
  * Completed sessions never change, so the only thing a rebuild adds is today's session. A short
  * TTL just meant a 4–6 minute rebuild every half hour, which pegs this 2 GB host and slows down
@@ -4363,6 +3899,10 @@ function metaFile(profile: IndexProfile): string {
 interface CacheMeta {
   version: string;
   at: number;
+  /** Calendar days the on-disk payload was built with (may exceed a single UI window). */
+  daysBuilt: number;
+  /** Complete NSE session rows stored in the payload (newest-first). */
+  sessionsBuilt: number;
 }
 
 export interface BacktestPayloadRef {
@@ -4385,6 +3925,8 @@ function readMeta(profile: IndexProfile): CacheMeta | null {
   try {
     const meta = JSON.parse(fs.readFileSync(metaFile(profile), "utf8")) as CacheMeta;
     if (meta?.version !== CACHE_VERSION) return null;
+    if (!Number.isFinite(meta.daysBuilt) || meta.daysBuilt <= 0) return null;
+    if (!Number.isFinite(meta.sessionsBuilt) || meta.sessionsBuilt <= 0) return null;
     if (!fs.existsSync(payloadFile(profile))) return null;
     return meta;
   } catch {
@@ -4397,11 +3939,18 @@ function writePayload(result: NineFifteenCandlesResult, profile: IndexProfile): 
   const at = Date.now();
   const file = payloadFile(profile);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  detachMidTradeRows(result, profile);
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, zlib.gzipSync(JSON.stringify({ data: result })));
   fs.renameSync(tmp, file);
-  fs.writeFileSync(metaFile(profile), JSON.stringify({ version: CACHE_VERSION, at }));
+  fs.writeFileSync(
+    metaFile(profile),
+    JSON.stringify({
+      version: CACHE_VERSION,
+      at,
+      daysBuilt: result.daysRequested,
+      sessionsBuilt: result.nseSessionsOneYear,
+    }),
+  );
   return at;
 }
 
@@ -4417,7 +3966,7 @@ function runSerial<T>(task: () => Promise<T>): Promise<T> {
   return next;
 }
 
-const inflightRebuild = new Map<IndexProfile["id"], Promise<number>>();
+const inflightRebuild = new Map<IndexProfile["id"], { promise: Promise<number>; days: number }>();
 
 /** Build + persist in one call, so the worker process has a single entry point. */
 export async function buildAndWriteNineFifteenPayload(
@@ -4461,10 +4010,17 @@ export async function ensureNineFifteenPayload(
   daysRequested = NINE_FIFTEEN_DEFAULT_HISTORY_DAYS,
   force = false,
   profile: IndexProfile = NIFTY_INDEX_PROFILE,
+  minSessions = 0,
 ): Promise<BacktestPayloadRef> {
   const days = Math.min(Math.max(Math.round(daysRequested), 30), NINE_FIFTEEN_MAX_HISTORY_DAYS);
+  const sessionsNeeded = Math.max(
+    minSessions > 0 ? Math.round(minSessions) : 0,
+    sessionsForCalendarDays(days),
+  );
   const meta = force ? null : readMeta(profile);
-  if (meta && Date.now() - meta.at < CACHE_MS) {
+  const cacheCoversRequest = (m: CacheMeta) =>
+    m.daysBuilt >= days && m.sessionsBuilt >= sessionsNeeded;
+  if (meta && cacheCoversRequest(meta) && Date.now() - meta.at < CACHE_MS) {
     return { gzipPath: payloadFile(profile), builtAt: meta.at };
   }
 
@@ -4474,13 +4030,13 @@ export async function ensureNineFifteenPayload(
    * and rate limit, so expired-but-valid bytes are served as-is until the close — they only lack
    * today's session, which a 1-year study barely moves. An explicit refresh still rebuilds.
    */
-  if (meta && !force && isMarketHoursIst()) {
+  if (meta && !force && cacheCoversRequest(meta) && isMarketHoursIst()) {
     return { gzipPath: payloadFile(profile), builtAt: meta.at };
   }
 
-  let rebuild = inflightRebuild.get(profile.id);
-  if (!rebuild) {
-    rebuild = runSerial(() => buildOutOfProcess(accessToken, days, profile))
+  let inflight = inflightRebuild.get(profile.id);
+  if (!inflight || inflight.days < days) {
+    const promise = runSerial(() => buildOutOfProcess(accessToken, days, profile))
       .catch((error: unknown) => {
         // Prefer stale bytes over an error page — a rebuild can fail on a Kite hiccup.
         const stale = readMeta(profile);
@@ -4488,23 +4044,32 @@ export async function ensureNineFifteenPayload(
         throw error;
       })
       .finally(() => {
-        inflightRebuild.delete(profile.id);
+        const current = inflightRebuild.get(profile.id);
+        if (current?.promise === promise) inflightRebuild.delete(profile.id);
       });
-    inflightRebuild.set(profile.id, rebuild);
+    inflightRebuild.set(profile.id, { promise, days });
+    inflight = inflightRebuild.get(profile.id)!;
   }
 
   /**
    * Stale-while-revalidate: completed sessions never change, so expired bytes still render
    * correctly. Serve them now and let the rebuild land in the background.
    */
-  if (meta) {
-    rebuild.catch(() => {
+  if (meta && cacheCoversRequest(meta)) {
+    inflight.promise.catch(() => {
       /* the catch above already falls back to the stale payload */
     });
     return { gzipPath: payloadFile(profile), builtAt: meta.at };
   }
 
-  return { gzipPath: payloadFile(profile), builtAt: await rebuild };
+  await inflight.promise;
+  const built = readMeta(profile);
+  if (!built || !cacheCoversRequest(built)) {
+    throw new Error(
+      `Backtest cache has ${built?.sessionsBuilt ?? 0} sessions but ${sessionsNeeded} are needed for this range — try Refresh`,
+    );
+  }
+  return { gzipPath: payloadFile(profile), builtAt: built.at };
 }
 
 /**
@@ -4528,6 +4093,13 @@ export async function fetchNineFifteenCandleHistory(
   return result;
 }
 
+function sessionsForCalendarDays(days: number): number {
+  return Math.min(
+    NINE_FIFTEEN_BACKTEST_MAX_SESSIONS,
+    Math.max(1, Math.round((days / 365) * NSE_SESSIONS_ONE_YEAR)),
+  );
+}
+
 async function buildNineFifteenCandleHistory(
   accessToken: string,
   fetchCandles: CandleFetcher,
@@ -4535,7 +4107,8 @@ async function buildNineFifteenCandleHistory(
   profile: IndexProfile,
 ): Promise<NineFifteenCandlesResult> {
   const points = buildIndexPoints(profile);
-  const calendarLookback = calendarDaysForSessionLookback(ONE_YEAR_SESSION_ROWS);
+  const sessionTarget = sessionsForCalendarDays(days);
+  const calendarLookback = calendarDaysForSessionLookback(sessionTarget);
   const tradingDates = listWeekdayDatesIst(calendarLookback);
   if (tradingDates.length === 0) {
     throw new Error("No dates in range");
@@ -4567,40 +4140,9 @@ async function buildNineFifteenCandleHistory(
     throw new Error("No complete NSE session days in Kite data (check 9:15–15:30 minute candles)");
   }
 
-  const rows1y = rowsAll.slice(0, Math.min(ONE_YEAR_SESSION_ROWS, rowsAll.length));
-  const midDates = new Set(rows1y.map((row) => row.date));
-  const midBacktest1m = buildMidBacktestStats(byDate, midDates, points.midTarget, points, profile, 1);
-  const midBacktest1mTp15 = buildMidBacktestStats(
-    byDate,
-    midDates,
-    points.backtestTarget15,
-    points,
-    profile,
-    1,
-  );
-  const midBacktest1mTp10BySignalAndStop = buildMidTp10BySignalAndStop(byDate, midDates, points, profile);
-  const midBacktest1mTp10 = midBacktest1mTp10BySignalAndStop[25][70];
-  const midBacktest1mMove10Tp5ByStop = buildMidMove10Tp5ByStop(byDate, midDates, points, profile);
-  const midBacktest1mTwoCandleTp10ByStop = buildMidTwoCandleByStop(byDate, midDates, points, profile);
-  const midBacktest1mExhaustion10Tp10ByStop = buildMidExhaustionByStop(
-    byDate,
-    midDates,
-    NINE_FIFTEEN_MID_EXHAUSTION_RUN_10,
-    points.backtestTarget10,
-    points,
-    profile,
-  );
-  const midBacktest1mExhaustion5Tp10ByStop = buildMidExhaustionByStop(
-    byDate,
-    midDates,
-    NINE_FIFTEEN_MID_EXHAUSTION_RUN_5,
-    points.backtestTarget10,
-    points,
-    profile,
-  );
+  const rowsSlice = rowsAll.slice(0, Math.min(sessionTarget, rowsAll.length));
+  const block = buildFollowBacktestBlock(rowsSlice, true, points, profile, byDate);
   byDate.clear();
-
-  const block1y = buildFollowBacktestBlock(rows1y, true, points, profile);
 
   return {
     instrument: profile.spotKey,
@@ -4610,41 +4152,15 @@ async function buildNineFifteenCandleHistory(
     expiryWeekday: profile.expiryWeekday,
     daysRequested: days,
     dataSource: "zerodha_kite",
-    fromDate: rows1y[rows1y.length - 1]?.date ?? tradingDates[0] ?? "",
-    toDate: rows1y[0]?.date ?? tradingDates[tradingDates.length - 1] ?? "",
-    rows: rows1y,
-    summary: buildSummary(rows1y),
-    nseSessionsOneYear: rows1y.length,
-    cePeGuide: block1y.cePeGuide,
-    followFilterStats: block1y.followFilterStats,
-    nearMissFollow: block1y.nearMissFollow,
-    nearMissFollowFilterStats: block1y.nearMissFollowFilterStats,
-    liveConsolidatedFollow: block1y.liveConsolidatedFollow,
-    liveConsolidatedFilterStats: block1y.liveConsolidatedFilterStats,
-    liveSmallBodyPutFollow: block1y.liveSmallBodyPutFollow,
-    liveSmallBodyPutFilterStats: block1y.liveSmallBodyPutFilterStats,
-    liveSmallBodySplitBuckets: block1y.liveSmallBodySplitBuckets,
-    liveSmallBodyDirectionFollow: block1y.liveSmallBodyDirectionFollow,
-    liveRedPeMainFollow: block1y.liveRedPeMainFollow,
-    liveRedPeMainFilterStats: block1y.liveRedPeMainFilterStats,
-    liveRedPeBody10Follow: block1y.liveRedPeBody10Follow,
-    liveRedPeBody10FilterStats: block1y.liveRedPeBody10FilterStats,
-    liveConsolidatedFollowAlt: block1y.liveConsolidatedFollowAlt,
-    liveConsolidatedFilterStatsAlt: block1y.liveConsolidatedFilterStatsAlt,
-    liveConsolidatedFlatVariants: block1y.liveConsolidatedFlatVariants,
-    niftyConfirm917Follow: block1y.niftyConfirm917Follow,
-    niftyConfirm917FilterStats: block1y.niftyConfirm917FilterStats,
-    niftyConfirm917Follow11: block1y.niftyConfirm917Follow11,
-    niftyConfirm917FilterStats11: block1y.niftyConfirm917FilterStats11,
-    breakout: block1y.breakout,
-    tuesdayTenPoint: buildTuesdayTenPointStats(rows1y, points, profile),
-    midBacktest1m,
-    midBacktest1mTp15,
-    midBacktest1mTp10,
-    midBacktest1mTp10BySignalAndStop,
-    midBacktest1mMove10Tp5ByStop,
-    midBacktest1mTwoCandleTp10ByStop,
-    midBacktest1mExhaustion10Tp10ByStop,
-    midBacktest1mExhaustion5Tp10ByStop,
+    fromDate: rowsSlice[rowsSlice.length - 1]?.date ?? tradingDates[0] ?? "",
+    toDate: rowsSlice[0]?.date ?? tradingDates[tradingDates.length - 1] ?? "",
+    rows: rowsSlice,
+    summary: buildSummary(rowsSlice),
+    nseSessionsOneYear: rowsSlice.length,
+    cePeGuide: block.cePeGuide,
+    liveRedPeMain916ConfirmFollow: block.liveRedPeMain916ConfirmFollow,
+    liveRedPeMain916ConfirmFilterStats: block.liveRedPeMain916ConfirmFilterStats,
+    liveRedPeMain916BothRedFollow: block.liveRedPeMain916BothRedFollow,
+    liveRedPeMain916BothRedFilterStats: block.liveRedPeMain916BothRedFilterStats,
   };
 }

@@ -2,17 +2,17 @@ import { useMemo, useState } from "react";
 import { Target } from "lucide-react";
 import { cn, formatNumber } from "@/lib/utils";
 import type {
-  NineFifteenHighMinus5BacktestSlice,
+  NineFifteenFullDayBacktestSlice,
+  NineFifteenFullDayTrade,
   NineFifteenHighMinus5Outcome,
-  NineFifteenHighMinus5Trade,
 } from "@/types/nine-fifteen-high-minus5-backtest";
 
 type OutcomeFilter = "all" | NineFifteenHighMinus5Outcome;
 
-function outcomeLabel(outcome: NineFifteenHighMinus5Outcome, signalMinute = "9:15"): string {
+function outcomeLabel(outcome: NineFifteenHighMinus5Outcome): string {
   switch (outcome) {
     case "win":
-      return `Win (in ${signalMinute})`;
+      return "Win (signal min)";
     case "late_win":
       return "Late win";
     case "loss":
@@ -55,55 +55,37 @@ function StatCard({
   );
 }
 
-function TradeRow({
-  trade,
-  signalMinute,
-}: {
-  trade: NineFifteenHighMinus5Trade;
-  signalMinute: string;
-}) {
+function TradeRow({ trade }: { trade: NineFifteenFullDayTrade }) {
   return (
     <tr>
       <td>{trade.date}</td>
       <td>{trade.weekday}</td>
-      <td>{formatNumber(trade.open915, 2)}</td>
-      <td>{formatNumber(trade.close915, 2)}</td>
+      <td>{trade.signalTimeIst}</td>
+      <td>{formatNumber(trade.signalOpen, 2)}</td>
+      <td>{formatNumber(trade.signalClose, 2)}</td>
       <td>{formatNumber(trade.entryLevel, 2)}</td>
       <td>{formatNumber(trade.tpLevel, 2)}</td>
       <td>{trade.entryTimeIst ?? "—"}</td>
       <td>{trade.tpTimeIst ?? "—"}</td>
       <td>
         <span className={cn("nf915bt-outcome-pill", outcomeClass(trade.outcome))}>
-          {outcomeLabel(trade.outcome, signalMinute)}
+          {outcomeLabel(trade.outcome)}
         </span>
       </td>
     </tr>
   );
 }
 
-function sessionLabels(slice: NineFifteenHighMinus5BacktestSlice) {
-  return {
-    signalMinute: slice.rules.signalMinuteLabel ?? "9:15",
-    instrument: slice.rules.instrumentLabel ?? "Nifty",
-    lateWinAfter: slice.rules.lateWinAfterIst ?? "9:16:00",
-  };
-}
-
-function accordionMeta(slice: NineFifteenHighMinus5BacktestSlice): string {
-  const { signalMinute } = sessionLabels(slice);
+function accordionMeta(slice: NineFifteenFullDayBacktestSlice): string {
   const entered = slice.stats.wins + slice.stats.lateWins + slice.stats.losses;
   const parts = [
-    `${slice.stats.wins} in ${signalMinute}`,
+    `${slice.stats.wins} in signal min`,
     `${slice.stats.lateWins} late`,
     `${slice.stats.losses} loss`,
   ];
-  if (slice.rules.variant === "limit_open_minus_5" && slice.stats.noEntry > 0) {
-    parts.push(`${slice.stats.noEntry} no entry`);
-  }
-  if (slice.rules.variant === "limit_open_plus_5" && slice.stats.noEntry > 0) {
-    parts.push(`${slice.stats.noEntry} no entry`);
-  }
+  if (slice.stats.noEntry > 0) parts.push(`${slice.stats.noEntry} no entry`);
   parts.push(`${slice.stats.winRatePct}% TP (${entered} entered)`);
+  parts.push(`${slice.stats.sessions} signals`);
   return parts.join(" · ");
 }
 
@@ -113,81 +95,59 @@ function RulesList({
   rangeLabel,
   subtitle,
 }: {
-  slice: NineFifteenHighMinus5BacktestSlice;
+  slice: NineFifteenFullDayBacktestSlice;
   builtAt: string;
   rangeLabel: string;
   subtitle?: string;
 }) {
-  const { signalMinute, instrument, lateWinAfter } = sessionLabels(slice);
-  const isMarketAtOpen = slice.rules.variant === "market_at_open";
   const isPlusEntry = slice.rules.variant === "limit_open_plus_5";
   const entrySign = isPlusEntry ? "+" : "−";
   const tpSign = isPlusEntry ? "+" : "−";
   const touchSide = isPlusEntry ? "high" : "low";
+  const colour = isPlusEntry ? "green" : "red";
 
   return (
     <section className="nf915bt-rules card">
       <h3>Rules</h3>
       {subtitle && <p className="nf915bt-section-subtitle">{subtitle}</p>}
       <ul>
-        {slice.rules.red915Only && (
-          <li>
-            <strong>Red {signalMinute} only</strong> — trade only when the opening minute closes below its
-            open (green/flat days skipped).
-          </li>
-        )}
-        {slice.rules.green915Only && (
-          <li>
-            <strong>Green {signalMinute} only</strong> — trade only when the opening minute closes above its
-            open (red/flat days skipped).
-          </li>
-        )}
-        {isMarketAtOpen ? (
-          <>
-            <li>
-              <strong>Entry</strong> — market fill at the {signalMinute} candle open (every session).
-            </li>
-            <li>
-              <strong>Take profit</strong> — {slice.rules.tpOffsetFromEntry} pts below the {signalMinute}{" "}
-              open ({instrument} points).
-            </li>
-          </>
-        ) : (
-          <>
-            <li>
-              <strong>Entry</strong> — limit fill when session {touchSide} touches {signalMinute} candle open{" "}
-              {entrySign} {slice.rules.entryOffsetFromOpen} pts.
-            </li>
-            <li>
-              <strong>Take profit</strong> — {slice.rules.tpOffsetFromEntry} pts {tpSign === "+" ? "above" : "below"} the
-              entry fill ({instrument} points).
-            </li>
-            <li>
-              <strong>No entry</strong> — price never reached open {entrySign}{" "}
-              {slice.rules.entryOffsetFromOpen} that day.
-            </li>
-          </>
-        )}
         <li>
-          <strong>Win</strong> — TP touched before {slice.rules.winWindowEndIst} (still inside the{" "}
-          {signalMinute} minute).
+          <strong>Signal scan</strong> — every 1-minute candle from{" "}
+          <strong>{slice.rules.signalScanStartIst}</strong> through{" "}
+          <strong>{slice.rules.signalScanEndIst}</strong> IST ({slice.tradingDays} trading days in
+          range).
         </li>
         <li>
-          <strong>Late win</strong> — entry filled but TP first touched after {lateWinAfter} (exact time in
-          the table).
+          <strong>{colour.charAt(0).toUpperCase() + colour.slice(1)} candles only</strong> — only
+          minutes that close {isPlusEntry ? "above" : "below"} their open become signals; flat minutes
+          are skipped.
+        </li>
+        <li>
+          <strong>Entry</strong> — limit fill when session {touchSide} touches that signal
+          candle&apos;s open {entrySign} {slice.rules.entryOffsetFromOpen} pts (full-day study uses entry{" "}
+          {tpSign} {slice.rules.tpOffsetFromEntry} for TP — tighter than the 9:15 ± 10 studies).
+        </li>
+        <li>
+          <strong>Take profit</strong> — {slice.rules.tpOffsetFromEntry} pts {tpSign === "+" ? "above" : "below"}{" "}
+          the entry fill, scanned through {slice.rules.scanEndIst}.
+        </li>
+        <li>
+          <strong>Win</strong> — TP touched during the signal minute itself.
+        </li>
+        <li>
+          <strong>Late win</strong> — entry filled, TP first touched after the signal minute (time in
+          table).
         </li>
         <li>
           <strong>Loss</strong> — entry filled, TP never touched through {slice.rules.scanEndIst}.
         </li>
+        <li>
+          <strong>Independent signals</strong> — each qualifying minute is its own trade; overlapping
+          setups on the same day all count separately.
+        </li>
       </ul>
       <p className="nf915bt-muted">
-        {rangeLabel} · {slice.stats.sessions} sessions
-        {slice.stats.excludedSessions != null && slice.stats.excludedSessions > 0
-          ? slice.rules.green915Only
-            ? ` · ${slice.stats.excludedSessions} red/flat skipped`
-            : ` · ${slice.stats.excludedSessions} green/flat skipped`
-          : ""}
-        {" · built "}
+        {rangeLabel} · {slice.stats.sessions} signal minutes · built{" "}
         {new Date(builtAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}
       </p>
     </section>
@@ -200,22 +160,18 @@ function BacktestSectionBody({
   rangeLabel,
   subtitle,
 }: {
-  slice: NineFifteenHighMinus5BacktestSlice;
+  slice: NineFifteenFullDayBacktestSlice;
   builtAt: string;
   rangeLabel: string;
   subtitle?: string;
 }) {
-  const { signalMinute, lateWinAfter } = sessionLabels(slice);
   const [filter, setFilter] = useState<OutcomeFilter>("all");
   const entered = slice.stats.wins + slice.stats.lateWins + slice.stats.losses;
-  const showNoEntry =
-    slice.rules.variant === "limit_open_minus_5" || slice.rules.variant === "limit_open_plus_5";
 
   const filterOptions = useMemo(() => {
-    const keys: OutcomeFilter[] = ["all", "win", "late_win", "loss"];
-    if (showNoEntry) keys.push("no_entry");
+    const keys: OutcomeFilter[] = ["all", "win", "late_win", "loss", "no_entry"];
     return keys;
-  }, [showNoEntry]);
+  }, []);
 
   const filtered = useMemo(() => {
     if (filter === "all") return slice.trades;
@@ -228,7 +184,7 @@ function BacktestSectionBody({
 
       <section className="nf915bt-stat-grid">
         <StatCard
-          label={`Win (in ${signalMinute})`}
+          label="Win (signal min)"
           value={String(slice.stats.wins)}
           hint={`${slice.stats.inMinuteWinPct}% of ${entered} entered`}
           tone="text-up"
@@ -236,7 +192,7 @@ function BacktestSectionBody({
         <StatCard
           label="Late win"
           value={String(slice.stats.lateWins)}
-          hint={`TP after ${lateWinAfter} — time in table`}
+          hint={`TP after signal minute · through ${slice.rules.scanEndIst}`}
           tone="nf915bt-tone-late"
         />
         <StatCard
@@ -245,24 +201,27 @@ function BacktestSectionBody({
           hint="Entered, TP never hit"
           tone="text-down"
         />
-        {showNoEntry && (
-          <StatCard
-            label="No entry"
-            value={String(slice.stats.noEntry)}
-            hint={`Open ${slice.rules.variant === "limit_open_plus_5" ? "+" : "−"} ${slice.rules.entryOffsetFromOpen} never touched`}
-          />
-        )}
+        <StatCard
+          label="No entry"
+          value={String(slice.stats.noEntry)}
+          hint={`Open ${slice.rules.variant === "limit_open_plus_5" ? "+" : "−"} ${slice.rules.entryOffsetFromOpen} never touched`}
+        />
         <StatCard
           label="TP hit rate"
           value={`${slice.stats.winRatePct}%`}
           hint={`${slice.stats.wins + slice.stats.lateWins} / ${entered} entered`}
+        />
+        <StatCard
+          label="Signal minutes"
+          value={String(slice.stats.sessions)}
+          hint={`${slice.tradingDays} trading days`}
         />
       </section>
 
       <section className="card nf915bt-table-section">
         <div className="nf915bt-table-toolbar">
           <h3>
-            <Target size={16} /> Session log
+            <Target size={16} /> Signal log
           </h3>
           <div className="nf915bt-filters">
             {filterOptions.map((key) => (
@@ -272,7 +231,7 @@ function BacktestSectionBody({
                 className={cn("btn btn-sm", filter === key ? "btn-primary" : "btn-ghost")}
                 onClick={() => setFilter(key)}
               >
-                {key === "all" ? "All" : outcomeLabel(key as NineFifteenHighMinus5Outcome, signalMinute)}
+                {key === "all" ? "All" : outcomeLabel(key as NineFifteenHighMinus5Outcome)}
               </button>
             ))}
           </div>
@@ -283,8 +242,9 @@ function BacktestSectionBody({
               <tr>
                 <th>Date</th>
                 <th>Day</th>
-                <th>{signalMinute} open</th>
-                <th>{signalMinute} close</th>
+                <th>Signal</th>
+                <th>Signal open</th>
+                <th>Signal close</th>
                 <th>Entry</th>
                 <th>TP</th>
                 <th>Entry time</th>
@@ -295,38 +255,43 @@ function BacktestSectionBody({
             <tbody>
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="nf915bt-empty">
+                  <td colSpan={10} className="nf915bt-empty">
                     No trades in this filter.
                   </td>
                 </tr>
               ) : (
-                filtered.map((trade) => (
-                  <TradeRow key={trade.date} trade={trade} signalMinute={signalMinute} />
+                filtered.slice(0, 500).map((trade) => (
+                  <TradeRow key={`${trade.date}-${trade.signalMins}-${trade.entryLevel}`} trade={trade} />
                 ))
               )}
             </tbody>
           </table>
+          {filtered.length > 500 && (
+            <p className="nf915bt-muted nf915bt-table-cap">
+              Showing first 500 of {filtered.length} rows — narrow the filter to inspect more.
+            </p>
+          )}
         </div>
       </section>
     </>
   );
 }
 
-export interface BacktestSectionProps {
-  slice: NineFifteenHighMinus5BacktestSlice;
+export interface FullDayBacktestSectionProps {
+  slice: NineFifteenFullDayBacktestSlice;
   builtAt: string;
   rangeLabel: string;
   subtitle?: string;
   defaultOpen?: boolean;
 }
 
-export function BacktestSection({
+export function FullDayBacktestSection({
   slice,
   builtAt,
   rangeLabel,
   subtitle,
   defaultOpen = false,
-}: BacktestSectionProps) {
+}: FullDayBacktestSectionProps) {
   return (
     <details className="nf915bt-accordion" open={defaultOpen}>
       <summary className="nf915bt-accordion-summary">

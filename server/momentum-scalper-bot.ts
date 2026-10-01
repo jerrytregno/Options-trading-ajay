@@ -32,12 +32,14 @@ import {
   type NiftyTick,
   type NiftyTickerConnection,
 } from "./kite-ticker.js";
-import { fetchHistoricalCandles } from "./kite-candles.js";
+import { fetchNiftyRsi14FromKite } from "./nifty-rsi-from-kite.js";
 import { kiteSessionAgeHours, loadKiteSession } from "./kite-session-store.js";
-import { isInBotWsHours, isPast916EntryWindow } from "./nine-sixteen-logic.js";
+import { isInBotWsHours } from "./nine-sixteen-logic.js";
+import { isNineSixteenSettledForDay } from "./nine-sixteen-bot.js";
 import {
   computeAffordableLots,
   getMaxLotsPerOrder,
+  nextEntryLotsAfterMarginReject,
   splitQuantityIntoOrderChunks,
 } from "./nine-sixteen-sizing.js";
 import {
@@ -45,10 +47,11 @@ import {
   detectSignalSide,
   evaluateMomentumExit,
   formatIstMins,
-  momentumProfitExitLimitPrice,
-  momentumProfitExitPnlPct,
-  shouldMomentumProfitExitMarketBackup,
-  MOMENTUM_PROFIT_EXIT_GIVEBACK_PCT,
+  momentumLiveRsiBlocksEntry,
+  formatMomentumLiveRsiBucketsLabel,
+  MOMENTUM_SCALPER_TAKE_PROFIT_PCT,
+  momentumTakeProfitLimitPrice,
+  shouldMomentumTakeProfitMarketBackup,
   momentumExitProfileConfig,
   momentumExitProfileForEntryMins,
   momentumGateLevel,
@@ -57,24 +60,20 @@ import {
   trapsPullbackEntryLevel,
   trapsPullbackEntryTriggered,
   MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS,
+  MOMENTUM_SCALPER_MAX_LOSSES_PER_DAY,
   MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS,
   MOMENTUM_SCALPER_SCAN_START_MINS,
   signedSignalMovePts,
   type MomentumEntryDecision,
   momentumPnlPctOfEntryCost,
   momentumPnlStopPct,
-  momentumPnlTargetPct,
   MOMENTUM_SCALPER_FORCE_EXIT_IST,
-  MOMENTUM_SCALPER_INITIAL_STOP_PNL_PCT,
   MOMENTUM_SCALPER_LIVE_RULES,
-  MOMENTUM_SCALPER_PNL_ARM_PCT,
   momentumLiveDayEntryCutoffReached,
   momentumLiveEntryAllowed,
   momentumNextLiveEntryOpenMins,
   formatMomentumLiveScheduleLabel,
-  momentumLiveRsiFromBarCloses,
-  formatMomentumLiveRsiBucketsLabel,
-  MOMENTUM_SCALPER_RSI_PERIOD,
+  isTrapsBotHardDisabled,
   sessionCloseMinsForWeekday,
   indexPnlPts,
   isPastMomentumForceExit,
@@ -112,7 +111,7 @@ interface PendingSignal {
   optionMarkPrice: number | null;
   /** Contract the mark belongs to. Entry must buy this one, not a freshly resolved ATM. */
   optionTradingsymbol: string | null;
-  /** Latest Wilder RSI(14) on Nifty 1-min closes — refreshed on every websocket tick. */
+  /** Latest Wilder RSI(14) from Zerodha 1-min Nifty history — refreshed on a timer. */
   liveRsi: number | null;
 }
 
@@ -142,6 +141,8 @@ export type ProfitExitOrderStatus = "none" | "pending" | "partial" | "complete" 
 
 export interface MomentumScalperBotStatus {
   enabled: boolean;
+  /** True when MOMENTUM_SCALPER_BOT_ENABLED=0 on the server — cannot arm from the UI. */
+  serverDisabled: boolean;
   phase: MomentumScalperBotPhase;
   dateIST: string;
   weekday: string;
@@ -149,7 +150,9 @@ export interface MomentumScalperBotStatus {
   rules: typeof MOMENTUM_SCALPER_LIVE_RULES;
   wsConnected: boolean;
   tradesToday: number;
-  /** True when today's session ended early because a trade closed at a loss. */
+  /** Losing Traps trades booked today — session stops after {@link MOMENTUM_SCALPER_MAX_LOSSES_PER_DAY}. */
+  lossesToday: number;
+  /** True when today's session ended early because the loss budget was used up. */
   stoppedForLossToday: boolean;
   /** Lots per entry (default 25), bought as a single order. */
   maxLots: number;
@@ -219,7 +222,7 @@ export interface MomentumScalperBotStatus {
   profitExitPendingQty?: number;
   /** Final MIS safety square-off for an open leg (entries stop earlier, at the trade window close). */
   forceExitIst: string;
-  /** Wilder RSI(14) from live Nifty 1-min bars — null until 14 prior closes exist. */
+  /** Wilder RSI(14) from Zerodha 1-min Nifty history — null until Kite history is fetched. */
   liveNiftyRsi: number | null;
   liveRsiBucketsIst: string;
   sessionConnected: boolean;
@@ -228,11 +231,10 @@ export interface MomentumScalperBotStatus {
 }
 
 const STATE_DIR = path.join(process.cwd(), "data");
-const NIFTY_SPOT_KEY = "NSE:NIFTY 50";
-const RSI_PREFILL_SESSION_OPEN_MINS = 9 * 60 + 15;
-const RSI_PREFILL_SESSION_CLOSE_MINS = 15 * 60 + 30;
+const RSI_REFRESH_MIN_MS = 30_000;
 const STATE_FILE = path.join(STATE_DIR, "momentum-scalper-state.json");
 const RAN_MARKER = (dateIst: string) => path.join(STATE_DIR, `momentum-scalper-ran-${dateIst}.json`);
+const LOSSES_FILE = (dateIst: string) => path.join(STATE_DIR, `momentum-scalper-losses-${dateIst}.json`);
 const CLAIM_FILE = path.join(STATE_DIR, "momentum-scalper-claim.json");
 const POLL_MS = 1000;
 const POSITION_RECONCILE_MS = 5000;
@@ -274,9 +276,10 @@ function sizingPremium(premium: number): number {
 
 const SCHEDULE_LABEL = formatMomentumLiveScheduleLabel();
 const DISABLED_MESSAGE = "Disabled — press Enable to arm Traps";
+const SERVER_DISABLED_MESSAGE = "Disabled on server — Traps strategy is off (MOMENTUM_SCALPER_BOT_ENABLED=0)";
 /**
- * Entry windows ({@link SCHEDULE_LABEL}) still gate new trades when the bot is armed; the schedule
- * no longer toggles the enabled flag — only the UI Enable button does.
+ * Entry windows ({@link SCHEDULE_LABEL}) still gate new trades when the bot is armed; only the UI
+ * Enable button toggles the enabled flag.
  */
 let scheduleDateIst: string | null = null;
 
@@ -300,13 +303,13 @@ function applyDailySchedule(dateIst: string, weekday: string, nowMs = Date.now()
   if (!momentumInScheduledWindow(nowMins)) return;
 
   const session = loadKiteSession();
-  if (session?.accessToken) void warmRsiFromKiteHistory(session.accessToken, dateIst);
+  if (session?.accessToken) void refreshRsiFromKite(session.accessToken, dateIst);
 }
 
-/** Traps scans only after the 9:16 trade entry window and before the afternoon cutoff. */
+/** Traps scans only after the 9:16 trade entry window closes and the 9:16 bot is flat. */
 function momentumScanReady(nowMins: number): boolean {
   if (!momentumLiveEntryAllowed(nowMins)) return false;
-  return isPast916EntryWindow();
+  return isNineSixteenSettledForDay();
 }
 
 /**
@@ -351,8 +354,12 @@ let niftyInstrumentToken = 0;
 let optionInstrumentToken = 0;
 
 let lastSpot: number | null = null;
-/** Wilder RSI(14) on Nifty 1-min closes — recomputed on every Nifty tick. */
+/** Wilder RSI(14) from Zerodha 1-min history — polled, not built from websocket bars. */
 let liveNiftyRsi: number | null = null;
+let lastRsiFetchAt = 0;
+let lastRsiFetchMins = -1;
+let rsiPrimedDateIst: string | null = null;
+let rsiRefreshInFlight: Promise<void> | null = null;
 let lastOptionPrice: number | null = null;
 let tradingsymbol: string | null = null;
 let quantity = 0;
@@ -389,10 +396,6 @@ let marketEntryInFlight = false;
 
 let completedBars: DayScalperCandle[] = [];
 let currentBar: DayScalperCandle | null = null;
-/** Session 1-min bars from Zerodha historical API — merged under live websocket bars for RSI. */
-let rsiPrefillBars: DayScalperCandle[] = [];
-let rsiPrefillDateIst: string | null = null;
-let rsiPrefillPromise: Promise<void> | null = null;
 let lastProcessedBarMins = -1;
 let squareOffInFlight = false;
 
@@ -497,10 +500,11 @@ function ensureSessionDate(dateIst: string) {
     clearPendingSignal();
     tradesToday = 0;
     resumeScanAfterMins = 0;
-    rsiPrefillBars = [];
-    rsiPrefillDateIst = null;
-    rsiPrefillPromise = null;
     liveNiftyRsi = null;
+    lastRsiFetchAt = 0;
+    lastRsiFetchMins = -1;
+    rsiPrimedDateIst = null;
+    rsiRefreshInFlight = null;
   }
 }
 
@@ -577,12 +581,8 @@ function exitRuleSummary(profile: MomentumExitProfile): MomentumExitRuleSummary 
     initialStopPnlPct: -config.initialStopLossPct,
     initialStopHoldSec: config.initialStopHoldMs / 1000,
     stopBreachInclusive: profile !== "opening",
-    hardStopPnlPct: -config.hardStopLossPct,
+    hardStopPnlPct: 0,
   };
-}
-
-function exitProfileLabel(profile: MomentumExitProfile): string {
-  return profile === "opening" ? "opening window (09:15–09:20)" : "standard";
 }
 
 let stateLoadedForDate: string | null = null;
@@ -640,11 +640,30 @@ function loadState(dateIst: string) {
   }
 }
 
-function sessionAlreadyDone(dateIst: string): boolean {
-  return fs.existsSync(RAN_MARKER(dateIst));
+function sessionLossCount(dateIst: string): number {
+  try {
+    if (fs.existsSync(LOSSES_FILE(dateIst))) {
+      const parsed = JSON.parse(fs.readFileSync(LOSSES_FILE(dateIst), "utf-8")) as { losses?: number };
+      if (typeof parsed.losses === "number" && parsed.losses > 0) return parsed.losses;
+    }
+  } catch {
+    /* ignore corrupt file */
+  }
+  if (sessionStoppedForLossLegacy(dateIst)) return MOMENTUM_SCALPER_MAX_LOSSES_PER_DAY;
+  return 0;
 }
 
-function sessionStoppedForLoss(dateIst: string): boolean {
+function recordSessionLoss(dateIst: string): number {
+  const next = sessionLossCount(dateIst) + 1;
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  fs.writeFileSync(
+    LOSSES_FILE(dateIst),
+    JSON.stringify({ dateIST: dateIst, losses: next, at: new Date().toISOString() }),
+  );
+  return next;
+}
+
+function sessionStoppedForLossLegacy(dateIst: string): boolean {
   try {
     const raw = fs.readFileSync(RAN_MARKER(dateIst), "utf-8");
     const parsed = JSON.parse(raw) as { reason?: string };
@@ -652,6 +671,14 @@ function sessionStoppedForLoss(dateIst: string): boolean {
   } catch {
     return false;
   }
+}
+
+function sessionAlreadyDone(dateIst: string): boolean {
+  return fs.existsSync(RAN_MARKER(dateIst));
+}
+
+function sessionStoppedForLoss(dateIst: string): boolean {
+  return sessionLossCount(dateIst) >= MOMENTUM_SCALPER_MAX_LOSSES_PER_DAY;
 }
 
 function markSessionDone(dateIst: string, reason: "loss" | "finished" = "finished") {
@@ -673,12 +700,44 @@ function closedTradeWasLoss(
   return pct != null && pct < 0;
 }
 
-function stopTrapsAfterLoss(dateIst: string, pnlLabel: string) {
+function stopTrapsAfterLoss(dateIst: string, pnlLabel: string, lossCount: number) {
   enabled = false;
   clearPendingSignal();
   const note =
-    `Stopped for the day after a loss${pnlLabel} — resumes tomorrow ${formatIstMins(MOMENTUM_SCALPER_SCAN_START_MINS)}`;
+    `Stopped for the day after ${lossCount} loss${lossCount === 1 ? "" : "es"}${pnlLabel} — ` +
+    `resumes tomorrow ${formatIstMins(MOMENTUM_SCALPER_SCAN_START_MINS)}`;
   finishDay(dateIst, note, "loss");
+}
+
+function resumeScanAfterLoss(accessToken: string, lossCount: number, pnlLabel: string) {
+  pushLog(
+    `Loss ${lossCount}/${MOMENTUM_SCALPER_MAX_LOSSES_PER_DAY} today${pnlLabel} — ` +
+      `one more loss stops the day; resuming scan`,
+    "warning",
+  );
+  resumeScanAfterMins = istMinsFromDate(new Date());
+  phase = enabled ? "scanning" : "off";
+  message = enabled ? "Flat — resuming scan after loss" : DISABLED_MESSAGE;
+  if (enabled) attachTicker(accessToken);
+}
+
+function handleClosedTradeLoss(
+  accessToken: string,
+  dateIst: string,
+  pnlLabel: string,
+  closedEntry: number,
+  closedQty: number,
+  fallbackUnrealised: number | null,
+  pnl: number | null,
+) {
+  if (!closedTradeWasLoss(pnl, closedEntry, closedQty, fallbackUnrealised)) return false;
+  const lossCount = recordSessionLoss(dateIst);
+  if (lossCount >= MOMENTUM_SCALPER_MAX_LOSSES_PER_DAY) {
+    stopTrapsAfterLoss(dateIst, pnlLabel, lossCount);
+    return true;
+  }
+  resumeScanAfterLoss(accessToken, lossCount, pnlLabel);
+  return true;
 }
 
 function updateCurrentBar(spot: number, now = new Date()) {
@@ -900,28 +959,25 @@ async function cancelProfitExitLimitOrders(accessToken: string): Promise<void> {
   profitExitOrderIds = [];
 }
 
-async function placeProfitExitLimitOrders(
-  accessToken: string,
-  dateIst: string,
-  lockedFloorPct: number,
-): Promise<boolean> {
-  if (!tradingsymbol || quantity <= 0 || entryPrice <= 0 || lockedFloorPct <= 0) return false;
+async function placeTakeProfitLimitOrders(accessToken: string, dateIst: string): Promise<boolean> {
+  if (!tradingsymbol || quantity <= 0 || entryPrice <= 0) return false;
   if (profitExitPlacing) return profitExitOrderIds.length > 0;
 
-  const limitPrice = momentumProfitExitLimitPrice(entryPrice, lockedFloorPct);
-  if (!(limitPrice > 0)) return false;
-
   const lotSize = positionLotSize > 0 ? positionLotSize : 65;
-  const aimPct = momentumProfitExitPnlPct(lockedFloorPct);
+  const tpPct = MOMENTUM_SCALPER_TAKE_PROFIT_PCT;
   profitExitPlacing = true;
   try {
-    pushLog(
-      `Profit exit limit · SELL ${quantity} qty @ ₹${limitPrice.toFixed(2)} ` +
-        `(floor +${lockedFloorPct}% → aim ~+${aimPct}% on ₹${entryPrice.toFixed(2)} entry)`,
-      "success",
-    );
-
     for (let attempt = 1; attempt <= MOMENTUM_PROFIT_EXIT_PLACE_MAX_ATTEMPTS; attempt += 1) {
+      const limitPrice = momentumTakeProfitLimitPrice(entryPrice, tpPct);
+      if (!(limitPrice > 0)) return false;
+
+      if (attempt === 1) {
+        pushLog(
+          `Take-profit limit · SELL ${quantity} qty @ ₹${limitPrice.toFixed(2)} (+${tpPct}% on ₹${entryPrice.toFixed(2)} entry)`,
+          "success",
+        );
+      }
+
       if (profitExitOrderIds.length > 0) {
         await cancelProfitExitLimitOrders(accessToken);
       }
@@ -934,7 +990,7 @@ async function placeProfitExitLimitOrders(
       });
       for (const failure of placed.failures) {
         pushLog(
-          `Profit exit limit rejected (attempt ${attempt}/${MOMENTUM_PROFIT_EXIT_PLACE_MAX_ATTEMPTS}) · ${failure.message}`,
+          `Take-profit limit rejected (attempt ${attempt}/${MOMENTUM_PROFIT_EXIT_PLACE_MAX_ATTEMPTS}) · ${failure.message}`,
           "warning",
         );
       }
@@ -942,11 +998,12 @@ async function placeProfitExitLimitOrders(
       if (placed.orderIds.length > 0) {
         profitExitOrderIds = placed.orderIds;
         profitExitLimitPrice = limitPrice;
-        profitExitFloorPct = lockedFloorPct;
+        profitExitFloorPct = tpPct;
+        profitExitArmed = true;
         profitExitOrderStatus = "pending";
         profitExitFilledQty = 0;
         pushLog(
-          `Profit exit limit LIVE on Kite · ${placed.orderIds.length} order(s) · ${quantity} qty @ ₹${limitPrice.toFixed(2)}`,
+          `Take-profit limit LIVE on Kite · ${placed.orderIds.length} order(s) · ${quantity} qty @ ₹${limitPrice.toFixed(2)}`,
           "success",
         );
         saveState(dateIst);
@@ -956,7 +1013,7 @@ async function placeProfitExitLimitOrders(
 
     profitExitOrderStatus = "failed";
     pushLog(
-      `Profit exit limit not placed after ${MOMENTUM_PROFIT_EXIT_PLACE_MAX_ATTEMPTS} attempts — market backup at ~+${aimPct}% if price prints`,
+      `Take-profit limit not placed after ${MOMENTUM_PROFIT_EXIT_PLACE_MAX_ATTEMPTS} attempts — market backup at +${tpPct}% if price prints`,
       "warning",
     );
     saveState(dateIst);
@@ -1012,11 +1069,10 @@ async function maybeCompleteProfitExitFill(accessToken: string, dateIst: string)
     return false;
   }
 
-  const aimPct = profitExitFloorPct > 0 ? momentumProfitExitPnlPct(profitExitFloorPct) : null;
+  const aimPct = profitExitFloorPct > 0 ? profitExitFloorPct : MOMENTUM_SCALPER_TAKE_PROFIT_PCT;
   const summary =
-    `Exited — profit exit limit filled on Kite` +
-    (profitExitFloorPct > 0 ? ` · floor +${profitExitFloorPct}%` : "") +
-    (aimPct != null ? ` (~+${aimPct}% on entry)` : "") +
+    `Exited — take-profit limit filled on Kite` +
+    (aimPct > 0 ? ` · +${aimPct}% target` : "") +
     (profitExitLimitPrice > 0 ? ` @ ₹${profitExitLimitPrice.toFixed(2)}` : "") +
     `. Nifty ${profitExitExitIndexPrice > 0 ? profitExitExitIndexPrice.toFixed(2) : lastSpot?.toFixed(2) ?? "—"}.`;
 
@@ -1031,42 +1087,23 @@ async function maybeCompleteProfitExitFill(accessToken: string, dateIst: string)
   return true;
 }
 
-async function profitExitMarketBackup(
-  accessToken: string,
-  lockedFloorPct: number,
-): Promise<void> {
+async function takeProfitMarketBackup(accessToken: string): Promise<void> {
   if (squareOffInFlight || !tradingsymbol || quantity <= 0) return;
   await cancelProfitExitLimitOrders(accessToken);
   clearProfitExitTracking();
-  const aimPct = momentumProfitExitPnlPct(lockedFloorPct);
+  const tpPct = MOMENTUM_SCALPER_TAKE_PROFIT_PCT;
   const pnlPct = currentPnlPct();
   const pnlLabel = pnlPct != null ? ` · P&L ${pnlPct.toFixed(2)}%` : "";
   await squareOff(
     accessToken,
-    `Exited — market backup at ~+${aimPct}% under the +${lockedFloorPct}% floor${pnlLabel}. ` +
+    `Exited — market backup at +${tpPct}% target${pnlLabel}. ` +
       `Nifty ${(profitExitExitIndexPrice > 0 ? profitExitExitIndexPrice : lastSpot ?? entryIndexPrice).toFixed(2)}.`,
     profitExitExitIndexPrice > 0 ? profitExitExitIndexPrice : lastSpot ?? entryIndexPrice,
   );
 }
 
-async function armProfitExit(accessToken: string, dateIst: string, lockedFloorPct: number, exitIndexPrice: number) {
-  if (profitExitArmed && profitExitFloorPct === lockedFloorPct) return;
-
-  profitExitArmed = true;
-  profitExitFloorPct = lockedFloorPct;
-  profitExitExitIndexPrice = exitIndexPrice;
-  const aimPct = momentumProfitExitPnlPct(lockedFloorPct);
-  pushLog(
-    `Floor +${lockedFloorPct}% touched — placing resting limit sell at ~+${aimPct}% ` +
-      `(+${lockedFloorPct}% minus ${MOMENTUM_PROFIT_EXIT_GIVEBACK_PCT}%)`,
-    "info",
-  );
-  await placeProfitExitLimitOrders(accessToken, dateIst, lockedFloorPct);
-  saveState(dateIst);
-}
-
-async function maintainProfitExitOrders(accessToken: string, dateIst: string) {
-  if (phase !== "in_position" || squareOffInFlight || !profitExitArmed || profitExitFloorPct <= 0) return;
+async function maintainTakeProfitOrders(accessToken: string, dateIst: string) {
+  if (phase !== "in_position" || squareOffInFlight || !profitExitArmed) return;
 
   await syncProfitExitLimitOrders(accessToken, dateIst);
 
@@ -1075,14 +1112,14 @@ async function maintainProfitExitOrders(accessToken: string, dateIst: string) {
     profitExitOrderIds.length === 0 &&
     profitExitFilledQty <= 0
   ) {
-    await placeProfitExitLimitOrders(accessToken, dateIst, profitExitFloorPct);
+    await placeTakeProfitLimitOrders(accessToken, dateIst);
   }
 
   if (await maybeCompleteProfitExitFill(accessToken, dateIst)) return;
 
   const pnlPct = currentPnlPct();
-  if (shouldMomentumProfitExitMarketBackup(pnlPct, profitExitFloorPct)) {
-    await profitExitMarketBackup(accessToken, profitExitFloorPct);
+  if (shouldMomentumTakeProfitMarketBackup(pnlPct)) {
+    await takeProfitMarketBackup(accessToken);
   }
 }
 
@@ -1144,9 +1181,20 @@ async function completeTrackedExit(
     MOMENTUM_SCALPER_LIVE_RULES,
   );
   pushLog(reason, "success");
-  if (closedTradeWasLoss(pnl, closedEntry, closedQty, fallbackUnrealised)) {
-    const pnlLabel = pnl != null ? ` (₹${pnl.toFixed(0)})` : "";
-    stopTrapsAfterLoss(ctx.dateIST, pnlLabel);
+  if (
+    handleClosedTradeLoss(
+      accessToken,
+      ctx.dateIST,
+      pnl != null ? ` (₹${pnl.toFixed(0)})` : "",
+      closedEntry,
+      closedQty,
+      fallbackUnrealised,
+      pnl,
+    )
+  ) {
+    if (!sessionStoppedForLoss(ctx.dateIST) && istMinsFromDate(new Date()) >= closeMins) {
+      finishDay(ctx.dateIST, "Trade closed after the entry cutoff — done for today");
+    }
     return;
   }
 
@@ -1332,29 +1380,10 @@ async function buildEntryPlan(
   };
 }
 
-/**
- * Pick the next size to try after the broker refused the current one for funds.
- *
- * Zerodha usually quotes the required and available margin back, and scaling the lot count by that
- * ratio lands on an affordable size in one step. Without those figures there is nothing to compute
- * from, so it steps down a single lot. Either way the result is always at least one lot smaller,
- * so the retry loop cannot spin on the same quantity.
- */
-export function nextEntryLotsAfterMarginReject(
-  currentLots: number,
-  shortfall: { required: number; available: number } | null,
-): number {
-  if (currentLots <= 1) return 0;
-  let next = currentLots - 1;
-  if (shortfall && shortfall.required > 0) {
-    const scaled = Math.floor((currentLots * shortfall.available) / shortfall.required);
-    if (scaled < next) next = scaled;
-  }
-  return Math.max(0, next);
-}
+export { nextEntryLotsAfterMarginReject };
 
 /**
- * Resolve the ATM contract once the gate passed and the 2-pt pullback printed, then buy at market.
+ * Resolve the ATM contract once the gate passed and the 2-pt pullback printed, then market-buy.
  *
  * The strike is chosen from the live Nifty spot at that moment — not from the signal candle close,
  * which can be a minute and several points away. {@link buildEntryPlan} also quotes the premium and
@@ -1377,7 +1406,7 @@ async function armAtmContractForSignal(accessToken: string, side: DayScalperSide
     pendingSignal.optionMarkPrice = plan.optionLtp;
     pushLog(
       `ATM armed — ${plan.tradingsymbol} @ Nifty ${spot.toFixed(2)}, ` +
-        `premium ₹${plan.optionLtp.toFixed(2)} · buying at market now.`,
+        `premium LTP ₹${plan.optionLtp.toFixed(2)} · market buy on pullback.`,
       "info",
     );
   } catch (err) {
@@ -1391,7 +1420,7 @@ async function armAtmContractForSignal(accessToken: string, side: DayScalperSide
     atmArmInFlight = false;
   }
 
-  await enterAtMarket(accessToken, spot);
+  await enterAtMarketBuy(accessToken, spot);
 }
 
 
@@ -1453,17 +1482,32 @@ async function squareOff(
     }
 
     if (remainingQty > 0) {
-      quantity = remainingQty;
-      phase = "in_position";
-      message = `Exit incomplete — ${remainingQty} qty still open`;
-      pushLog(
-        `Exit incomplete · ${remainingQty} qty of ${symbol} is still open after ` +
-          `${SQUARE_OFF_MAX_ROUNDS} rounds — holding the position and retrying, no new trade ` +
-          `will start until it is flat. Check Zerodha.`,
-        "error",
-      );
-      saveState(getIndianMarketContext().dateIST);
-      return;
+      // The broker is the authority on what is still open. `remainingQty` is this loop's own
+      // arithmetic over fills Kite may not have reported yet, so carrying it forward overstates
+      // the position — the next order goes out oversized and the trade books on the wrong lots.
+      let openQty = remainingQty;
+      try {
+        const brokerQty = await fetchNetQty(accessToken, symbol);
+        if (brokerQty > 0) openQty = brokerQty;
+        else if (brokerQty === 0) openQty = 0;
+      } catch {
+        // Unreadable position — keep the local count rather than guess the leg is flat.
+      }
+
+      if (openQty > 0) {
+        quantity = openQty;
+        phase = "in_position";
+        message = `Exit incomplete — ${openQty} qty still open`;
+        pushLog(
+          `Exit incomplete · ${openQty} qty of ${symbol} is still open after ` +
+            `${SQUARE_OFF_MAX_ROUNDS} rounds — holding the position and retrying, no new trade ` +
+            `will start until it is flat. Check Zerodha.`,
+          "error",
+        );
+        saveState(getIndianMarketContext().dateIST);
+        return;
+      }
+      remainingQty = 0;
     }
 
     // A limit that took the whole position traded at its own price. Reading the LTP back would
@@ -1747,9 +1791,20 @@ async function closePositionAfterExternalExit(
 
   const weekday = formatWeekdayFromDateKey(dateIst);
   const closeMins = sessionCloseMinsForWeekday(weekday, MOMENTUM_SCALPER_LIVE_RULES);
-  if (closedTradeWasLoss(pnl, closedEntry, closedQty, fallbackUnrealised)) {
-    const pnlLabel = pnl != null ? ` (₹${pnl.toFixed(0)})` : "";
-    stopTrapsAfterLoss(dateIst, pnlLabel);
+  if (
+    handleClosedTradeLoss(
+      accessToken,
+      dateIst,
+      pnl != null ? ` (₹${pnl.toFixed(0)})` : "",
+      closedEntry,
+      closedQty,
+      fallbackUnrealised,
+      pnl,
+    )
+  ) {
+    if (!sessionStoppedForLoss(dateIst) && istMinsFromDate(new Date()) >= closeMins) {
+      finishDay(dateIst, "Trade closed on Zerodha — done for today");
+    }
     return;
   }
 
@@ -1835,8 +1890,6 @@ function runExitCheck() {
   if (phase !== "in_position" || !exitState || lastSpot == null || !(lastSpot > 0)) return;
 
   const ctx = getIndianMarketContext();
-  const profile = activeExitProfile();
-  const previousLocked = exitState.lockedPnlPct;
   const result = evaluateMomentumExit(exitState, {
     spot: lastSpot,
     pnlPct: currentPnlPct(),
@@ -1844,178 +1897,68 @@ function runExitCheck() {
   });
   exitState = result.state;
 
-  if (exitState.lockedPnlPct > previousLocked) {
-    const locked = exitState.lockedPnlPct;
-    pushLog(
-      `+${locked}% reached — floor locked at +${locked}%, next target ` +
-        `+${momentumPnlTargetPct(locked, profile)}%. Coming back down to +${locked}% places a ` +
-        `resting limit sell at ~+${momentumProfitExitPnlPct(locked)}%.`,
-      "info",
-    );
-    saveState(ctx.dateIST);
-  }
-
   const session = loadKiteSession();
-  if (result.exit && session?.accessToken) {
-    if (result.exit.hardStop || result.exit.outcome === "stop") {
-      void handleExitHit(
-        result.exit.exitIndexPrice,
-        result.exit.outcome,
-        result.exit.lockedPnlPct,
-        result.exit.hardStop === true,
-      );
-    } else if (result.exit.outcome === "trail-stop" && result.exit.lockedPnlPct > 0) {
-      void armProfitExit(
-        session.accessToken,
-        ctx.dateIST,
-        result.exit.lockedPnlPct,
-        result.exit.exitIndexPrice,
-      );
-    }
+  if (result.exit?.outcome === "stop" && session?.accessToken) {
+    void handleExitHit(result.exit.exitIndexPrice, result.exit.outcome);
   }
 
   if (session?.accessToken) {
-    void maintainProfitExitOrders(session.accessToken, ctx.dateIST);
+    void maintainTakeProfitOrders(session.accessToken, ctx.dateIST);
   }
 }
 
-async function handleExitHit(
-  exitIndexPrice: number,
-  outcome: string,
-  _lockedPnlPct = 0,
-  hardStop = false,
-) {
+async function handleExitHit(exitIndexPrice: number, outcome: string) {
   const session = loadKiteSession();
   if (!session?.accessToken) return;
   const profile = activeExitProfile();
   const config = momentumExitProfileConfig(profile);
   const pnlPct = currentPnlPct();
   const pnlLabel = pnlPct != null ? ` · P&L ${pnlPct.toFixed(2)}%` : "";
-  // The opening profile breaches strictly below its level; the standard one breaches at it.
+  await cancelProfitExitLimitOrders(session.accessToken);
+  clearProfitExitTracking();
+
   const breachWord = profile === "opening" ? "below" : "at or below";
-  if (hardStop) {
-    await cancelProfitExitLimitOrders(session.accessToken);
-    clearProfitExitTracking();
-    await squareOff(
-      session.accessToken,
-      `Exited — hard stop, option P&L broke −${config.hardStopLossPct}%${pnlLabel}. ` +
-        `No ${config.initialStopHoldMs / 1000}s hold and no limit, straight to market.`,
-      exitIndexPrice,
-    );
-    return;
-  }
-
-  if (outcome === "trail-stop") {
-    return;
-  }
-
   const label =
     outcome === "stop"
-      ? config.initialStopHoldMs <= 0
-        ? `Exited — initial stop hit (option P&L ${breachWord} −${config.initialStopLossPct}%)${pnlLabel}.`
-        : `Exited — initial stop hit (option P&L stayed ${breachWord} −${config.initialStopLossPct}% for ${config.initialStopHoldMs / 1000}s without recovering)${pnlLabel}.`
+      ? `Exited — stop hit (option P&L stayed ${breachWord} −${config.initialStopLossPct}% for ${config.initialStopHoldMs / 1000}s without recovering)${pnlLabel}.`
       : `Exited — Nifty ${exitIndexPrice.toFixed(2)}${pnlLabel}.`;
   await squareOff(session.accessToken, label, exitIndexPrice);
 }
 
-function parseKiteMinuteRows(raw: unknown): DayScalperCandle[] {
-  const rows = Array.isArray(raw) ? raw : [];
-  const out: DayScalperCandle[] = [];
-
-  for (const row of rows) {
-    if (!Array.isArray(row) || row.length < 5) continue;
-    const [time, open, high, low, close] = row;
-    if (typeof time !== "string") continue;
-    if (![open, high, low, close].every((v) => typeof v === "number" && Number.isFinite(v))) continue;
-
-    const parsed = new Date(time);
-    if (!Number.isFinite(parsed.getTime())) continue;
-
-    const mins = istMinsFromDate(parsed);
-    if (mins < RSI_PREFILL_SESSION_OPEN_MINS || mins > RSI_PREFILL_SESSION_CLOSE_MINS) continue;
-
-    out.push({
-      time,
-      timeIst: formatIstMins(mins),
-      mins,
-      open: open as number,
-      high: high as number,
-      low: low as number,
-      close: close as number,
-    });
-  }
-
-  out.sort((a, b) => a.mins - b.mins);
-  return out;
-}
-
-/** Live websocket bars override Zerodha history for the same minute. */
-export function mergeNiftyMinuteBarsForRsi(
-  prefill: DayScalperCandle[],
-  live: DayScalperCandle[],
-  current: DayScalperCandle | null,
-): DayScalperCandle[] {
-  const byMins = new Map<number, DayScalperCandle>();
-  for (const bar of prefill) byMins.set(bar.mins, bar);
-  for (const bar of live) byMins.set(bar.mins, bar);
-  if (current && current.close > 0) byMins.set(current.mins, current);
-  return [...byMins.values()].sort((a, b) => a.mins - b.mins);
-}
-
-async function warmRsiFromKiteHistory(accessToken: string, dateIst: string): Promise<void> {
-  if (rsiPrefillDateIst === dateIst && rsiPrefillBars.length >= MOMENTUM_SCALPER_RSI_PERIOD + 1) {
-    refreshLiveNiftyRsi();
+/** Poll Zerodha 1-min history for RSI(14) — throttled to protect the Kite rate limit. */
+async function refreshRsiFromKite(accessToken: string, dateIst: string, force = false): Promise<void> {
+  const nowMins = istMinsFromDate(new Date());
+  const now = Date.now();
+  if (!force && rsiRefreshInFlight) {
+    await rsiRefreshInFlight;
     return;
   }
-  if (rsiPrefillPromise) {
-    await rsiPrefillPromise;
-    refreshLiveNiftyRsi();
-    return;
-  }
+  if (!force && nowMins === lastRsiFetchMins && now - lastRsiFetchAt < RSI_REFRESH_MIN_MS) return;
 
-  rsiPrefillPromise = (async () => {
+  rsiRefreshInFlight = (async () => {
     try {
-      const ctx = getIndianMarketContext();
-      const { candles } = await fetchHistoricalCandles(
-        accessToken,
-        NIFTY_SPOT_KEY,
-        "minute",
-        `${dateIst} 09:15:00`,
-        `${dateIst} ${ctx.timeIST}`,
-      );
-      rsiPrefillBars = parseKiteMinuteRows(candles);
-      rsiPrefillDateIst = dateIst;
-      refreshLiveNiftyRsi();
-      if (liveNiftyRsi != null) {
+      const { rsi, barCount } = await fetchNiftyRsi14FromKite(accessToken, { liveSpot: lastSpot });
+      liveNiftyRsi = rsi;
+      lastRsiFetchAt = Date.now();
+      lastRsiFetchMins = nowMins;
+      if (rsi != null && rsiPrimedDateIst !== dateIst) {
+        rsiPrimedDateIst = dateIst;
         pushLog(
-          `RSI primed from Zerodha — ${rsiPrefillBars.length} session 1-min closes · RSI(14) ${liveNiftyRsi.toFixed(1)}`,
+          `RSI from Zerodha — ${barCount} 1-min closes · RSI(14) ${rsi.toFixed(1)}`,
           "info",
         );
       }
     } catch (err) {
       pushLog(
-        `RSI history fetch failed — ${err instanceof Error ? err.message : "falling back to websocket bars"}`,
+        `RSI fetch failed — ${err instanceof Error ? err.message : "Zerodha 1-min history unavailable"}`,
         "warning",
       );
     } finally {
-      rsiPrefillPromise = null;
+      rsiRefreshInFlight = null;
     }
   })();
 
-  await rsiPrefillPromise;
-  refreshLiveNiftyRsi();
-}
-
-function niftyBarClosesForRsi(): number[] {
-  return mergeNiftyMinuteBarsForRsi(rsiPrefillBars, completedBars, currentBar)
-    .map((bar) => bar.close)
-    .filter((close) => close > 0);
-}
-
-/** Recompute RSI from Zerodha history, completed websocket bars, and the forming minute. */
-function refreshLiveNiftyRsi(): number | null {
-  liveNiftyRsi = momentumLiveRsiFromBarCloses(niftyBarClosesForRsi(), MOMENTUM_SCALPER_RSI_PERIOD);
-  return liveNiftyRsi;
+  await rsiRefreshInFlight;
 }
 
 function onNiftyTick(tick: NiftyTick) {
@@ -2023,11 +1966,12 @@ function onNiftyTick(tick: NiftyTick) {
   lastSpot = tick.lastPrice;
   const prevMins = currentBar?.mins ?? -1;
   updateCurrentBar(tick.lastPrice, new Date(tick.receivedAtMs));
-  refreshLiveNiftyRsi();
 
   runExitCheck();
 
   if (currentBar && currentBar.mins !== prevMins && prevMins >= 0) {
+    const session = loadKiteSession();
+    if (session?.accessToken) void refreshRsiFromKite(session.accessToken, getIndianMarketContext().dateIST, true);
     void onMinuteClosed();
   }
 
@@ -2100,6 +2044,13 @@ function evaluateTriggerOnTick(tickAtMs: number) {
   if (pendingSignal.entryStartPrice == null) return;
   if (!trapsPullbackEntryTriggered(pendingSignal.side, lastSpot, pendingSignal.entryStartPrice)) return;
 
+  const rsiBlock = momentumLiveRsiBlocksEntry(liveNiftyRsi);
+  if (rsiBlock.blocked) {
+    pushLog(`No trade — ${rsiBlock.reason}`, "warning");
+    clearPendingSignal();
+    return;
+  }
+
   pendingSignal.entryAttempted = true;
   const session = loadKiteSession();
   if (!session?.accessToken) {
@@ -2134,7 +2085,7 @@ async function onMinuteClosed() {
 
   if (phase === "in_position" || phase === "exiting" || phase === "entering") return;
   if (bar.mins < scanFloorMins()) return;
-  if (!isPast916EntryWindow()) return;
+  if (!isNineSixteenSettledForDay()) return;
   if (!momentumScanReady(bar.mins)) {
     if (pendingSignal) clearPendingSignal();
     return;
@@ -2146,6 +2097,12 @@ async function onMinuteClosed() {
   const side = detectSignalSide(bar, MOMENTUM_SCALPER_LIVE_RULES);
   if (!side) return;
   if (bar.mins >= sessionCloseMinsForWeekday(weekday, MOMENTUM_SCALPER_LIVE_RULES)) return;
+
+  const rsiBlock = momentumLiveRsiBlocksEntry(liveNiftyRsi);
+  if (rsiBlock.blocked) {
+    pushLog(`No setup — ${rsiBlock.reason}`, "info");
+    return;
+  }
 
   const movePts = signedSignalMovePts(bar, MOMENTUM_SCALPER_LIVE_RULES);
   const bodyPts = Math.round((bar.close - bar.open) * 100) / 100;
@@ -2171,7 +2128,8 @@ async function onMinuteClosed() {
   warmEntryPath(session.accessToken);
   pushLog(
     `Setup — ${side === "CE" ? "Bullish" : "Bearish"} ${bar.timeIst} candle ` +
-      `(${Math.abs(movePts)} pt range, ${bodyPts > 0 ? "+" : ""}${bodyPts} pt body) → ${side} idea. ` +
+      `(${Math.abs(movePts)} pt range, ${bodyPts > 0 ? "+" : ""}${bodyPts} pt body) → ${side} idea · ` +
+      `RSI(14) ${liveNiftyRsi?.toFixed(1) ?? "—"} (need ${formatMomentumLiveRsiBucketsLabel()}). ` +
       `Next minute: any tick in the first second must reach ${side === "CE" ? "≥" : "≤"} ${gateNeed} ` +
       `(last tick ${signalLastTick.toFixed(2)}), then ${side === "CE" ? "drop" : "gain"} ` +
       `${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pts from the first tick.`,
@@ -2254,13 +2212,10 @@ async function adoptEntryFill(
   phase = "in_position";
   const profileConfig = momentumExitProfileConfig(entryProfile);
   message =
-    entryProfile === "opening"
-      ? `In ${decision.side} · opening ladder SL below −${profileConfig.initialStopLossPct}% (${profileConfig.initialStopHoldMs / 1000}s hold) · TP +${profileConfig.armPct}%`
-      : `In ${decision.side} · SL ${MOMENTUM_SCALPER_INITIAL_STOP_PNL_PCT}% P&L (${profileConfig.initialStopHoldMs / 1000}s hold) · ` +
-        `ladder from +${MOMENTUM_SCALPER_PNL_ARM_PCT}% P&L`;
+    `In ${decision.side} · SL −${profileConfig.initialStopLossPct}% (${profileConfig.initialStopHoldMs / 1000}s hold) · TP limit +${MOMENTUM_SCALPER_TAKE_PROFIT_PCT}%`;
   pushLog(
-    `Entered ${legLabel(entryLeg)} ${plan.tradingsymbol} · ${sizeLabel} · MIS market @ ₹${entryPrice.toFixed(2)} · ` +
-      `Nifty ${decision.entryIndexPrice.toFixed(2)} · ${exitProfileLabel(entryProfile)} exit rules`,
+    `Entered ${legLabel(entryLeg)} ${plan.tradingsymbol} · ${sizeLabel} · MIS limit @ ₹${entryPrice.toFixed(2)} · ` +
+      `Nifty ${decision.entryIndexPrice.toFixed(2)} · +${MOMENTUM_SCALPER_TAKE_PROFIT_PCT}% limit TP · −${profileConfig.initialStopLossPct}% stop (${profileConfig.initialStopHoldMs / 1000}s)`,
     "success",
   );
 
@@ -2269,21 +2224,28 @@ async function adoptEntryFill(
       ? plan.instrumentToken
       : ((await resolveInstrumentToken("NFO", plan.tradingsymbol, accessToken)) ?? 0);
   attachTicker(accessToken);
+  profitExitArmed = true;
+  profitExitFloorPct = MOMENTUM_SCALPER_TAKE_PROFIT_PCT;
+  try {
+    await placeTakeProfitLimitOrders(accessToken, dateIst);
+  } catch (err) {
+    pushLog(
+      `Take-profit limit placement failed · ${err instanceof Error ? err.message : "unknown"} · market backup at +${MOMENTUM_SCALPER_TAKE_PROFIT_PCT}% remains active`,
+      "warning",
+    );
+  }
   saveState(dateIst);
   clearKiteRejectedIp();
 }
 
+const MOMENTUM_ENTRY_MARKET_FILL_TIMEOUT_MS = 30_000;
+
 /**
- * Buy the armed contract at market, right now.
+ * Buy the armed contract at market the moment the index pullback hits.
  *
- * Everything the order needs was settled by {@link buildEntryPlan} a moment ago — the contract, a
- * live premium quote and a lot count sized against a freshly read balance — so this does no
- * further reading before sending. The one thing it will do is re-send smaller: Zerodha prices a
- * market buy off the ask plus charges while the plan is priced off the last trade, so a refusal
- * for funds is a sizing problem rather than a reason to abandon the setup. That retry only runs on
- * a refusal that filled nothing; a partial fill is inventory and is adopted as it stands.
+ * Sizing comes from {@link buildEntryPlan}. Margin refusals with zero fill step the lot count down.
  */
-async function enterAtMarket(accessToken: string, spotAtGate: number) {
+async function enterAtMarketBuy(accessToken: string, spotAtGate: number) {
   if (marketEntryInFlight) return;
   const signal = pendingSignal;
   const plan = preparedEntry;
@@ -2319,13 +2281,15 @@ async function enterAtMarket(accessToken: string, spotAtGate: number) {
   marketEntryInFlight = true;
   phase = "entering";
   logPlannedSize(plan);
-  message = `Market buy ${plan.tradingsymbol} · ${plan.lots} lot${plan.lots === 1 ? "" : "s"}`;
 
   let lots = plan.lots;
   let filled: { average_price: number; filled_quantity: number } | null = null;
   try {
     while (lots > 0 && filled == null) {
       const quantity = lots * plan.lotSize;
+      message = `Market buy ${plan.tradingsymbol} · ${lots} lot${lots === 1 ? "" : "s"}`;
+      pushLog(`MARKET BUY ${quantity} qty — ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback entry`, "info");
+
       writeEntryClaim({
         dateIST: ctx.dateIST,
         tradingsymbol: plan.tradingsymbol,
@@ -2336,18 +2300,77 @@ async function enterAtMarket(accessToken: string, spotAtGate: number) {
         at: new Date().toISOString(),
       });
 
+      const placed = await placeSplitOrders(accessToken, {
+        tradingsymbol: plan.tradingsymbol,
+        transaction_type: "BUY",
+        quantities: splitQuantityIntoOrderChunks(quantity, plan.lotSize),
+      });
+      for (const failure of placed.failures) {
+        pushLog(`Entry market order rejected · ${failure.message}`, "warning");
+      }
+      if (placed.orderIds.length === 0) {
+        throw new Error(`Entry market order not accepted for ${plan.tradingsymbol}`);
+      }
+
       try {
-        const orderId = await placeRegularMarketOrder(accessToken, {
-          tradingsymbol: plan.tradingsymbol,
-          exchange: "NFO",
-          transaction_type: "BUY",
-          product: "MIS",
-          quantity,
-        });
-        filled = await waitForOrderComplete(accessToken, orderId);
+        const results = await Promise.allSettled(
+          placed.orderIds.map((orderId) =>
+            waitForOrderComplete(accessToken, orderId, MOMENTUM_ENTRY_MARKET_FILL_TIMEOUT_MS),
+          ),
+        );
+
+        let filledQty = 0;
+        let cost = 0;
+        let hadReject = false;
+        let rejectErr: unknown = null;
+        for (const result of results) {
+          if (result.status === "fulfilled") {
+            filledQty += result.value.filled_quantity;
+            cost += result.value.average_price * result.value.filled_quantity;
+          } else if (result.reason instanceof KiteOrderRejectedError) {
+            hadReject = true;
+            rejectErr = result.reason;
+            filledQty += result.reason.filledQuantity;
+            cost += result.reason.averagePrice * result.reason.filledQuantity;
+          } else {
+            rejectErr = result.reason;
+          }
+        }
+
+        if (filledQty > 0) {
+          filled = {
+            average_price: cost / filledQty,
+            filled_quantity: filledQty,
+          };
+          if (filledQty < quantity) {
+            pushLog(
+              `Partly filled — ${filledQty}/${quantity} ${plan.tradingsymbol} on the market entry.`,
+              "warning",
+            );
+          }
+          break;
+        }
+
+        if (hadReject && rejectErr instanceof KiteOrderRejectedError && rejectErr.filledQuantity > 0) {
+          filled = {
+            average_price: rejectErr.averagePrice || plan.optionLtp,
+            filled_quantity: rejectErr.filledQuantity,
+          };
+          break;
+        }
+        if (rejectErr != null && isInsufficientFundsError(rejectErr)) {
+          const next = nextEntryLotsAfterMarginReject(lots, parseMarginShortfall(rejectErr));
+          if (next <= 0) throw rejectErr;
+          pushLog(
+            `Margin short at ${lots} lot${lots === 1 ? "" : "s"} — retrying ${plan.tradingsymbol} at ${next}.`,
+            "warning",
+          );
+          lots = next;
+          continue;
+        }
+        if (rejectErr != null) throw rejectErr;
+        throw new Error(`Entry market order not filled within ${MOMENTUM_ENTRY_MARKET_FILL_TIMEOUT_MS / 1000}s`);
       } catch (err) {
-        // Lots that traded before the refusal are inventory, whatever the order status says. They
-        // are taken as the position rather than re-sent — sending again would double the leg.
         if (err instanceof KiteOrderRejectedError && err.filledQuantity > 0) {
           pushLog(
             `Partly filled — ${err.filledQuantity} of ${quantity} ${plan.tradingsymbol} traded before the order ${err.status.toLowerCase()}. Holding what filled.`,
@@ -2372,7 +2395,6 @@ async function enterAtMarket(accessToken: string, spotAtGate: number) {
     }
     if (!filled) throw new Error(`Balance will not cover any size of ${plan.tradingsymbol}`);
   } catch (err) {
-    // Nothing traded, so the claim is a false breadcrumb — drop it and go back to scanning.
     clearEntryClaim();
     const note = err instanceof Error ? err.message : "Market entry failed";
     pushLog(note, "error");
@@ -2393,8 +2415,6 @@ async function enterAtMarket(accessToken: string, spotAtGate: number) {
       filled,
     );
   } catch (err) {
-    // The lots are real even though the bot could not finish recording them. The claim is left
-    // standing on purpose: it is what the reconciler reads to adopt the leg instead of stranding it.
     const note = err instanceof Error ? err.message : "Entry fill could not be adopted";
     pushLog(`${note} — the claim is left standing so the leg is reconciled, not abandoned.`, "error");
     phase = "error";
@@ -2426,7 +2446,6 @@ function attachTicker(accessToken: string) {
       if (niftyInstrumentToken <= 0) {
         niftyInstrumentToken = await resolveNifty50InstrumentToken(accessToken);
       }
-      void warmRsiFromKiteHistory(accessToken, getIndianMarketContext().dateIST);
     } catch {
       tickerAttaching = false;
       return;
@@ -2484,21 +2503,6 @@ async function mainLoop() {
   const weekday = formatWeekdayFromDateKey(ctx.dateIST);
   applyDailySchedule(ctx.dateIST, weekday);
 
-  // Disabled means no new trades, but a leg that is already open still has to be managed to its
-  // exit — dropping out here would leave it to the broker's auto square-off.
-  if (!enabled && !isHoldingPosition()) {
-    // A position seen out under a disabled bot leaves the ticker attached, and it would otherwise
-    // stay subscribed until the process restarts, still building bars for a bot that is off.
-    if (tickerStop) {
-      tickerStop();
-      tickerStop = null;
-    }
-    clearPendingSignal();
-    phase = "off";
-    scheduleNext(5000);
-    return;
-  }
-
   if (!session?.accessToken) {
     phase = "waiting";
     message = "Connect Kite in Settings";
@@ -2515,6 +2519,32 @@ async function mainLoop() {
 
   loadStateOnce(ctx.dateIST);
   ensureSessionDate(ctx.dateIST);
+
+  if (isTrapsBotHardDisabled() && enabled && !isHoldingPosition()) {
+    enabled = false;
+    phase = "off";
+    message = SERVER_DISABLED_MESSAGE;
+    if (tickerStop) {
+      tickerStop();
+      tickerStop = null;
+    }
+    clearPendingSignal();
+  }
+
+  // Disabled means no new trades, but a leg that is already open still has to be managed to its
+  // exit — dropping out here would leave it to the broker's auto square-off.
+  if (!enabled && !isHoldingPosition()) {
+    // A position seen out under a disabled bot leaves the ticker attached, and it would otherwise
+    // stay subscribed until the process restarts, still building bars for a bot that is off.
+    if (tickerStop) {
+      tickerStop();
+      tickerStop = null;
+    }
+    clearPendingSignal();
+    phase = "off";
+    scheduleNext(5000);
+    return;
+  }
 
   if (sessionAlreadyDone(ctx.dateIST) && !entryClaim && phase !== "in_position" && phase !== "exiting") {
     phase = "done";
@@ -2536,6 +2566,10 @@ async function mainLoop() {
 
   if (isInBotWsHours()) {
     attachTicker(session.accessToken);
+  }
+
+  if (enabled || phase === "in_position" || phase === "exiting") {
+    void refreshRsiFromKite(session.accessToken, ctx.dateIST);
   }
 
   // An open trade is never cut at the entry cutoff — it runs its own target/stop. Only the
@@ -2604,7 +2638,7 @@ async function mainLoop() {
     phase = "waiting";
     const nextOpen = momentumNextLiveEntryOpenMins(nowMins);
     message =
-      !isPast916EntryWindow()
+      !isNineSixteenSettledForDay()
         ? "On hold — waiting for the 9:16 trade to finish (after 9:16:30 IST)"
         : nextOpen != null
           ? `On hold — scanning opens ${formatIstMins(nextOpen)} IST`
@@ -2627,7 +2661,7 @@ async function mainLoop() {
             ? `gate passed from ${pendingSignal.entryStartPrice.toFixed(2)} · waiting for ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback`
             : "gate passed — waiting for pullback"
           : `scanning first second for ${pendingSignal.side === "CE" ? "≥" : "≤"} ${momentumGateLevel(pendingSignal.side, pendingSignal.signalLastTick).toFixed(2)} vs last ${pendingSignal.signalLastTick.toFixed(2)}`)
-    : `Scanning live bars · range ≥ ${MOMENTUM_SCALPER_LIVE_RULES.minMovePts} pts · first-second gate ±${MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS} · ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback entry · SL ${MOMENTUM_SCALPER_INITIAL_STOP_PNL_PCT}% P&L`;
+    : `Scanning live bars · range ≥ ${MOMENTUM_SCALPER_LIVE_RULES.minMovePts} pts · RSI ${formatMomentumLiveRsiBucketsLabel()} · first-second gate ±${MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS} · ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback · market entry · SL −2% (3s) · TP +${MOMENTUM_SCALPER_TAKE_PROFIT_PCT}% limit`;
 
   scheduleNext(POLL_MS);
 }
@@ -2649,13 +2683,13 @@ function buildStatus(): MomentumScalperBotStatus {
   const weekday = formatWeekdayFromDateKey(ctx.dateIST);
   const profile = activeExitProfile();
   const profileConfig = momentumExitProfileConfig(profile);
-  const locked = exitState?.lockedPnlPct ?? 0;
   const idxPnl =
     phase === "in_position" && exitState && lastSpot != null
       ? indexPnlPts(exitState.side, entryIndexPrice, lastSpot)
       : null;
   return {
     enabled,
+    serverDisabled: isTrapsBotHardDisabled(),
     phase,
     dateIST: ctx.dateIST,
     weekday,
@@ -2663,6 +2697,7 @@ function buildStatus(): MomentumScalperBotStatus {
     rules: MOMENTUM_SCALPER_LIVE_RULES,
     wsConnected,
     tradesToday,
+    lossesToday: sessionLossCount(ctx.dateIST),
     stoppedForLossToday: sessionStoppedForLoss(ctx.dateIST),
     maxLots: maxLotsPerTrade(),
     plannedLots: pendingSignal && preparedEntry?.side === pendingSignal.side ? preparedEntry.lots : null,
@@ -2676,22 +2711,23 @@ function buildStatus(): MomentumScalperBotStatus {
     entryIndexPrice: entryIndexPrice > 0 ? entryIndexPrice : null,
     initialStopPnlPct: -profileConfig.initialStopLossPct,
     initialStopHoldSec: profileConfig.initialStopHoldMs / 1000,
-    hardStopPnlPct: -profileConfig.hardStopLossPct,
-    trailing: (exitState?.lockedPnlPct ?? 0) >= profileConfig.armPct,
+    hardStopPnlPct: 0,
+    trailing: false,
     pnlPct: phase === "in_position" ? currentPnlPct() : null,
-    pnlLockedPct: exitState?.lockedPnlPct ?? 0,
-    pnlTargetPct: exitState ? momentumPnlTargetPct(exitState.lockedPnlPct, profile) : null,
+    pnlLockedPct: 0,
+    pnlTargetPct: MOMENTUM_SCALPER_TAKE_PROFIT_PCT,
     pnlStopPct: exitState ? momentumPnlStopPct(exitState.lockedPnlPct, profile) : null,
-    pnlArmPct: profileConfig.armPct,
-    pnlStepPct: profileConfig.stepPct,
+    pnlArmPct: MOMENTUM_SCALPER_TAKE_PROFIT_PCT,
+    pnlStepPct: 0,
     exitProfile: exitState?.exitProfile ?? null,
     exitRules: {
       standard: exitRuleSummary("standard"),
       opening: exitRuleSummary("opening"),
     },
-    profitExitPnlPct: locked > 0 ? momentumProfitExitPnlPct(locked) : null,
-    profitExitPrice: locked > 0 && entryPrice > 0 ? momentumProfitExitLimitPrice(entryPrice, locked) : null,
-    profitExitGivebackPct: MOMENTUM_PROFIT_EXIT_GIVEBACK_PCT,
+    profitExitPnlPct: profitExitArmed ? MOMENTUM_SCALPER_TAKE_PROFIT_PCT : null,
+    profitExitPrice:
+      entryPrice > 0 ? momentumTakeProfitLimitPrice(entryPrice, MOMENTUM_SCALPER_TAKE_PROFIT_PCT) : null,
+    profitExitGivebackPct: 0,
     profitExitArmed,
     profitExitOrderStatus: profitExitArmed ? profitExitOrderStatus : undefined,
     profitExitOrderIds:
@@ -2706,7 +2742,7 @@ function buildStatus(): MomentumScalperBotStatus {
     indexPnlPts: idxPnl,
     lastBarTimeIst: currentBar?.timeIst ?? completedBars.at(-1)?.timeIst ?? null,
     completedBars: completedBars.length,
-    nineSixteenSettled: momentumScanReady(istMinsFromDate(new Date())),
+    nineSixteenSettled: isNineSixteenSettledForDay(),
     scanStartIst: SCHEDULE_LABEL,
     forceExitIst: MOMENTUM_SCALPER_FORCE_EXIT_IST,
     liveNiftyRsi,
@@ -2731,9 +2767,13 @@ export async function getMomentumScalperBotStatusLive(): Promise<MomentumScalper
 
 export function setMomentumScalperBotEnabled(next: boolean) {
   const ctx = getIndianMarketContext();
+  if (next && isTrapsBotHardDisabled()) {
+    pushLog("Cannot enable — Traps is disabled on the server (MOMENTUM_SCALPER_BOT_ENABLED=0)", "warning");
+    return;
+  }
   if (next && sessionAlreadyDone(ctx.dateIST)) {
     const detail = sessionStoppedForLoss(ctx.dateIST)
-      ? "today's session ended after a loss"
+      ? `today's session ended after ${MOMENTUM_SCALPER_MAX_LOSSES_PER_DAY} losses`
       : "today's session is finished";
     pushLog(`Cannot enable — ${detail}`, "warning");
     return;
@@ -2763,7 +2803,7 @@ export function setMomentumScalperBotEnabled(next: boolean) {
   message = "Traps enabled — scanning after 9:16:30 through entry cutoff";
   pushLog("Traps enabled", "info");
   const session = loadKiteSession();
-  if (session?.accessToken) void warmRsiFromKiteHistory(session.accessToken, ctx.dateIST);
+  if (session?.accessToken) void refreshRsiFromKite(session.accessToken, ctx.dateIST, true);
   scheduleNext(0);
 }
 
@@ -2771,7 +2811,16 @@ export function startMomentumScalperBot() {
   const ctx = getIndianMarketContext();
   loadStateOnce(ctx.dateIST);
   loadEntryClaim(ctx.dateIST);
-  if (isHoldingPosition()) {
+  if (isTrapsBotHardDisabled()) {
+    enabled = false;
+    phase = isHoldingPosition() ? phase : "off";
+    message = isHoldingPosition()
+      ? "Disabled on server — seeing the open position out, no new entries"
+      : SERVER_DISABLED_MESSAGE;
+    if (isHoldingPosition()) {
+      pushLog(message, "warning");
+    }
+  } else if (isHoldingPosition()) {
     pushLog("Recovered an open position on startup — managing it out", "warning");
   } else {
     enabled = false;

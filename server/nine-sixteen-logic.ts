@@ -1,4 +1,5 @@
 import type { ParsedCandle } from "../src/lib/candles.js";
+import { roundToOptionTick } from "../src/lib/kite-orders.js";
 import { getIndianMarketContext } from "../src/lib/market-time.js";
 import type { TradeLeg } from "../src/lib/trade-calculations.js";
 import type { NineFifteenDirection } from "../src/types/nine-fifteen.js";
@@ -59,7 +60,7 @@ export const NINE_SIXTEEN_NEAR_TARGET_MAX_DISTANCE = 50;
 /**
  * Live entry timing (IST):
  * 9:00:00–16:00:00 keep Kite WS up · first Nifty tick in 9:15:00–9:15:15 = open
- * last tick before 9:16:00 = close (9:15:59) · enter immediately at 9:16:00.
+ * last tick before 9:16:00 = close (9:15:59) · enter at 9:16:01 (1st + 2nd option WS tick).
  */
 export const NINE_SIXTEEN_WS_CONNECT_SEC = 9 * 3600;
 /** Drop Kite websocket after 16:00 IST (market already closed). */
@@ -67,15 +68,25 @@ export const NINE_SIXTEEN_WS_DISCONNECT_SEC = 16 * 3600;
 export const NINE_SIXTEEN_OPEN_TICK_START_SEC = 9 * 3600 + 15 * 60;
 export const NINE_SIXTEEN_OPEN_TICK_END_SEC = 9 * 3600 + 15 * 60 + 15;
 export const NINE_SIXTEEN_CLOSE_SEAL_SEC = 9 * 3600 + 16 * 60;
+/** Last WS tick in the 9:15:59 second — parallel index exit close reference. */
+export const NINE_FIFTEEN_WS_CLOSE_59_SEC = 9 * 3600 + 15 * 60 + 59;
+/** First Nifty WS tick in the 9:16:00 second — parallel index exit open reference. */
+export const NINE_SIXTEEN_WS_OPEN_00_SEC = NINE_SIXTEEN_CLOSE_SEAL_SEC;
+/** Last WS tick in the 9:16:59 second — 9:16 minute close for green retarget. */
+export const NINE_SIXTEEN_WS_CLOSE_916_59_SEC = 9 * 3600 + 16 * 60 + 59;
+/** From 9:17:00 — parallel index exit may retarget if the 9:16 minute closed green. */
+export const NINE_SIXTEEN_HYBRID_GREEN_MINUTE_RETARGET_SEC = 9 * 3600 + 17 * 60;
 /** @deprecated first WS tick in 9:15:00–9:15:15 is open */
 export const NINE_SIXTEEN_OPEN_CAPTURE_SEC = NINE_SIXTEEN_OPEN_TICK_START_SEC;
 /** @deprecated close seals at 9:16:00 from last WS tick */
 export const NINE_SIXTEEN_OHLC_CAPTURE_SEC = NINE_SIXTEEN_CLOSE_SEAL_SEC;
 /** @deprecated use NINE_SIXTEEN_CLOSE_SEAL_SEC */
 export const NINE_SIXTEEN_CLOSE_CAPTURE_SEC = NINE_SIXTEEN_CLOSE_SEAL_SEC;
-/** Place CE/PE as soon as 9:16:00 starts (close already sealed). */
-export const NINE_SIXTEEN_ENTRY_SEC = 9 * 3600 + 16 * 60;
-/** @deprecated no buffer after 9:16:00 */
+/** Place CE/PE one second after the 9:15 close seals (close already captured at 9:16:00). */
+export const NINE_SIXTEEN_ENTRY_SEC = 9 * 3600 + 16 * 60 + 1;
+/** Backtest still prices at the Kite 9:16:00 bar open. */
+export const NINE_SIXTEEN_BACKTEST_ENTRY_SEC = 9 * 3600 + 16 * 60;
+/** @deprecated no buffer after entry instant */
 export const NINE_SIXTEEN_ENTRY_BUFFER_SEC = 0;
 /** Entry order window ends at 9:16:30 IST (seconds of day). */
 export const NINE_SIXTEEN_ENTRY_WINDOW_END_SEC = 9 * 3600 + 16 * 60 + 30;
@@ -87,12 +98,23 @@ export const NINE_SIXTEEN_PRE_RESOLVE_SEC = 9 * 3600 + 15 * 60 + 58;
 /**
  * The 9:15 trade — a separate, earlier leg that runs before the 9:16 one.
  *
- * The 9:15 minute is read ten seconds in: if price is at least 5 pts below the 9:15 open at that
- * point, an ATM PE goes out at 9:15:11. Smaller red reads, green, and flat are skipped.
+ * The 9:15 minute is read ten seconds in: red ≥ 5 pts → ATM PE · green ≥ 10 pts → ATM CE at 9:15:11.
  */
 export const NINE_FIFTEEN_PRE_RESOLVE_SEC = 9 * 3600 + 15 * 60 + 4;
-/** Minimum drop (open − mark at 9:15:10) required to arm the 9:15:11 PE entry. */
+/** Minimum drop (open − mark) at 9:15:10 to arm the 9:15:11 PE entry. */
 export const NINE_FIFTEEN_MIN_DROP_PTS = 5;
+/** Minimum rise (mark − open) at 9:15:10 to arm the 9:15:11 CE entry. */
+export const NINE_FIFTEEN_MIN_RISE_PTS = 10;
+
+/** True when the websocket 9:15 open/close body is strictly below the minimum move band. */
+export function is915BodyBelowMinPts(
+  open: number,
+  close: number,
+  minPts = NINE_FIFTEEN_MIN_DROP_PTS,
+): boolean {
+  if (!(open > 0) || !(close > 0)) return false;
+  return Math.abs(close - open) + 1e-9 < minPts;
+}
 /** The read: last tick strictly before 9:15:10 decides red or green. */
 export const NINE_FIFTEEN_SIGNAL_READ_SEC = 9 * 3600 + 15 * 60 + 10;
 /** The order goes out here. */
@@ -102,6 +124,8 @@ export const NINE_FIFTEEN_ENTRY_SEC = 9 * 3600 + 15 * 60 + 11;
  * 3% rung before 9:16:00, so it would only stand in the way of the 9:16 trade.
  */
 export const NINE_FIFTEEN_ENTRY_WINDOW_END_SEC = 9 * 3600 + 15 * 60 + 20;
+/** Last second for instant margin downsize retries on the 9:15:11 entry (skip leg if not in by 9:15:16). */
+export const NINE_FIFTEEN_MARGIN_RETRY_END_SEC = 9 * 3600 + 15 * 60 + 15;
 /** @deprecated use NINE_SIXTEEN_ENTRY_WINDOW_END_SEC */
 export const NINE_SIXTEEN_ENTRY_WINDOW_END_MINUTE = Math.floor(NINE_SIXTEEN_ENTRY_WINDOW_END_SEC / 60);
 /** Kite allows 1 /quote request per second — never poll faster than that. */
@@ -154,7 +178,7 @@ export function istMsOfDay(nowMs = Date.now()): number {
   return istSecondsOfDay(new Date(nowMs)) * 1000 + (nowMs % 1000);
 }
 
-/** Signed ms until 9:16:00.000 IST — negative once the entry instant has passed. */
+/** Signed ms until the live entry instant (9:16:01.000 IST) — negative once it has passed. */
 export function msUntilEntryInstant(nowMs = Date.now()): number {
   return NINE_SIXTEEN_ENTRY_SEC * 1000 - istMsOfDay(nowMs);
 }
@@ -207,7 +231,7 @@ export function msUntilCloseCapture(nowMs = Date.now()): number {
   return msUntilSecOfDay(NINE_SIXTEEN_CLOSE_SEAL_SEC, nowMs);
 }
 
-/** Ms until 9:16:00 order entry (or 0 if due). */
+/** Ms until live order entry (9:16:01, or 0 if due). */
 export function msUntil916Entry(nowMs = Date.now()): number {
   return msUntilSecOfDay(NINE_SIXTEEN_ENTRY_SEC, nowMs);
 }
@@ -288,6 +312,22 @@ export function isIn915CloseTickWindow(nowMs = Date.now()): boolean {
   return nowSec >= NINE_SIXTEEN_OPEN_TICK_START_SEC && nowSec < NINE_SIXTEEN_CLOSE_SEAL_SEC;
 }
 
+export function isIn91559WsCloseSecond(nowMs = Date.now()): boolean {
+  return istSecondsOfDay(new Date(nowMs)) === NINE_FIFTEEN_WS_CLOSE_59_SEC;
+}
+
+export function isIn91600WsOpenSecond(nowMs = Date.now()): boolean {
+  return istSecondsOfDay(new Date(nowMs)) === NINE_SIXTEEN_WS_OPEN_00_SEC;
+}
+
+export function isIn91659WsCloseSecond(nowMs = Date.now()): boolean {
+  return istSecondsOfDay(new Date(nowMs)) === NINE_SIXTEEN_WS_CLOSE_916_59_SEC;
+}
+
+export function isPast916GreenMinuteRetarget(nowMs = Date.now()): boolean {
+  return istSecondsOfDay(new Date(nowMs)) >= NINE_SIXTEEN_HYBRID_GREEN_MINUTE_RETARGET_SEC;
+}
+
 /** Ready to place CE/PE after open+close are captured. */
 export function isReadyFor916Entry(nowMs = Date.now()): boolean {
   const nowSec = istSecondsOfDay(new Date(nowMs));
@@ -306,7 +346,7 @@ export function isReadyForAtmPreResolve(nowMs = Date.now()): boolean {
   return nowSec >= NINE_SIXTEEN_PRE_RESOLVE_SEC && nowSec < NINE_SIXTEEN_ENTRY_SEC;
 }
 
-/** 9:15:04–9:15:11 — resolve the ATM PE so the 9:15:11 order makes no REST call. */
+/** 9:15:04–9:15:11 — resolve ATM CE + PE so the 9:15:11 order makes no REST call. */
 export function isReadyForNineFifteenPreResolve(nowMs = Date.now()): boolean {
   const nowSec = istSecondsOfDay(new Date(nowMs));
   return nowSec >= NINE_FIFTEEN_PRE_RESOLVE_SEC && nowSec < NINE_FIFTEEN_ENTRY_SEC;
@@ -324,6 +364,10 @@ export function isReadyForNineFifteenEntry(nowMs = Date.now()): boolean {
 
 export function isPastNineFifteenEntryWindow(nowMs = Date.now()): boolean {
   return istSecondsOfDay(new Date(nowMs)) > NINE_FIFTEEN_ENTRY_WINDOW_END_SEC;
+}
+
+export function isPastNineFifteenMarginRetryWindow(nowMs = Date.now()): boolean {
+  return istSecondsOfDay(new Date(nowMs)) > NINE_FIFTEEN_MARGIN_RETRY_END_SEC;
 }
 
 /** True once the 9:15 minute is over, so a 9:15 leg still open has missed its own window. */
@@ -412,13 +456,13 @@ export function decide915Entry(bar: NineSixteen915Bar): NineSixteenEntryDecision
  * ------------------------------------------------------------------------------------------- */
 
 export type NineFifteenEntryDecision =
-  | { action: "enter"; leg: "PE_BUY"; dropPts: number }
+  | { action: "enter"; leg: TradeLeg; movePts: number }
   | { action: "skip"; reason: string };
 
 /**
- * Red at the 9:15:10 read, measured against the 9:15 open.
+ * Direction at the 9:15:10 read, measured against the 9:15 open.
  *
- * Requires open − mark ≥ {@link NINE_FIFTEEN_MIN_DROP_PTS} index points. Green or flat is skipped.
+ * Red ≥ {@link NINE_FIFTEEN_MIN_DROP_PTS} → PE_BUY · green ≥ {@link NINE_FIFTEEN_MIN_RISE_PTS} → CE_BUY.
  */
 export function decideNineFifteenEntry(
   open: number,
@@ -431,21 +475,24 @@ export function decideNineFifteenEntry(
   if (change === 0) {
     return { action: "skip", reason: `Flat at the 10s mark (${markPrice.toFixed(2)}) — no trade` };
   }
+  const movePts = Math.abs(change);
   if (change > 0) {
+    if (movePts + 1e-9 >= NINE_FIFTEEN_MIN_RISE_PTS) {
+      return { action: "enter", leg: "CE_BUY", movePts };
+    }
     return {
       action: "skip",
-      reason: `Green at the 10s mark (+${change.toFixed(2)} pts) — the 9:15 trade only takes red`,
+      reason: `Green but rise too small at the 10s mark (+${movePts.toFixed(2)} pts · need at least +${NINE_FIFTEEN_MIN_RISE_PTS})`,
     };
   }
-  const dropPts = Math.abs(change);
-  if (dropPts + 1e-9 < NINE_FIFTEEN_MIN_DROP_PTS) {
+  if (movePts + 1e-9 < NINE_FIFTEEN_MIN_DROP_PTS) {
     return {
       action: "skip",
       reason:
-        `Red but drop too small at the 10s mark (−${dropPts.toFixed(2)} pts · need at least −${NINE_FIFTEEN_MIN_DROP_PTS})`,
+        `Red but drop too small at the 10s mark (−${movePts.toFixed(2)} pts · need at least −${NINE_FIFTEEN_MIN_DROP_PTS})`,
     };
   }
-  return { action: "enter", leg: "PE_BUY", dropPts };
+  return { action: "enter", leg: "PE_BUY", movePts };
 }
 
 /* The 9:15 exit ladder lives further down, next to the 9:16 one it mirrors. */
@@ -524,7 +571,7 @@ export function getIndexExitScheduleLabel(mode: NineSixteenExitMode = "main"): s
 }
 
 /**
- * Live index exit: tiered ± from Nifty 50 spot at 9:16:00 fill (not 9:15 open, not option premium).
+ * Live index exit: tiered ± from Nifty 50 spot at 9:16:01 fill (not 9:15 open, not option premium).
  * 9:15 open/close chooses CE vs PE and which exit schedule.
  */
 export function shouldExitNineSixteen(
@@ -537,6 +584,52 @@ export function shouldExitNineSixteen(
   if (leg === "CE_BUY") return spot >= entrySpot + target;
   if (leg === "PE_BUY") return spot <= entrySpot - target;
   return false;
+}
+
+/** Live 9:16 hybrid index exit — both red when 9:16:00 WS open ≤ 9:15:59 WS close. */
+export const NINE_SIXTEEN_HYBRID_INDEX_TARGET_RED_CONFIRM = 12;
+/** Live 9:16 hybrid index exit — when 9:16:00 open gaps above 9:15:59 close. */
+export const NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_GAP = 8;
+/** Live 9:16 hybrid index exit — from 9:17:00 when 9:16:59 close > 9:15:59 close (green 9:16 minute). */
+export const NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE = 6;
+
+export function is916RedConfirmFromCaptures(open916: number, close91559: number): boolean {
+  return open916 <= close91559 + 1e-9;
+}
+
+/** Flat PE index target from 9:16 entry spot: −12 both red · −8 green gap at 9:16:00 open. */
+export function hybrid916IndexTargetPoints(open916: number, close915: number): number {
+  return is916RedConfirmFromCaptures(open916, close915)
+    ? NINE_SIXTEEN_HYBRID_INDEX_TARGET_RED_CONFIRM
+    : NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_GAP;
+}
+
+export function computeHybrid916IndexExitSpot(entrySpot: number, targetPoints: number, leg: TradeLeg): number {
+  return leg === "CE_BUY" ? entrySpot + targetPoints : entrySpot - targetPoints;
+}
+
+export function hybrid916IndexExitLabel(open916: number, close91559: number): string {
+  const pts = hybrid916IndexTargetPoints(open916, close91559);
+  return is916RedConfirmFromCaptures(open916, close91559)
+    ? `flat −${pts} (9:16:00 open ≤ 9:15:59 close · both red · until 9:17:00)`
+    : `flat −${pts} (9:16:00 open > 9:15:59 close · green gap · until 9:17:00)`;
+}
+
+/** True when the 9:16 minute WS close (9:16:59 last tick) is above the 9:15:59 close. */
+export function is916MinuteGreenClose(close91659: number, close91559: number): boolean {
+  return close91659 > close91559 + 1e-9;
+}
+
+export function hybrid916GreenMinuteExitLabel(close91659: number, close91559: number): string {
+  return `flat −${NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE} (9:16:59 close ${close91659.toFixed(2)} > 9:15:59 close ${close91559.toFixed(2)} · green 9:16 from 9:17:00)`;
+}
+
+/** Nifty index points still needed for a PE hybrid exit (0 when at/below target). */
+export function niftyPointsToHybrid916Target(spot: number, targetSpot: number, leg: TradeLeg): number | null {
+  if (spot <= 0 || targetSpot <= 0) return null;
+  if (leg === "PE_BUY") return Math.max(0, spot - targetSpot);
+  if (leg === "CE_BUY") return Math.max(0, targetSpot - spot);
+  return null;
 }
 
 /**
@@ -619,7 +712,7 @@ export function getPnlExitScheduleLabel(nowMs = Date.now()): string {
   );
 }
 
-/** True from 10:00 AM IST — the ±30 adverse-move hard stop is scanning. */
+/** True from 10:00 AM IST. */
 export function isHardStopWindowActive(nowMs = Date.now()): boolean {
   return istMinuteOfDay(nowMs) >= NINE_SIXTEEN_HARD_STOP_START_MINUTE;
 }
@@ -642,7 +735,6 @@ export function shouldHardStopNineSixteen(
   return false;
 }
 
-/** Nifty level that triggers the hard stop for this leg. */
 export function computeHardStopSpot(
   entrySpot: number,
   leg: TradeLeg,
@@ -651,7 +743,6 @@ export function computeHardStopSpot(
   return leg === "CE_BUY" ? entrySpot - stopPoints : entrySpot + stopPoints;
 }
 
-/** IST clock time the hard stop starts scanning, e.g. "09:55". */
 export function getHardStopStartLabel(): string {
   const hour = Math.floor(NINE_SIXTEEN_HARD_STOP_START_MINUTE / 60);
   const minute = NINE_SIXTEEN_HARD_STOP_START_MINUTE % 60;
@@ -659,7 +750,7 @@ export function getHardStopStartLabel(): string {
 }
 
 export function getHardStopScheduleLabel(): string {
-  return `${getHardStopStartLabel()}+ hard stop ${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} pts adverse`;
+  return `${getHardStopStartLabel()}+ hard stop ${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} pts adverse (PE +${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} / CE −${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} from entry spot)`;
 }
 
 function pnlExitStartMinuteOfDay(): number {
@@ -855,32 +946,59 @@ export function shouldExitOnTrailingPnl(lockedStopPct: number, pnlPct: number | 
 }
 
 /* ---------------------------------------------------------------------------------------------
- * 9:15 exit — weekday take-profit limit on capital deployed (+3% Mon/Wed/Thu · +5% Tue/Fri),
- * plus the shared 10:00 IST ±30 Nifty hard stop and 3:25 PM square-off.
+ * 9:15 exit — PE: Mon/Tue 5% · Wed/Thu/Fri 3% · CE: 3% every day · 3:25 PM square-off.
  * ------------------------------------------------------------------------------------------- */
 
-/** Default take-profit on Tue/Fri (and unknown weekdays). */
+/** Take-profit on Monday (and unknown weekdays) for the 9:15 PE leg. */
 export const NINE_FIFTEEN_TAKE_PROFIT_PCT = 5;
-/** Take-profit on Mon/Wed/Thu. */
-export const NINE_FIFTEEN_TAKE_PROFIT_PCT_EARLY = 3;
+/** Take-profit on every weekday for the 9:15 CE leg. */
+export const NINE_FIFTEEN_CE_TAKE_PROFIT_PCT = 3;
+/** Take-profit on Wednesday. */
+export const NINE_FIFTEEN_TAKE_PROFIT_PCT_WEDNESDAY = 3;
+/** Take-profit on Thursday. */
+export const NINE_FIFTEEN_TAKE_PROFIT_PCT_THURSDAY = 3;
+/** Take-profit on Friday. */
+export const NINE_FIFTEEN_TAKE_PROFIT_PCT_FRIDAY = 3;
+/** Take-profit on Tuesday for the 9:15 PE leg. */
+export const NINE_FIFTEEN_TAKE_PROFIT_PCT_TUESDAY = 5;
+/** @deprecated Mon/Wed/Thu used to be 3% — kept so older imports do not break. */
+export const NINE_FIFTEEN_TAKE_PROFIT_PCT_EARLY = NINE_FIFTEEN_TAKE_PROFIT_PCT;
 
-/** Mon/Wed/Thu → 3% · Tue/Fri → 5%. */
-export function getNineFifteenTakeProfitPct(dateIst?: string): number {
+function nineFifteenTpSideFromLeg(leg?: string | null): "CE" | "PE" | null {
+  if (!leg) return null;
+  if (leg.startsWith("CE")) return "CE";
+  if (leg.startsWith("PE")) return "PE";
+  return null;
+}
+
+/** PE Mon/Tue 5% · Wed/Thu/Fri 3% · CE 3% every day. */
+export function getNineFifteenTakeProfitPct(dateIst?: string, leg?: string | null): number {
+  if (nineFifteenTpSideFromLeg(leg) === "CE") return NINE_FIFTEEN_CE_TAKE_PROFIT_PCT;
   if (!dateIst) return NINE_FIFTEEN_TAKE_PROFIT_PCT;
   const weekday = istWeekdayShortFromDateKey(dateIst);
-  if (weekday === "Mon" || weekday === "Wed" || weekday === "Thu") {
-    return NINE_FIFTEEN_TAKE_PROFIT_PCT_EARLY;
-  }
+  if (weekday === "Tue") return NINE_FIFTEEN_TAKE_PROFIT_PCT_TUESDAY;
+  if (weekday === "Wed") return NINE_FIFTEEN_TAKE_PROFIT_PCT_WEDNESDAY;
+  if (weekday === "Thu") return NINE_FIFTEEN_TAKE_PROFIT_PCT_THURSDAY;
+  if (weekday === "Fri") return NINE_FIFTEEN_TAKE_PROFIT_PCT_FRIDAY;
   return NINE_FIFTEEN_TAKE_PROFIT_PCT;
 }
 
-/** Limit price for a take-profit on the entry premium (per-unit). */
+/** One-line schedule for UI copy. */
+export function describeNineFifteenTakeProfitSchedule(): string {
+  return (
+    `PE Mon/Tue ${NINE_FIFTEEN_TAKE_PROFIT_PCT}% · Wed–Fri ${NINE_FIFTEEN_TAKE_PROFIT_PCT_WEDNESDAY}% · ` +
+    `CE ${NINE_FIFTEEN_CE_TAKE_PROFIT_PCT}% all days`
+  );
+}
+
+/** Limit price for a take-profit on the entry premium (per-unit), on the Nifty option tick (₹0.05). */
 export function nineFifteenTakeProfitLimitPrice(
   entryPrice: number,
   takeProfitPct = NINE_FIFTEEN_TAKE_PROFIT_PCT,
 ): number {
   if (!(entryPrice > 0)) return 0;
-  return Math.round(entryPrice * (1 + takeProfitPct / 100) * 100) / 100;
+  const raw = entryPrice * (1 + takeProfitPct / 100);
+  return Math.round(roundToOptionTick(raw) * 100) / 100;
 }
 
 export function nineFifteenDeployedCapital(entryPrice: number, quantity: number): number {
@@ -909,6 +1027,16 @@ export function shouldExitNineFifteenTakeProfit(
   return target > 0 && unrealisedPnl + 1e-9 >= target;
 }
 
+/** Same take-profit market-backup test used by the 9:16 leg (weekday % from {@link getNineSixteenTakeProfitPct}). */
+export function shouldExitNineSixteenTakeProfit(
+  unrealisedPnl: number | null,
+  entryPrice: number,
+  quantity: number,
+  takeProfitPct = NINE_SIXTEEN_TAKE_PROFIT_PCT,
+): boolean {
+  return shouldExitNineFifteenTakeProfit(unrealisedPnl, entryPrice, quantity, takeProfitPct);
+}
+
 /** Rupees still needed to reach the profit aim (0 once at/above target). */
 export function nineFifteenPnlRemainingToTarget(
   unrealisedPnl: number | null,
@@ -923,7 +1051,7 @@ export function nineFifteenPnlRemainingToTarget(
 
 export type NineFifteenExitVia = "limit" | "market" | "hard-stop" | "eod";
 
-/** Human-readable close line for logs and the panel after a 9:15 leg exits. */
+/** Human-readable close line for logs and the panel after a 9:15 / 9:16 take-profit leg exits. */
 export function formatNineFifteenExitSummary(input: {
   exitPrice: number | null;
   quantity: number;
@@ -931,8 +1059,11 @@ export function formatNineFifteenExitSummary(input: {
   pnl: number | null;
   via: NineFifteenExitVia;
   takeProfitPct?: number;
+  /** Which morning leg closed — defaults to 9:15 for older callers. */
+  legTag?: "9:15" | "9:16";
 }): string {
   const tpPct = input.takeProfitPct ?? NINE_FIFTEEN_TAKE_PROFIT_PCT;
+  const legTag = input.legTag ?? "9:15";
   const capital = nineFifteenDeployedCapital(input.entryPrice, input.quantity);
   const pnlPct =
     capital > 0 && input.pnl != null ? (input.pnl / capital) * 100 : null;
@@ -945,7 +1076,7 @@ export function formatNineFifteenExitSummary(input: {
           ? "hard stop (market)"
           : "end-of-day square-off (market)";
   const parts = [
-    `TRADE EXITED · 9:15 ${viaLabel}`,
+    `TRADE EXITED · ${legTag} ${viaLabel}`,
     `${input.quantity} qty`,
   ];
   if (input.exitPrice != null && input.exitPrice > 0) {
@@ -1006,20 +1137,19 @@ export function getPnlTrailScheduleLabel(dateIst?: string): string {
   return `${tiers} · +${NINE_SIXTEEN_PNL_INSTANT_EXIT_PCT}% instant market exit`;
 }
 
-export function getNineFifteenLadderLabel(dateIst?: string): string {
-  const tpPct = getNineFifteenTakeProfitPct(dateIst);
+export function getNineFifteenLadderLabel(dateIst?: string, leg?: string | null): string {
+  const tpPct = getNineFifteenTakeProfitPct(dateIst, leg);
   return (
-    `+${tpPct}% take-profit limit on capital deployed at entry · ` +
-    `${getHardStopStartLabel()} hard stop ±${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} pts · 3:25 PM square-off`
+    `+${tpPct}% take-profit limit on capital deployed at entry · hard stop ±${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} from ${getHardStopStartLabel()} · 3:25 PM square-off`
   );
 }
 
 /** Default take-profit on Tue/Fri (and unknown weekdays). */
-export const NINE_SIXTEEN_TAKE_PROFIT_PCT = 10;
+export const NINE_SIXTEEN_TAKE_PROFIT_PCT = 7;
 /** Take-profit on Mon/Wed/Thu. */
 export const NINE_SIXTEEN_TAKE_PROFIT_PCT_EARLY = 5;
 
-/** Mon/Wed/Thu → 5% · Tue/Fri → 10%. */
+/** Mon/Wed/Thu → 5% · Tue/Fri → 7%. */
 export function getNineSixteenTakeProfitPct(dateIst?: string): number {
   if (!dateIst) return NINE_SIXTEEN_TAKE_PROFIT_PCT;
   const weekday = istWeekdayShortFromDateKey(dateIst);
@@ -1032,8 +1162,7 @@ export function getNineSixteenTakeProfitPct(dateIst?: string): number {
 export function getNineSixteenLadderLabel(dateIst?: string): string {
   const tpPct = getNineSixteenTakeProfitPct(dateIst);
   return (
-    `+${tpPct}% take-profit limit on capital deployed at entry · ` +
-    `${getHardStopStartLabel()} hard stop ±${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} pts · 3:25 PM square-off`
+    `+${tpPct}% take-profit limit on capital deployed · parallel flat −${NINE_SIXTEEN_HYBRID_INDEX_TARGET_RED_CONFIRM}/−${NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_GAP} Nifty index exit (market) · hard stop ±${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} from ${getHardStopStartLabel()} · 3:25 PM square-off`
   );
 }
 

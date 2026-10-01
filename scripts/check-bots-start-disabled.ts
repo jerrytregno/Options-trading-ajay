@@ -1,11 +1,12 @@
 /**
- * Momentum scalper: manual-only arm, entry-window schedule, default sizing (25 lots).
+ * Momentum scalper: manual-only arm, two losses stop the day, default sizing (25 lots).
  *
  * Run: npx tsx scripts/check-bots-start-disabled.ts
  */
 import fs from "fs";
 import path from "path";
 import { getIndianMarketContext, formatWeekdayFromDateKey } from "../src/lib/market-time.js";
+import { MOMENTUM_SCALPER_MAX_LOSSES_PER_DAY } from "../server/momentum-scalper-logic.js";
 import {
   applyMomentumDailySchedule,
   getMomentumScalperBotStatus,
@@ -45,6 +46,7 @@ check("15:30 outside window", momentumInScheduledWindow(15 * 60 + 30), false);
 console.log("\n--- fresh module load ---");
 check("momentum disabled by default", getMomentumScalperBotStatus().enabled, false);
 check("default max lots", getMomentumScalperBotStatus().maxLots, 25);
+check("max losses per day is 2", MOMENTUM_SCALPER_MAX_LOSSES_PER_DAY, 2);
 
 console.log("\n--- startup does not auto-arm ---");
 setMomentumScalperBotEnabled(false);
@@ -84,6 +86,7 @@ applyMomentumDailySchedule(TODAY_IST, formatWeekdayFromDateKey(TODAY_IST), istMs
 check("loss day — schedule does not enable", getMomentumScalperBotStatus().enabled, false);
 setMomentumScalperBotEnabled(true);
 check("loss day — manual enable blocked", getMomentumScalperBotStatus().enabled, false);
+check("loss day — stopped flag", getMomentumScalperBotStatus().stoppedForLossToday, true);
 try {
   fs.unlinkSync(ranFile);
 } catch {
@@ -101,6 +104,19 @@ setMomentumScalperBotEnabled(false);
 check("manual disable", getMomentumScalperBotStatus().enabled, false);
 setMomentumScalperBotEnabled(true);
 check("manual enable", getMomentumScalperBotStatus().enabled, true);
+
+console.log("\n--- server hard-disable (MOMENTUM_SCALPER_BOT_ENABLED=0) ---");
+{
+  const prev = process.env.MOMENTUM_SCALPER_BOT_ENABLED;
+  setMomentumScalperBotEnabled(false);
+  process.env.MOMENTUM_SCALPER_BOT_ENABLED = "0";
+  setMomentumScalperBotEnabled(true);
+  check("env=0 blocks enable", getMomentumScalperBotStatus().enabled, false);
+  check("env=0 sets serverDisabled", getMomentumScalperBotStatus().serverDisabled, true);
+  if (prev === undefined) delete process.env.MOMENTUM_SCALPER_BOT_ENABLED;
+  else process.env.MOMENTUM_SCALPER_BOT_ENABLED = prev;
+  setMomentumScalperBotEnabled(false);
+}
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

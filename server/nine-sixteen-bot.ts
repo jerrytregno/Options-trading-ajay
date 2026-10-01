@@ -15,6 +15,8 @@ import {
   isReadyToSeal915Close,
   isIn915OpenTickWindow,
   isIn915CloseTickWindow,
+  isIn91559WsCloseSecond,
+  isIn91659WsCloseSecond,
   decide915Entry,
   exitModeFrom915Change,
   msUntilNextEntryPhase,
@@ -34,12 +36,24 @@ import {
   isHardStopWindowActive,
   getHardStopStartLabel,
   NINE_SIXTEEN_HARD_STOP_INDEX_POINTS,
+  hybrid916IndexExitLabel,
+  hybrid916IndexTargetPoints,
+  hybrid916GreenMinuteExitLabel,
+  computeHybrid916IndexExitSpot,
+  is916MinuteGreenClose,
+  isPast916GreenMinuteRetarget,
+  NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE,
+  shouldExitNineSixteen,
+  niftyPointsToHybrid916Target,
   isReadyForNineFifteenPreResolve,
   isReadyForNineFifteenEntry,
   isPastNineFifteenEntryWindow,
+  isPastNineFifteenMarginRetryWindow,
   isPastNineFifteenSignalRead,
   isPastNineFifteenMinute,
   msUntilNineFifteenEntry,
+  is915BodyBelowMinPts,
+  NINE_FIFTEEN_MIN_DROP_PTS,
   NINE_FIFTEEN_TAKE_PROFIT_PCT,
   getNineFifteenTakeProfitPct,
   nineFifteenTakeProfitLimitPrice,
@@ -48,6 +62,9 @@ import {
   shouldExitNineFifteenTakeProfit,
   nineFifteenPnlRemainingToTarget,
   formatNineFifteenExitSummary,
+  NINE_SIXTEEN_ENTRY_SEC,
+  NINE_SIXTEEN_CLOSE_SEAL_SEC,
+  istSecondsOfDay,
   type NineSixteenExitMode,
 } from "./nine-sixteen-logic.js";
 import { legLabel, type TradeLeg } from "../src/lib/trade-calculations.js";
@@ -58,7 +75,10 @@ import {
 } from "./atm-option.js";
 import {
   formatLotSplitLabel,
+  conservativeEntryLtpFromQuotes,
+  fetchConservativeOptionLtpForEntry,
   getMaxLotsPerOrder,
+  nextEntryLotsAfterMarginReject,
   resolveEntryQuantity,
   splitLotsIntoOrderChunks,
   splitQuantityIntoOrderChunks,
@@ -75,7 +95,10 @@ import {
   fetchNiftySpot,
   fetchOptionLtp,
   findOpenNiftyMisOption,
+  findOpenNiftyOption,
   fetchOrdersByIds,
+  isInsufficientFundsError,
+  parseMarginShortfall,
   kiteGet,
   cancelRegularOrder,
   placeRegularLimitOrder,
@@ -130,7 +153,7 @@ export interface RawTickRow {
   changePts: number | null;
 }
 
-/** The day runs up to two trades: the 9:15:11 leg, then the 9:16:00 one. */
+/** The day runs up to two trades: the 9:15:11 leg, then the 9:16:01 one. */
 export type NineSixteenTradeSlot = "nine-fifteen" | "nine-sixteen";
 
 export type NineFifteenTpOrderStatus =
@@ -160,7 +183,7 @@ export interface NineSixteenBotStatus {
   /** Last WS tick before 9:16:00, logged as 9:15:59 close. */
   close915: number | null;
   wsConnected: boolean;
-  /** Nifty 50 spot at option fill (~9:16:00); index exit target is ± from this spot. */
+  /** Nifty 50 spot at option fill (~9:16:01); index exit target is ± from this spot. */
   entrySpot: number | null;
   /** main = |Δ|≥15 (only band entered live). near_miss kept for legacy state / exit ladder. */
   exitMode: NineSixteenExitMode | null;
@@ -171,7 +194,7 @@ export interface NineSixteenBotStatus {
   /** True once the clock is past the hard-stop start time and it is scanning. */
   hardStopActive: boolean;
   hardStopPoints: number;
-  /** IST time the hard stop starts scanning, e.g. "09:55". */
+  /** IST time the hard stop starts scanning, e.g. "10:00". */
   hardStopStartLabel: string;
   leg: TradeLeg | null;
   tradingsymbol: string | null;
@@ -284,8 +307,18 @@ interface PersistedBotState {
   nineFifteenTpFilledQty?: number;
   nineFifteenTpPendingQty?: number;
   nineFifteenTpPlacedAt?: string;
-  /** Take-profit % armed for this 9:15 leg (3 Mon/Wed/Thu · 5 Tue/Fri). */
+  /** Take-profit % armed for this 9:15 leg (Mon/Tue 5% · Wed/Thu/Fri 3%). */
   nineFifteenTakeProfitPct?: number;
+  /** First Nifty WS tick at 9:16:00 — vs 9:15:59 close for hybrid index exit tier. */
+  capturedOpen916Nifty?: number;
+  /** Last Nifty WS tick in 9:15:59 — hybrid index exit close reference. */
+  capturedClose91559?: number;
+  /** Last Nifty WS tick in 9:16:59 — green 9:16 minute retarget at 9:17:00. */
+  capturedClose91659?: number;
+  hybrid916GreenMinuteRetargeted?: boolean;
+  indexExitTargetPoints?: number;
+  indexExitTargetSpot?: number;
+  indexExitSchedule?: string;
 }
 
 interface PersistedCaptureState {
@@ -294,16 +327,25 @@ interface PersistedCaptureState {
   close: number | null;
   high: number | null;
   low: number | null;
+  open916?: number | null;
+  close91559?: number | null;
+  close91659?: number | null;
 }
 
-/** 9:16 entries are armed on startup; disable in the UI if you only want the websocket monitor. */
+/** 9:16 entries armed on the server alongside the 9:15 leg. */
 let enabled = true;
-/**
- * The 9:15 leg is armed on startup alongside 9:16. Each can be turned off independently in the UI.
- */
+/** The 9:15 leg is always armed on the server. */
 let nineFifteenEnabled = true;
 /** Which of the day's two trades the open position belongs to. */
 let tradeSlot: NineSixteenTradeSlot = "nine-sixteen";
+
+/** Both morning legs use carry-forward NRML on Kite. */
+export const NINE_FIFTEEN_KITE_PRODUCT = "NRML" as const;
+const NINE_SIXTEEN_KITE_PRODUCT = "NRML" as const;
+
+function activeKiteProduct(): typeof NINE_FIFTEEN_KITE_PRODUCT | typeof NINE_SIXTEEN_KITE_PRODUCT {
+  return tradeSlot === "nine-fifteen" ? NINE_FIFTEEN_KITE_PRODUCT : NINE_SIXTEEN_KITE_PRODUCT;
+}
 /** Sealed from the last tick strictly before 9:15:10 — the read that decides red or green. */
 let nineFifteenMarkPrice: number | null = null;
 let nineFifteenMarkAtLabel: string | null = null;
@@ -313,6 +355,9 @@ let nineFifteenSettled = false;
 let nineFifteenNote: string | null = null;
 /** True once a 9:15 leg has been held past 9:16:00 — the 9:16 trade stands down for the day. */
 let nineFifteenOverranMinute = false;
+/** WS 9:15 close |Δ| < 5 while the 9:15 leg is open — exit on the first Nifty tick at 9:16:01. */
+let nineFifteenSmallBodyExitArmed = false;
+let nineFifteenSmallBodyExitInFlight = false;
 let nineFifteenBurstInFlight = false;
 let nineFifteenTimer: ReturnType<typeof setTimeout> | null = null;
 let nineFifteenTimerDate: string | null = null;
@@ -329,10 +374,7 @@ let nineFifteenTpLastLogKey = "";
 let nineFifteenDate: string | null = null;
 let monitorLoopStarted = false;
 let phase: NineSixteenBotPhase = "waiting";
-let message =
-  enabled || nineFifteenEnabled
-    ? "Server bot waiting for Kite websocket 9:15 ticks"
-    : "9:16 trading disabled — websocket monitor active";
+let message = "9:15 + 9:16 trading armed on server";
 let open915 = 0;
 let entrySpot = 0;
 let exitMode: NineSixteenExitMode = "main";
@@ -354,6 +396,17 @@ let unrealisedPnl: number | null = null;
 let lockedPnlPct = 0;
 let capturedOpen915: number | null = null;
 let capturedClose915: number | null = null;
+/** First Nifty websocket tick in the 9:16:00 second (hybrid index exit tier vs 9:15:59 close). */
+let capturedOpen916Nifty: number | null = null;
+/** Last Nifty websocket tick in the 9:15:59 second (hybrid index exit close reference). */
+let capturedClose91559: number | null = null;
+/** Last Nifty websocket tick in the 9:16:59 second (green 9:16 minute retarget at 9:17:00). */
+let capturedClose91659: number | null = null;
+/** True once the 9:17 green-minute retarget has been evaluated (with or without retarget). */
+let hybrid916GreenMinuteRetargeted = false;
+let indexExitTargetPoints = 0;
+let indexExitTargetSpot: number | null = null;
+let indexExitSchedule: string | null = null;
 let capturedHigh915: number | null = null;
 let capturedLow915: number | null = null;
 let lastTickBeforeClose: number | null = null;
@@ -373,26 +426,30 @@ let quoteRefreshInFlight = false;
 let loopBusy = false;
 const logs: NineSixteenBotStatus["logs"] = [];
 
-/** Once-a-day cache warm (9:00) so the 9:16:00 order path makes no cold calls. */
+/** Once-a-day cache warm (9:00) so the 9:16:01 order path makes no cold calls. */
 let prewarmDoneDate: string | null = null;
 let prewarmInFlight = false;
 let lastPrewarmAttemptAt = 0;
 const PREWARM_RETRY_MS = 60_000;
 
-/** ATM PE resolved at 9:15:04, so the 9:15:11 order makes no REST call of its own. */
+/** ATM CE + PE resolved at 9:15:04, so the 9:15:11 order makes no REST call of its own. */
+let nineFifteenPreResolvedCe: ResolvedAtmOption | null = null;
 let nineFifteenPreResolvedPe: ResolvedAtmOption | null = null;
 let nineFifteenPreResolvedDate: string | null = null;
 let nineFifteenPreResolveInFlight = false;
 
-/** ATM CE/PE resolved at 9:15:58 from the live websocket spot (zero REST at 9:16:00). */
+/** ATM CE/PE resolved at 9:15:58 from the live websocket spot (zero REST at 9:16:01). */
 let preResolvedDate: string | null = null;
 let preResolvedCe: ResolvedAtmOption | null = null;
 let preResolvedPe: ResolvedAtmOption | null = null;
+/** ATM CE/PE tokens subscribed from 9:15:58 so 9:16:01 entry ticks arrive on websocket. */
+let entryTickerCeToken = 0;
+let entryTickerPeToken = 0;
 let preResolveInFlight = false;
 let lastPreResolveAttemptAt = 0;
 const PRE_RESOLVE_RETRY_MS = 1_000;
 
-/** Dedicated 9:16:00.000 trigger — the poll loop alone can be up to 250ms late. */
+/** Dedicated 9:16:01.000 trigger — the poll loop alone can be up to 250ms late. */
 let entryTimer: ReturnType<typeof setTimeout> | null = null;
 let entryTimerDate: string | null = null;
 let entryBurstInFlight = false;
@@ -595,11 +652,11 @@ const NINE_FIFTEEN_TP_PLACE_MAX_ATTEMPTS = 15;
 
 function legTakeProfitPctForSlot(dateIst: string): number {
   return tradeSlot === "nine-fifteen"
-    ? getNineFifteenTakeProfitPct(dateIst)
+    ? getNineFifteenTakeProfitPct(dateIst, leg)
     : getNineSixteenTakeProfitPct(dateIst);
 }
 
-function legTradeTag(): string {
+function legTradeTag(): "9:15" | "9:16" {
   return tradeSlot === "nine-fifteen" ? "9:15" : "9:16";
 }
 
@@ -663,6 +720,20 @@ function saveBotState(dateIst: string) {
       persistsTakeProfitLeg() && nineFifteenTpPlacedAt ? nineFifteenTpPlacedAt : undefined,
     nineFifteenTakeProfitPct:
       persistsTakeProfitLeg() && nineFifteenTakeProfitPct > 0 ? nineFifteenTakeProfitPct : undefined,
+    capturedOpen916Nifty:
+      tradeSlot === "nine-sixteen" && capturedOpen916Nifty != null ? capturedOpen916Nifty : undefined,
+    capturedClose91559:
+      tradeSlot === "nine-sixteen" && capturedClose91559 != null ? capturedClose91559 : undefined,
+    capturedClose91659:
+      tradeSlot === "nine-sixteen" && capturedClose91659 != null ? capturedClose91659 : undefined,
+    hybrid916GreenMinuteRetargeted:
+      tradeSlot === "nine-sixteen" && hybrid916GreenMinuteRetargeted ? true : undefined,
+    indexExitTargetPoints:
+      tradeSlot === "nine-sixteen" && indexExitTargetPoints > 0 ? indexExitTargetPoints : undefined,
+    indexExitTargetSpot:
+      tradeSlot === "nine-sixteen" && indexExitTargetSpot != null ? indexExitTargetSpot : undefined,
+    indexExitSchedule:
+      tradeSlot === "nine-sixteen" && indexExitSchedule ? indexExitSchedule : undefined,
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(payload, null, 2));
 }
@@ -695,13 +766,31 @@ function loadBotState(dateIst: string) {
     nineFifteenTakeProfitPct =
       parsed.nineFifteenTakeProfitPct ??
       (tradeSlot === "nine-fifteen"
-        ? getNineFifteenTakeProfitPct(dateIst)
+        ? getNineFifteenTakeProfitPct(dateIst, leg)
         : getNineSixteenTakeProfitPct(dateIst));
+    capturedOpen916Nifty = parsed.capturedOpen916Nifty ?? null;
+    capturedClose91559 = parsed.capturedClose91559 ?? null;
+    capturedClose91659 = parsed.capturedClose91659 ?? null;
+    hybrid916GreenMinuteRetargeted = parsed.hybrid916GreenMinuteRetargeted ?? false;
+    indexExitTargetPoints = parsed.indexExitTargetPoints ?? 0;
+    indexExitTargetSpot = parsed.indexExitTargetSpot ?? null;
+    indexExitSchedule = parsed.indexExitSchedule ?? null;
+    if (
+      tradeSlot === "nine-sixteen" &&
+      indexExitTargetPoints <= 0 &&
+      entrySpot > 0 &&
+      capturedClose91559 != null
+    ) {
+      armHybrid916IndexExit();
+    }
+    if (tradeSlot === "nine-sixteen" && phase === "in_position" && !hybrid916GreenMinuteRetargeted) {
+      maybeRetargetHybrid916GreenMinute(dateIst);
+    }
     nineFifteenTpLastSyncedAt = null;
     nineFifteenTpLastLogKey = "";
     message =
       tradeSlot === "nine-fifteen"
-        ? `In 9:15 position · ${getNineFifteenLadderLabel(dateIst)}`
+        ? `In 9:15 position · ${getNineFifteenLadderLabel(dateIst, leg)}`
         : `In position · ${getNineSixteenLadderLabel(dateIst)}`;
   } catch {
     /* ignore corrupt state */
@@ -718,12 +807,170 @@ function inferExitModeFromCaptures(): NineSixteenExitMode | null {
  * without this gate both would hammer /portfolio/positions past Kite's rate limit.
  */
 const RECONCILE_MIN_INTERVAL_MS = 5_000;
-/** Minimal pause between failed entry attempts (still within 9:16:00–9:16:30). */
+/** Minimal pause between failed entry attempts (still within 9:16:01–9:16:30). */
 const ENTRY_RETRY_DELAY_MS = 250;
+/** Wait this long for the limit entry before falling back to market. */
+const ENTRY_LIMIT_FILL_TIMEOUT_MS = 8_000;
+/** Wait for the 1st + 2nd option tick at 9:16:01 on websocket. */
+const ENTRY_WS_91601_TICK_TIMEOUT_MS = 3_000;
+/** Retries: any two consecutive option websocket ticks. */
+const ENTRY_WS_CONSECUTIVE_TICK_TIMEOUT_MS = 2_000;
+
+type ConservativeEntryLtp = ReturnType<typeof conservativeEntryLtpFromQuotes> & {
+  firstLtp: number;
+  secondLtp: number;
+  source: "ws-91601" | "ws-consecutive" | "rest";
+};
+
+type EntryLtpTickWait = {
+  instrumentToken: number;
+  /** When set, only ticks in this IST second count (9:16:01). */
+  targetSecOfDay: number | null;
+  prices: number[];
+  resolve: (firstLtp: number, secondLtp: number) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+let entryLtpTickWait: EntryLtpTickWait | null = null;
+/** Prices already seen at 9:16:01 before tryEnter arms — avoids missing the first WS tick. */
+const entry91601TickBuffer = new Map<number, number[]>();
+
+function clearEntry91601TickBuffer() {
+  entry91601TickBuffer.clear();
+}
+
+function isKnownOptionTickerToken(token: number): boolean {
+  return (
+    (optionInstrumentToken > 0 && token === optionInstrumentToken) ||
+    (entryTickerCeToken > 0 && token === entryTickerCeToken) ||
+    (entryTickerPeToken > 0 && token === entryTickerPeToken)
+  );
+}
+
+function buffer91601EntryTick(tick: NiftyTick) {
+  if (!isKnownOptionTickerToken(tick.instrumentToken) || tick.lastPrice <= 0) return;
+  if (istSecondsOfDay(new Date(tick.receivedAtMs)) !== NINE_SIXTEEN_ENTRY_SEC) return;
+  const buf = entry91601TickBuffer.get(tick.instrumentToken) ?? [];
+  if (buf.length >= 2) return;
+  buf.push(tick.lastPrice);
+  entry91601TickBuffer.set(tick.instrumentToken, buf);
+}
+
+function seeded91601EntryTicks(instrumentToken: number): number[] {
+  return [...(entry91601TickBuffer.get(instrumentToken) ?? [])];
+}
+
+function clearEntryLtpTickWait() {
+  if (!entryLtpTickWait) return;
+  clearTimeout(entryLtpTickWait.timer);
+  entryLtpTickWait = null;
+}
+
+function pushEntryLtpTick(tick: NiftyTick) {
+  const wait = entryLtpTickWait;
+  if (!wait || tick.instrumentToken !== wait.instrumentToken || tick.lastPrice <= 0) return;
+  if (wait.targetSecOfDay != null) {
+    const sec = istSecondsOfDay(new Date(tick.receivedAtMs));
+    if (sec !== wait.targetSecOfDay) return;
+  }
+  wait.prices.push(tick.lastPrice);
+  if (wait.prices.length < 2) return;
+  const resolve = wait.resolve;
+  const [firstLtp, secondLtp] = wait.prices;
+  clearEntryLtpTickWait();
+  resolve(firstLtp, secondLtp);
+}
+
+function waitForEntryLtpTicks(
+  instrumentToken: number,
+  targetSecOfDay: number | null,
+  timeoutMs: number,
+): Promise<{ firstLtp: number; secondLtp: number }> {
+  clearEntryLtpTickWait();
+  const seeded =
+    targetSecOfDay === NINE_SIXTEEN_ENTRY_SEC ? seeded91601EntryTicks(instrumentToken) : [];
+  if (seeded.length >= 2) {
+    return Promise.resolve({ firstLtp: seeded[0], secondLtp: seeded[1] });
+  }
+  return new Promise((resolve, reject) => {
+    entryLtpTickWait = {
+      instrumentToken,
+      targetSecOfDay,
+      prices: seeded,
+      resolve: (firstLtp, secondLtp) => resolve({ firstLtp, secondLtp }),
+      reject,
+      timer: setTimeout(() => {
+        clearEntryLtpTickWait();
+        reject(new Error("Entry option websocket ticks unavailable"));
+      }, timeoutMs),
+    };
+  });
+}
+
+function botTickerInstrumentTokens(): number[] {
+  if (niftyInstrumentToken <= 0) return [];
+  const extra: number[] = [];
+  if (optionInstrumentToken > 0) extra.push(optionInstrumentToken);
+  if (entryTickerCeToken > 0 && !extra.includes(entryTickerCeToken)) extra.push(entryTickerCeToken);
+  if (entryTickerPeToken > 0 && !extra.includes(entryTickerPeToken)) extra.push(entryTickerPeToken);
+  return [niftyInstrumentToken, ...extra];
+}
+
+function refreshBotTickerInstruments() {
+  const tokens = botTickerInstrumentTokens();
+  if (tokens.length === 0) return;
+  if (hasNiftyTickerInstance()) setBotTickerInstruments(tokens);
+}
+
+async function resolveConservativeEntryLtp(
+  accessToken: string,
+  resolved: ResolvedAtmOption,
+  attempt: number,
+): Promise<ConservativeEntryLtp> {
+  refreshBotTickerInstruments();
+
+  const build = (firstLtp: number, secondLtp: number, source: ConservativeEntryLtp["source"]) => ({
+    ...conservativeEntryLtpFromQuotes(firstLtp, secondLtp),
+    firstLtp,
+    secondLtp,
+    source,
+  });
+
+  const nowSec = istSecondsOfDay();
+  if (attempt === 1 && nowSec <= NINE_SIXTEEN_ENTRY_SEC) {
+    try {
+      const { firstLtp, secondLtp } = await waitForEntryLtpTicks(
+        resolved.instrumentToken,
+        NINE_SIXTEEN_ENTRY_SEC,
+        ENTRY_WS_91601_TICK_TIMEOUT_MS,
+      );
+      return build(firstLtp, secondLtp, "ws-91601");
+    } catch {
+      pushLog("9:16:01 WS entry ticks incomplete · trying consecutive WS ticks", "info");
+    }
+  }
+
+  try {
+    const { firstLtp, secondLtp } = await waitForEntryLtpTicks(
+      resolved.instrumentToken,
+      null,
+      ENTRY_WS_CONSECUTIVE_TICK_TIMEOUT_MS,
+    );
+    return build(firstLtp, secondLtp, "ws-consecutive");
+  } catch {
+    pushLog("WS entry ticks unavailable · REST fallback", "warning");
+    const rest = await fetchConservativeOptionLtpForEntry(accessToken, resolved.tradingsymbol);
+    return { ...rest, source: "rest" };
+  }
+}
 /** Parallel SELL rounds attempted per square-off before deferring to the next tick. */
 const SQUARE_OFF_MAX_ROUNDS = 3;
-/** Extra BUY rounds used to reach the target size after a partial split fill. */
-const ENTRY_TOP_UP_MAX_ROUNDS = 2;
+/**
+ * Extra BUY rounds used to reach the target size after a partial split fill. Enough for a couple
+ * of margin step-downs; the entry-window deadline is the real limit.
+ */
+const ENTRY_TOP_UP_MAX_ROUNDS = 4;
 /** Gap enforced between square-off attempts so tick-driven retries cannot spam orders. */
 const SQUARE_OFF_RETRY_COOLDOWN_MS = 3_000;
 let lastSquareOffAttemptAt = 0;
@@ -754,7 +1001,7 @@ function isOwnPosition(symbol: string): boolean {
 let warnedForeignPosition = "";
 
 async function reconcilePositionWithKiteInner(accessToken: string, dateIst: string) {
-  const open = await findOpenNiftyMisOption(accessToken);
+  const open = await findOpenNiftyOption(accessToken, activeKiteProduct());
 
   if (open && !isOwnPosition(open.tradingsymbol)) {
     // Someone else's leg (momentum scalper or a manual trade) — leave it completely alone.
@@ -796,7 +1043,7 @@ async function reconcilePositionWithKiteInner(accessToken: string, dateIst: stri
 
     message =
       tradeSlot === "nine-fifteen"
-        ? `In 9:15 position · ${getNineFifteenLadderLabel(dateIst)}`
+        ? `In 9:15 position · ${getNineFifteenLadderLabel(dateIst, leg)}`
         : `In position · ${getNineSixteenLadderLabel(dateIst)}`;
     saveBotState(dateIst);
     return;
@@ -891,7 +1138,16 @@ async function reconcilePositionWithKiteInner(accessToken: string, dateIst: stri
     }
   }
 
-  finishDay(dateIst, "Session complete · no open position on Zerodha", "success");
+  // concludeTrade, not finishDay: a 9:15 leg found flat here has simply finished its own trade,
+  // and the 9:16 decision is still ahead. Ending the day would also wipe the 9:15 captures the
+  // 9:16 entry reads.
+  concludeTrade(
+    dateIst,
+    tradeSlot === "nine-fifteen"
+      ? "9:15 leg reconciled flat on Zerodha"
+      : "Session complete · no open position on Zerodha",
+    "success",
+  );
 }
 
 function markRanToday(dateIst: string) {
@@ -904,7 +1160,66 @@ function hasRanToday(dateIst: string): boolean {
 }
 
 function computeTargetSpot(): number | null {
-  return null;
+  return indexExitTargetSpot;
+}
+
+function clearHybrid916IndexExit() {
+  capturedOpen916Nifty = null;
+  capturedClose91559 = null;
+  capturedClose91659 = null;
+  hybrid916GreenMinuteRetargeted = false;
+  indexExitTargetPoints = 0;
+  indexExitTargetSpot = null;
+  indexExitSchedule = null;
+}
+
+function armHybrid916IndexExit() {
+  const close91559 = capturedClose91559;
+  if (
+    tradeSlot !== "nine-sixteen" ||
+    close91559 == null ||
+    close91559 <= 0 ||
+    entrySpot <= 0
+  ) {
+    clearHybrid916IndexExit();
+    return;
+  }
+  const open916 = capturedOpen916Nifty ?? entrySpot;
+  indexExitTargetPoints = hybrid916IndexTargetPoints(open916, close91559);
+  indexExitTargetSpot = computeHybrid916IndexExitSpot(entrySpot, indexExitTargetPoints, "PE_BUY");
+  indexExitSchedule = hybrid916IndexExitLabel(open916, close91559);
+  pushLog(
+    `Parallel index exit armed · ${indexExitSchedule} · entry Nifty ${entrySpot.toFixed(2)} · ` +
+      `target ${indexExitTargetSpot.toFixed(2)} · market sell vs resting TP limit (first wins)`,
+    "info",
+  );
+}
+
+function maybeRetargetHybrid916GreenMinute(dateIst: string, nowMs = Date.now()) {
+  if (tradeSlot !== "nine-sixteen" || phase !== "in_position" || hybrid916GreenMinuteRetargeted) return;
+  if (!isPast916GreenMinuteRetarget(nowMs)) return;
+  if (capturedClose91559 == null || capturedClose91559 <= 0) return;
+  if (capturedClose91659 == null || capturedClose91659 <= 0) return;
+  if (entrySpot <= 0) return;
+
+  hybrid916GreenMinuteRetargeted = true;
+
+  if (!is916MinuteGreenClose(capturedClose91659, capturedClose91559)) {
+    saveBotState(dateIst);
+    return;
+  }
+
+  const prevPts = indexExitTargetPoints;
+  indexExitTargetPoints = NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE;
+  indexExitTargetSpot = computeHybrid916IndexExitSpot(entrySpot, indexExitTargetPoints, "PE_BUY");
+  indexExitSchedule = hybrid916GreenMinuteExitLabel(capturedClose91659, capturedClose91559);
+  pushLog(
+    `Parallel index exit retargeted at 9:17 · ${indexExitSchedule}` +
+      (prevPts > 0 ? ` · was −${prevPts}` : "") +
+      ` · entry Nifty ${entrySpot.toFixed(2)} · target ${indexExitTargetSpot.toFixed(2)}`,
+    "info",
+  );
+  saveBotState(dateIst);
 }
 
 function sessionLogsCopy() {
@@ -996,6 +1311,7 @@ function finishDay(
   lastQuoteRefreshAt = 0;
   lastPositionSyncAt = 0;
   warnedForeignPosition = "";
+  clearHybrid916IndexExit();
   clearCaptures(dateIst);
   try {
     if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
@@ -1013,6 +1329,9 @@ function saveCaptures(dateIst: string) {
     close: capturedClose915,
     high: capturedHigh915,
     low: capturedLow915,
+    open916: capturedOpen916Nifty,
+    close91559: capturedClose91559,
+    close91659: capturedClose91659,
   };
   fs.writeFileSync(CAPTURE_FILE, JSON.stringify(payload, null, 2));
 }
@@ -1026,6 +1345,9 @@ function loadCaptures(dateIst: string) {
     if (parsed.close != null && parsed.close > 0) capturedClose915 = parsed.close;
     if (parsed.high != null && parsed.high > 0) capturedHigh915 = parsed.high;
     if (parsed.low != null && parsed.low > 0) capturedLow915 = parsed.low;
+    if (parsed.open916 != null && parsed.open916 > 0) capturedOpen916Nifty = parsed.open916;
+    if (parsed.close91559 != null && parsed.close91559 > 0) capturedClose91559 = parsed.close91559;
+    if (parsed.close91659 != null && parsed.close91659 > 0) capturedClose91659 = parsed.close91659;
   } catch {
     /* ignore */
   }
@@ -1039,13 +1361,18 @@ function resetTickRuntime() {
   openTickAtLabel = null;
   closeTickAtLabel = null;
   optionInstrumentToken = 0;
-  // Websocket stays up 9:00–16:00 — only drop the option leg subscription.
-  if (niftyInstrumentToken > 0) setBotTickerInstruments([niftyInstrumentToken]);
+  clearEntryLtpTickWait();
+  clearEntry91601TickBuffer();
+  refreshBotTickerInstruments();
 }
 
 function clearCaptures(_dateIst: string) {
   capturedOpen915 = null;
   capturedClose915 = null;
+  capturedOpen916Nifty = null;
+  capturedClose91559 = null;
+  capturedClose91659 = null;
+  hybrid916GreenMinuteRetargeted = false;
   capturedHigh915 = null;
   capturedLow915 = null;
   resetTickRuntime();
@@ -1083,6 +1410,10 @@ function handle915CaptureTick(tick: NiftyTick, dateIst: string) {
 
   lastTickBeforeClose = price;
   closeTickAtLabel = istClockLabel(tick.receivedAtMs);
+  if (isIn91559WsCloseSecond(tick.receivedAtMs)) {
+    capturedClose91559 = price;
+    saveCaptures(dateIst);
+  }
   tickCount915 += 1;
   tickHigh915 = tickHigh915 == null ? price : Math.max(tickHigh915, price);
   tickLow915 = tickLow915 == null ? price : Math.min(tickLow915, price);
@@ -1100,9 +1431,11 @@ function handle915CaptureTick(tick: NiftyTick, dateIst: string) {
 
 function handleBotTick(tick: NiftyTick) {
   const dateIst = getIndianMarketContext().dateIST;
-  const isOption = optionInstrumentToken > 0 && tick.instrumentToken === optionInstrumentToken;
+  const isOption = isKnownOptionTickerToken(tick.instrumentToken);
   const isNifty =
     !isOption && (niftyInstrumentToken <= 0 || tick.instrumentToken === niftyInstrumentToken);
+
+  buffer91601EntryTick(tick);
 
   if (isNifty) {
     lastSpot = tick.lastPrice;
@@ -1111,7 +1444,32 @@ function handleBotTick(tick: NiftyTick) {
     if (secondOpenSpot == null) secondOpenSpot = tick.lastPrice;
     secondHighSpot = secondHighSpot == null ? tick.lastPrice : Math.max(secondHighSpot, tick.lastPrice);
     secondLowSpot = secondLowSpot == null ? tick.lastPrice : Math.min(secondLowSpot, tick.lastPrice);
+    if (
+      istSecondsOfDay(new Date(tick.receivedAtMs)) === NINE_SIXTEEN_CLOSE_SEAL_SEC &&
+      (capturedOpen916Nifty == null || capturedOpen916Nifty <= 0)
+    ) {
+      capturedOpen916Nifty = tick.lastPrice;
+      saveCaptures(dateIst);
+    }
+    if (isIn91659WsCloseSecond(tick.receivedAtMs)) {
+      capturedClose91659 = tick.lastPrice;
+      saveCaptures(dateIst);
+    }
+    if (tradeSlot === "nine-sixteen" && phase === "in_position") {
+      maybeRetargetHybrid916GreenMinute(dateIst, tick.receivedAtMs);
+    }
     recordRawTick(tick, "nifty");
+    if (
+      nineFifteenSmallBodyExitArmed &&
+      tradeSlot === "nine-fifteen" &&
+      phase === "in_position" &&
+      istSecondsOfDay(new Date(tick.receivedAtMs)) === NINE_SIXTEEN_ENTRY_SEC
+    ) {
+      const session = loadKiteSession();
+      if (session?.accessToken) {
+        void maybeNineFifteenSmallBodyExitOnWsTick(session.accessToken, dateIst, tick.receivedAtMs);
+      }
+    }
     // The 9:15 leg trades inside the very candle it is reading, so capture keeps running while it
     // is open — the 9:16 decision needs that candle's close either way.
     if (tradeSlot === "nine-fifteen" || (phase !== "in_position" && phase !== "exiting")) {
@@ -1125,6 +1483,10 @@ function handleBotTick(tick: NiftyTick) {
     if (entryPrice > 0 && quantity > 0) {
       unrealisedPnl = (lastOptionPrice - entryPrice) * quantity;
     }
+  }
+
+  if (entryLtpTickWait && tick.instrumentToken === entryLtpTickWait.instrumentToken) {
+    pushEntryLtpTick(tick);
   }
 
   if (phase === "in_position") {
@@ -1160,8 +1522,31 @@ function sealNineFifteenMark() {
   );
 }
 
+function maybeArmNineFifteenSmallBodyExit(dateIst: string) {
+  if (nineFifteenSmallBodyExitArmed || nineFifteenSmallBodyExitInFlight) return;
+  if (tradeSlot !== "nine-fifteen" || phase !== "in_position" || quantity <= 0) return;
+  if (capturedOpen915 == null || capturedOpen915 <= 0 || capturedClose915 == null || capturedClose915 <= 0) {
+    return;
+  }
+  if (!is915BodyBelowMinPts(capturedOpen915, capturedClose915)) return;
+
+  nineFifteenSmallBodyExitArmed = true;
+  const delta = capturedClose915 - capturedOpen915;
+  pushLog(
+    `9:15 WS close |Δ| ${Math.abs(delta).toFixed(2)} < ${NINE_FIFTEEN_MIN_DROP_PTS} · ` +
+      `open ${capturedOpen915.toFixed(2)} · close ${capturedClose915.toFixed(2)} · ` +
+      `9:15 leg will exit on the first Nifty WS tick at 9:16:01 (any P&L)`,
+    "warning",
+  );
+  message =
+    `9:15 |Δ| ${Math.abs(delta).toFixed(2)} < ${NINE_FIFTEEN_MIN_DROP_PTS} at WS close · ` +
+    `waiting for 9:16:01 WS tick to exit`;
+  saveBotState(dateIst);
+}
+
 function seal915CloseFromTicks(dateIst: string) {
   if (capturedClose915 != null && capturedClose915 > 0) {
+    maybeArmNineFifteenSmallBodyExit(dateIst);
     return;
   }
   if (lastTickBeforeClose == null || lastTickBeforeClose <= 0) {
@@ -1181,6 +1566,35 @@ function seal915CloseFromTicks(dateIst: string) {
     open > 0
       ? `9:15 WS OHLC locked · open ${open.toFixed(2)} · close ${capturedClose915.toFixed(2)} · Δ ${delta.toFixed(2)} · entering now`
       : `9:15:59 close locked · missing 9:15:00–9:15:15 open tick`;
+  maybeArmNineFifteenSmallBodyExit(dateIst);
+}
+
+async function maybeNineFifteenSmallBodyExitOnWsTick(
+  accessToken: string,
+  _dateIst: string,
+  tickReceivedAtMs: number,
+): Promise<boolean> {
+  if (!nineFifteenSmallBodyExitArmed || nineFifteenSmallBodyExitInFlight) return false;
+  if (tradeSlot !== "nine-fifteen" || phase !== "in_position" || quantity <= 0) return false;
+  if (istSecondsOfDay(new Date(tickReceivedAtMs)) !== NINE_SIXTEEN_ENTRY_SEC) return false;
+
+  nineFifteenSmallBodyExitArmed = false;
+  nineFifteenSmallBodyExitInFlight = true;
+  const open = capturedOpen915 ?? 0;
+  const close = capturedClose915 ?? 0;
+  const absDelta = open > 0 && close > 0 ? Math.abs(close - open) : 0;
+  const tickLabel = istClockLabel(tickReceivedAtMs);
+
+  try {
+    await cancelLegTakeProfitOrders(accessToken);
+    await squareOff(
+      accessToken,
+      `9:15 small-body exit @ 9:16:01 · Nifty WS tick @ ${tickLabel} · |Δ| ${absDelta.toFixed(2)} < ${NINE_FIFTEEN_MIN_DROP_PTS} · market sell (any P&L)`,
+    );
+    return true;
+  } finally {
+    nineFifteenSmallBodyExitInFlight = false;
+  }
 }
 
 /** Kite caps concurrent websockets per API key — back off between reconnect attempts. */
@@ -1196,12 +1610,9 @@ async function ensureNiftyTicker(accessToken: string, _dateIst: string) {
   tickerStartInFlight = true;
   try {
     niftyInstrumentToken = await resolveNifty50InstrumentToken(accessToken);
-    const tokens = optionInstrumentToken > 0
-      ? [niftyInstrumentToken, optionInstrumentToken]
-      : [niftyInstrumentToken];
     startNiftyTicker({
       accessToken,
-      instrumentTokens: tokens,
+      instrumentTokens: botTickerInstrumentTokens(),
       onTick: (tick) => handleBotTick(tick),
       onConnect: () => {
         startLiveSpotSampling();
@@ -1255,7 +1666,7 @@ async function prewarmEntryPath(accessToken: string, dateIst: string) {
 
     prewarmDoneDate = dateIst;
     pushLog(
-      `Pre-warmed for 9:16:00 · ${chain.value} NFO instruments cached · ${
+      `Pre-warmed for 9:16:01 · ${chain.value} NFO instruments cached · ${
         egress.status === "fulfilled" ? "egress ready" : "egress pending"
       } · ${balance.status === "fulfilled" ? `₹${Math.floor(balance.value)} avail` : "balance pending"}`,
       "success",
@@ -1267,7 +1678,7 @@ async function prewarmEntryPath(accessToken: string, dateIst: string) {
 
 /**
  * At 9:15:58 resolve both ATM legs from the live websocket spot. The 9:15 close still decides
- * CE vs PE at 9:16:00 — this only pre-computes the strike so entry is a pure order placement.
+ * CE vs PE at 9:16:01 — this only pre-computes the strike so entry is a pure order placement.
  * Instruments are already cached and the spot comes from a tick, so this costs no REST call.
  */
 async function preResolveAtmSymbols(accessToken: string, dateIst: string) {
@@ -1279,7 +1690,7 @@ async function preResolveAtmSymbols(accessToken: string, dateIst: string) {
   preResolveInFlight = true;
   lastPreResolveAttemptAt = Date.now();
   try {
-    // Refill the 45s egress route cache so tryEnter never probes the outbound IP at 9:16:00.
+    // Refill the 45s egress route cache so tryEnter never probes the outbound IP at 9:16:01.
     // Non-forcing (never clears the existing route) and detached, so it cannot delay arming.
     void assertKiteEgressReady().catch(() => {
       /* tryEnter re-checks and surfaces the real error */
@@ -1290,19 +1701,22 @@ async function preResolveAtmSymbols(accessToken: string, dateIst: string) {
       resolveAtmNiftyOption(accessToken, "PE_BUY", { spotPrice: spot }),
     ]);
     if (!ce || !pe) {
-      pushLog("ATM pre-resolve incomplete · 9:16:00 will resolve live", "warning");
+      pushLog("ATM pre-resolve incomplete · 9:16:01 will resolve live", "warning");
       return;
     }
     preResolvedCe = ce;
     preResolvedPe = pe;
     preResolvedDate = dateIst;
+    entryTickerCeToken = ce.instrumentToken;
+    entryTickerPeToken = pe.instrumentToken;
+    refreshBotTickerInstruments();
     pushLog(
-      `ATM pre-resolved @ spot ${spot.toFixed(2)} · CE ${ce.tradingsymbol} · PE ${pe.tradingsymbol} · armed for 9:16:00`,
+      `ATM pre-resolved @ spot ${spot.toFixed(2)} · CE ${ce.tradingsymbol} · PE ${pe.tradingsymbol} · armed for 9:16:01`,
       "success",
     );
   } catch (err) {
     pushLog(
-      `ATM pre-resolve failed · ${err instanceof Error ? err.message : "unknown"} · 9:16:00 will resolve live`,
+      `ATM pre-resolve failed · ${err instanceof Error ? err.message : "unknown"} · 9:16:01 will resolve live`,
       "warning",
     );
   } finally {
@@ -1329,12 +1743,11 @@ function maintainEntryReadiness(accessToken: string, dateIst: string) {
 }
 
 /**
- * Resolve the ATM PE at 9:15:04, two seconds before the 9:15 order can go out.
+ * Resolve ATM CE + PE at 9:15:04 — seven seconds before the 9:15 order can go out.
  *
- * Only the put is resolved: the 9:15 trade has no long side, so warming the call would spend a
- * chain lookup on a leg that can never be bought.
+ * The 9:15:10 read picks the leg; warming both here avoids a cold chain lookup at 9:15:11.
  */
-async function preResolveNineFifteenPe(accessToken: string, dateIst: string) {
+async function preResolveNineFifteenAtmLegs(accessToken: string, dateIst: string) {
   if (nineFifteenPreResolvedDate === dateIst || nineFifteenPreResolveInFlight) return;
   const spot = lastSpot;
   if (spot == null || spot <= 0) return;
@@ -1344,17 +1757,24 @@ async function preResolveNineFifteenPe(accessToken: string, dateIst: string) {
     void assertKiteEgressReady().catch(() => {
       /* the entry re-checks and surfaces the real error */
     });
-    const pe = await resolveAtmNiftyOption(accessToken, "PE_BUY", { spotPrice: spot });
-    if (!pe) {
-      pushLog("9:15 ATM PE pre-resolve incomplete · 9:15:11 will resolve live", "warning");
+    const [ce, pe] = await Promise.all([
+      resolveAtmNiftyOption(accessToken, "CE_BUY", { spotPrice: spot }),
+      resolveAtmNiftyOption(accessToken, "PE_BUY", { spotPrice: spot }),
+    ]);
+    if (!ce || !pe) {
+      pushLog("9:15 ATM pre-resolve incomplete · 9:15:11 will resolve live", "warning");
       return;
     }
+    nineFifteenPreResolvedCe = ce;
     nineFifteenPreResolvedPe = pe;
     nineFifteenPreResolvedDate = dateIst;
-    pushLog(`9:15 ATM PE armed @ spot ${spot.toFixed(2)} · ${pe.tradingsymbol}`, "info");
+    pushLog(
+      `9:15 ATM armed @ spot ${spot.toFixed(2)} · CE ${ce.tradingsymbol} · PE ${pe.tradingsymbol}`,
+      "info",
+    );
   } catch (err) {
     pushLog(
-      `9:15 ATM PE pre-resolve failed · ${err instanceof Error ? err.message : "unknown"}`,
+      `9:15 ATM pre-resolve failed · ${err instanceof Error ? err.message : "unknown"}`,
       "warning",
     );
   } finally {
@@ -1403,10 +1823,12 @@ async function placeSplitMarketOrders(
     tradingsymbol: string;
     transaction_type: "BUY" | "SELL";
     quantities: number[];
+    product?: typeof NINE_FIFTEEN_KITE_PRODUCT | typeof NINE_SIXTEEN_KITE_PRODUCT;
   },
 ): Promise<{ orderIds: string[]; failures: Error[] }> {
   const orderIds: string[] = [];
   const failures: Error[] = [];
+  const product = input.product ?? activeKiteProduct();
 
   for (let i = 0; i < input.quantities.length; i += MAX_PARALLEL_ORDERS_PER_BURST) {
     const burst = input.quantities.slice(i, i + MAX_PARALLEL_ORDERS_PER_BURST);
@@ -1416,7 +1838,7 @@ async function placeSplitMarketOrders(
           tradingsymbol: input.tradingsymbol,
           exchange: "NFO",
           transaction_type: input.transaction_type,
-          product: "MIS",
+          product,
           quantity,
         }),
       ),
@@ -1445,11 +1867,13 @@ async function placeSplitLimitOrders(
     transaction_type: "BUY" | "SELL";
     quantities: number[];
     price: number;
+    product?: typeof NINE_FIFTEEN_KITE_PRODUCT | typeof NINE_SIXTEEN_KITE_PRODUCT;
   },
 ): Promise<{ orderIds: string[]; failures: Error[] }> {
   const orderIds: string[] = [];
   const failures: Error[] = [];
   const price = Number(input.price.toFixed(2));
+  const product = input.product ?? activeKiteProduct();
 
   for (let i = 0; i < input.quantities.length; i += MAX_PARALLEL_ORDERS_PER_BURST) {
     const burst = input.quantities.slice(i, i + MAX_PARALLEL_ORDERS_PER_BURST);
@@ -1459,7 +1883,7 @@ async function placeSplitLimitOrders(
           tradingsymbol: input.tradingsymbol,
           exchange: "NFO",
           transaction_type: input.transaction_type,
-          product: "MIS",
+          product,
           quantity,
           price,
         }),
@@ -1647,6 +2071,10 @@ async function placeLegTakeProfitOrders(accessToken: string, dateIst: string): P
         `${tag} limit sell LIVE on Kite · ${placed.orderIds.length} order(s) · ${quantity} qty @ ₹${limitPrice.toFixed(2)} · tracking until filled`,
         "success",
       );
+      pushLog(
+        `${tag} market backup armed — square off at market if P&L hits +${tpPct}% before the limit fills`,
+        "info",
+      );
       saveBotState(dateIst);
       return true;
     }
@@ -1689,6 +2117,7 @@ async function completeLegTakeProfitExit(
     pnl,
     via,
     takeProfitPct: activeLegTakeProfitPct(dateIst),
+    legTag: legTradeTag(),
   });
   message = summary;
 
@@ -1743,12 +2172,13 @@ async function pendingOrderQuantity(
 async function awaitOrderFills(
   accessToken: string,
   orderIds: string[],
+  timeoutMs?: number,
 ): Promise<{
   fills: { average_price: number; filled_quantity: number }[];
   failures: Error[];
 }> {
   const results = await Promise.allSettled(
-    orderIds.map((orderId) => waitForOrderComplete(accessToken, orderId)),
+    orderIds.map((orderId) => waitForOrderComplete(accessToken, orderId, timeoutMs)),
   );
   const fills: { average_price: number; filled_quantity: number }[] = [];
   const failures: Error[] = [];
@@ -1760,6 +2190,16 @@ async function awaitOrderFills(
     }
   }
   return { fills, failures };
+}
+
+async function cancelOpenOrders(accessToken: string, orderIds: string[]) {
+  for (const orderId of orderIds) {
+    try {
+      await cancelRegularOrder(accessToken, orderId);
+    } catch {
+      /* already filled or cancelled */
+    }
+  }
 }
 
 function weightedAverageFillPrice(
@@ -1835,7 +2275,7 @@ async function syncOwnEntryFromMisPosition(
   lotSize: number,
 ): Promise<boolean> {
   if (!isOwnPosition(symbol)) return false;
-  const filled = await fetchMisPosition(accessToken, symbol, "MIS");
+  const filled = await fetchMisPosition(accessToken, symbol, activeKiteProduct());
   if (!filled || filled.quantity <= 0 || filled.average_price <= 0) return false;
   positionLotSize = lotSize;
   tradingsymbol = symbol;
@@ -1855,6 +2295,7 @@ async function finalizeEntryInPosition(
   attempt: number,
   splitLabel: string,
 ) {
+  tradeSlot = "nine-sixteen";
   if (lastSpot != null && lastSpot > 0) {
     entrySpot = lastSpot;
   } else {
@@ -1870,7 +2311,11 @@ async function finalizeEntryInPosition(
   }
 
   if (entrySpot <= 0) {
-    pushLog("Nifty spot unavailable at entry — take-profit limit + hard stop only", "warning");
+    pushLog("Nifty spot unavailable at entry — take-profit limit only", "warning");
+  }
+
+  if (tradeSlot === "nine-sixteen") {
+    armHybrid916IndexExit();
   }
 
   optionInstrumentToken =
@@ -1920,7 +2365,7 @@ async function squareOffAllSplitOrders(
   round: number,
   ownRemainingQty: number,
 ): Promise<{ average_price: number; filled_quantity: number }[]> {
-  const brokerQty = await fetchNetQty(accessToken, symbol);
+  const brokerQty = await fetchNetQty(accessToken, symbol, activeKiteProduct());
   if (brokerQty <= 0 || ownRemainingQty <= 0) return [];
 
   // Momentum scalper may hold lots in this same contract — only ever sell our own.
@@ -2008,13 +2453,14 @@ function concludeTrade(
   unrealisedPnl = null;
   lockedPnlPct = 0;
   clearNineFifteenTpTracking();
+  clearHybrid916IndexExit();
   lastQuoteRefreshAt = 0;
   lastPositionSyncAt = 0;
   warnedForeignPosition = "";
   optionInstrumentToken = 0;
   if (niftyInstrumentToken > 0) setBotTickerInstruments([niftyInstrumentToken]);
   saveBotState(dateIst);
-  message = `${note} · waiting for the 9:16:00 decision`;
+  message = `${note} · waiting for the 9:16:01 decision`;
 }
 
 async function squareOffInner(accessToken: string, reason: string) {
@@ -2038,7 +2484,7 @@ async function squareOffInner(accessToken: string, reason: string) {
     await cancelLegTakeProfitOrders(accessToken);
   }
 
-  const brokerQty = await fetchNetQty(accessToken, symbol);
+  const brokerQty = await fetchNetQty(accessToken, symbol, activeKiteProduct());
   if (brokerQty <= 0) {
     await persistTradeLog(dateIst, "closed", "Already flat", { exitReason: reason, pnl: unrealisedPnl });
     concludeTrade(dateIst, "Already flat", "info");
@@ -2071,7 +2517,7 @@ async function squareOffInner(accessToken: string, reason: string) {
 
     // A flat broker position means our leg is gone regardless of what the fill reports said.
     try {
-      if ((await fetchNetQty(accessToken, symbol)) <= 0) remainingQty = 0;
+      if ((await fetchNetQty(accessToken, symbol, activeKiteProduct())) <= 0) remainingQty = 0;
     } catch {
       /* unknown — trust our own fill accounting */
     }
@@ -2098,24 +2544,25 @@ async function squareOffInner(accessToken: string, reason: string) {
     closedEntry > 0 && exitPrice > 0 ? (exitPrice - closedEntry) * closedQty : unrealisedPnl;
 
   let exitNote = reason;
-  if (tradeSlot === "nine-fifteen") {
-    if (reason.startsWith("TRADE EXITED")) {
-      exitNote = reason;
-    } else {
-      const via = /hard stop/i.test(reason) ? "hard-stop" : /square-off/i.test(reason) ? "eod" : "market";
-      exitNote = formatNineFifteenExitSummary({
-        exitPrice: exitPrice > 0 ? exitPrice : null,
-        quantity: closedQty,
-        entryPrice: closedEntry,
-        pnl,
-        via,
-        takeProfitPct: activeLegTakeProfitPct(dateIst),
-      });
-    }
-    message = exitNote;
-  } else {
-    exitNote = `CLOSED · ${reason}`;
+  if (reason.startsWith("TRADE EXITED")) {
+    exitNote = reason;
+  } else if (tradeSlot === "nine-fifteen") {
+    const via: "limit" | "market" | "hard-stop" | "eod" = /square-off/i.test(reason)
+      ? "eod"
+      : /hard stop/i.test(reason)
+        ? "hard-stop"
+        : "market";
+    exitNote = formatNineFifteenExitSummary({
+      exitPrice: exitPrice > 0 ? exitPrice : null,
+      quantity: closedQty,
+      entryPrice: closedEntry,
+      pnl,
+      via,
+      takeProfitPct: activeLegTakeProfitPct(dateIst),
+      legTag: "9:15",
+    });
   }
+  message = exitNote;
 
   await persistTradeLog(dateIst, "closed", exitNote, {
     exitPrice: exitPrice > 0 ? exitPrice : null,
@@ -2127,16 +2574,25 @@ async function squareOffInner(accessToken: string, reason: string) {
 }
 
 /**
- * After a partial split fill, buy the missing quantity while the 9:16 window is still open.
- * Re-checks live balance each round so a top-up can never overspend.
+ * After a partial split fill, buy the missing quantity while the entry window is still open.
+ *
+ * Sizing uses the exact last print. Kite requires market protection on API MARKET buys; if a
+ * chunk is refused for margin, top-up + lot downsize retries until the entry window closes.
  */
 async function topUpEntryQuantity(
   accessToken: string,
   resolved: { tradingsymbol: string; lotSize: number },
   targetQuantity: number,
+  options?: { deadlinePassed?: () => boolean; tag?: string },
 ) {
+  // The 9:15 leg tops up against its own 9:15:20 cutoff — buying into 9:16 would overrun the
+  // minute and take the 9:16 trade down with it.
+  const deadlinePassed = options?.deadlinePassed ?? isPast916EntryWindow;
+  const tag = options?.tag ?? "Entry";
+  let lotCeiling = Number.POSITIVE_INFINITY;
+
   for (let round = 1; round <= ENTRY_TOP_UP_MAX_ROUNDS; round += 1) {
-    if (isPast916EntryWindow()) return;
+    if (deadlinePassed()) return;
 
     const working = await pendingOrderQuantity(accessToken, resolved.tradingsymbol, "BUY");
     const missing = targetQuantity - quantity - working;
@@ -2155,18 +2611,33 @@ async function topUpEntryQuantity(
       /* quote/balance hiccup — fall back to the missing lots */
     }
 
+    affordableLots = Math.min(affordableLots, lotCeiling);
     if (affordableLots <= 0) return;
 
     const chunks = splitLotsIntoOrderChunks(affordableLots).map((lots) => lots * resolved.lotSize);
-    pushLog(`Entry top-up round ${round} · ${formatLotSplitLabel(splitLotsIntoOrderChunks(affordableLots))}`, "info");
+    pushLog(`${tag} top-up round ${round} · ${formatLotSplitLabel(splitLotsIntoOrderChunks(affordableLots))}`, "info");
 
     const placed = await placeSplitMarketOrders(accessToken, {
       tradingsymbol: resolved.tradingsymbol,
       transaction_type: "BUY",
       quantities: chunks,
     });
-    const { fills } = await awaitOrderFills(accessToken, placed.orderIds);
+    const { fills, failures } = await awaitOrderFills(accessToken, placed.orderIds);
     applyOwnEntryFills(resolved.tradingsymbol, resolved.lotSize, fills);
+
+    const refusal = [...placed.failures, ...failures].find((err) => isInsufficientFundsError(err));
+    if (!refusal) continue;
+
+    const next = nextEntryLotsAfterMarginReject(affordableLots, parseMarginShortfall(refusal));
+    if (next <= 0) {
+      pushLog(`${tag} margin short at 1 lot — no smaller size to try`, "warning");
+      return;
+    }
+    lotCeiling = next;
+    pushLog(
+      `${tag} margin short at ${affordableLots} lot(s) — retrying instantly at ${next}`,
+      "warning",
+    );
   }
 }
 
@@ -2191,6 +2662,18 @@ function entryRetryDelayMs() {
   return ENTRY_RETRY_DELAY_MS;
 }
 
+function nextNineFifteenLotsAfterMarginError(currentLots: number, err: unknown): number {
+  if (currentLots <= 0) return 0;
+  const text = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  if (!isInsufficientFundsError(err) && !isMarginRelatedOrderError(text)) return 0;
+  return nextEntryLotsAfterMarginReject(currentLots, parseMarginShortfall(err));
+}
+
+function isNineFifteenEntryRetryableError(message: string, err?: unknown): boolean {
+  if (isMarginRelatedOrderError(message) || (err != null && isInsufficientFundsError(err))) return true;
+  return isRetryableEntryOrderError(message) || /LTP unavailable|ATM (PE|CE) not found|confirm fetch/i.test(message);
+}
+
 function resetNineFifteenForDay(dateIst: string) {
   if (nineFifteenDate === dateIst) return;
   nineFifteenDate = dateIst;
@@ -2199,7 +2682,10 @@ function resetNineFifteenForDay(dateIst: string) {
   nineFifteenMarkAtLabel = null;
   nineFifteenSettled = false;
   nineFifteenOverranMinute = false;
+  nineFifteenSmallBodyExitArmed = false;
+  nineFifteenSmallBodyExitInFlight = false;
   nineFifteenNote = null;
+  nineFifteenPreResolvedCe = null;
   nineFifteenPreResolvedPe = null;
   nineFifteenPreResolvedDate = null;
   nineFifteenTimerDate = null;
@@ -2219,19 +2705,21 @@ function settleNineFifteen(note: string, type: NineSixteenBotStatus["logs"][numb
   }
   if (phase === "entering") phase = "waiting";
   tradeSlot = "nine-sixteen";
-  message = `${note} · waiting for 9:16:00`;
+  message = `${note} · waiting for 9:16:01`;
 }
 
 /** Attempt 1 uses the leg resolved at 9:15:04; retries re-resolve against the live spot. */
 async function resolveNineFifteenOption(
   accessToken: string,
+  entryLeg: TradeLeg,
   attempt: number,
   dateIst: string,
 ): Promise<ResolvedAtmOption | null> {
-  if (attempt === 1 && nineFifteenPreResolvedDate === dateIst && nineFifteenPreResolvedPe) {
-    return nineFifteenPreResolvedPe;
+  if (attempt === 1 && nineFifteenPreResolvedDate === dateIst) {
+    const cached = entryLeg === "CE_BUY" ? nineFifteenPreResolvedCe : nineFifteenPreResolvedPe;
+    if (cached) return cached;
   }
-  return resolveAtmNiftyOption(accessToken, "PE_BUY", {
+  return resolveAtmNiftyOption(accessToken, entryLeg, {
     spotPrice: lastSpot != null && lastSpot > 0 ? lastSpot : undefined,
   });
 }
@@ -2264,12 +2752,12 @@ async function finalizeNineFifteenEntry(
   }
 
   nineFifteenSettled = true;
-  message = `In 9:15 position · ${getNineFifteenLadderLabel(dateIst)}`;
+  message = `In 9:15 position · ${getNineFifteenLadderLabel(dateIst, leg)}`;
   pushLog(
     `9:15 entry filled on attempt ${attempt} · ${splitLabel} · ${quantity} qty @ ₹${entryPrice.toFixed(2)}`,
     "success",
   );
-  pushLog(getNineFifteenLadderLabel(dateIst), "info");
+  pushLog(getNineFifteenLadderLabel(dateIst, leg), "info");
   pushLog(getHardStopScheduleLabel(), "info");
   try {
     await placeLegTakeProfitOrders(accessToken, dateIst);
@@ -2284,10 +2772,10 @@ async function finalizeNineFifteenEntry(
 }
 
 /**
- * The 9:15 trade: read the minute five seconds in and buy the ATM PE at 9:15:11 if it is red.
+ * The 9:15 trade: read the minute ten seconds in and buy ATM PE on red ≥ 5 pts at 9:15:11.
  *
  * Nothing in here ends the day. Whether it trades, skips or fails to fill, the 9:16 decision is
- * still taken at 9:16:00 — the only thing that stops it is this leg still being open by then.
+ * still taken at 9:16:01 — the only thing that stops it is this leg still being open by then.
  */
 async function tryEnterNineFifteen(accessToken: string, dateIst: string) {
   sealNineFifteenMark();
@@ -2308,14 +2796,18 @@ async function tryEnterNineFifteen(accessToken: string, dateIst: string) {
     return;
   }
 
+  const entryLeg = decision.leg;
+  const legLabel = entryLeg === "CE_BUY" ? "CE" : "PE";
   phase = "entering";
   tradeSlot = "nine-fifteen";
-  leg = "PE_BUY";
+  leg = entryLeg;
   open915 = open;
   clearFailedEntryAttempt();
-  message = "Placing 9:15:11 PE entry…";
+  message = `Placing 9:15:11 ${legLabel} entry…`;
   pushLog(
-    `9:15 RED · ${decision.dropPts.toFixed(2)} pts below the open at the 10s mark → buying the ATM PE`,
+    entryLeg === "CE_BUY"
+      ? `9:15 GREEN · +${decision.movePts.toFixed(2)} pts above the open at the 10s mark → buying the ATM CE`
+      : `9:15 RED · ${decision.movePts.toFixed(2)} pts below the open at the 10s mark → buying the ATM PE`,
     "success",
   );
   await assertEgressReadyForEntry();
@@ -2325,64 +2817,113 @@ async function tryEnterNineFifteen(accessToken: string, dateIst: string) {
   let lastAttemptLots = 0;
   let lastFailure = "";
 
-  while (!isPastNineFifteenEntryWindow()) {
+  while (!isPastNineFifteenMarginRetryWindow()) {
     attempt += 1;
     try {
-      const resolved = await resolveNineFifteenOption(accessToken, attempt, dateIst);
-      if (!resolved) throw new Error("ATM PE not found");
+      const resolved = await resolveNineFifteenOption(accessToken, entryLeg, attempt, dateIst);
+      if (!resolved) throw new Error(`ATM ${legLabel} not found`);
 
-      const optionLtp = await fetchOptionLtp(accessToken, resolved.tradingsymbol);
-      if (optionLtp <= 0) throw new Error("Option LTP unavailable for sizing");
+      const ltpQuote = await fetchConservativeOptionLtpForEntry(accessToken, resolved.tradingsymbol);
+      const optionLtp = ltpQuote.ltp;
+      if (ltpQuote.staleFirstQuote) {
+        pushLog(
+          `9:15 entry LTP · 1st ₹${ltpQuote.firstLtp.toFixed(2)} · 2nd ₹${ltpQuote.secondLtp.toFixed(2)} · sizing on ₹${optionLtp.toFixed(2)} (${ltpQuote.spikePct.toFixed(1)}% spike dropped)`,
+          "info",
+        );
+      }
 
-      const sizing = await resolveEntryQuantity(accessToken, resolved.lotSize, optionLtp, {
-        maxLots: maxLotsCap,
-      });
-      if (sizing.lots <= 0 || sizing.quantity <= 0) {
-        lastFailure = `balance too low for 1 lot · need ~₹${Math.ceil(sizing.costPerLot)} · available ₹${Math.floor(sizing.availableBalance)}`;
+      let entrySucceeded = false;
+      let splitLabel = "";
+
+      for (let marginRound = 1; marginRound <= 40 && !isPastNineFifteenMarginRetryWindow(); marginRound += 1) {
+        const sizing = await resolveEntryQuantity(accessToken, resolved.lotSize, optionLtp, {
+          maxLots: maxLotsCap,
+        });
+        if (sizing.lots <= 0 || sizing.quantity <= 0) {
+          lastFailure = `balance too low for 1 lot · need ~₹${Math.ceil(sizing.costPerLot)} · available ₹${Math.floor(sizing.availableBalance)}`;
+          break;
+        }
+
+        lastAttemptLots = sizing.lots;
+        const lotChunks = splitLotsIntoOrderChunks(sizing.lots);
+        splitLabel = formatLotSplitLabel(lotChunks);
+        const attemptLabel =
+          marginRound === 1 ? String(attempt) : `${attempt} · margin retry ${marginRound}`;
+        pushLog(
+          `9:15 entry attempt ${attemptLabel} · ${legLabel} ${resolved.tradingsymbol} @ ₹${optionLtp.toFixed(2)} · ${splitLabel}`,
+          attempt === 1 && marginRound === 1 ? "success" : "info",
+        );
+
+        ownedSymbol = resolved.tradingsymbol;
+        const placed = await placeSplitMarketOrders(accessToken, {
+          tradingsymbol: resolved.tradingsymbol,
+          transaction_type: "BUY",
+          quantities: lotChunks.map((lots) => lots * resolved.lotSize),
+        });
+        for (const failure of placed.failures) {
+          pushLog(`9:15 entry order rejected · ${failure.message}`, "warning");
+        }
+
+        const { fills, failures: fillFailures } = await awaitOrderFills(accessToken, placed.orderIds);
+        if (fills.length === 0) {
+          const firstErr = fillFailures[0] ?? placed.failures[0] ?? new Error("All 9:15 entry orders failed");
+          lastFailure = firstErr instanceof Error ? firstErr.message : String(firstErr);
+          const nextLots = nextNineFifteenLotsAfterMarginError(lastAttemptLots, firstErr);
+          if (nextLots > 0 && !isPastNineFifteenMarginRetryWindow()) {
+            maxLotsCap = nextLots;
+            pushLog(
+              `9:15 margin short at ${lastAttemptLots} lot(s) — retrying instantly at ${nextLots} (until 9:15:15)`,
+              "warning",
+            );
+            continue;
+          }
+          throw firstErr instanceof Error ? firstErr : new Error(lastFailure);
+        }
+
+        clearKiteRejectedIp();
+        if (!applyOwnEntryFills(resolved.tradingsymbol, resolved.lotSize, fills)) {
+          throw new Error("9:15 entry orders reported no filled quantity");
+        }
+
+        const rejectedCount = placed.failures.length + fillFailures.length;
+        if (rejectedCount > 0) {
+          pushLog(
+            `9:15 partial entry · ${fills.length}/${lotChunks.length} orders filled · ${quantity} qty · topping up before 9:15:20`,
+            "warning",
+          );
+          await topUpEntryQuantity(accessToken, resolved, sizing.quantity, {
+            deadlinePassed: isPastNineFifteenEntryWindow,
+            tag: "9:15 entry",
+          });
+        }
+
+        entrySucceeded = true;
         break;
       }
 
-      lastAttemptLots = sizing.lots;
-      const lotChunks = splitLotsIntoOrderChunks(sizing.lots);
-      const splitLabel = formatLotSplitLabel(lotChunks);
-      pushLog(
-        `9:15 entry attempt ${attempt} · PE ${resolved.tradingsymbol} @ ₹${optionLtp.toFixed(2)} · ${splitLabel}`,
-        attempt === 1 ? "success" : "info",
-      );
-
-      ownedSymbol = resolved.tradingsymbol;
-      const placed = await placeSplitMarketOrders(accessToken, {
-        tradingsymbol: resolved.tradingsymbol,
-        transaction_type: "BUY",
-        quantities: lotChunks.map((lots) => lots * resolved.lotSize),
-      });
-      for (const failure of placed.failures) {
-        pushLog(`9:15 entry order rejected · ${failure.message}`, "warning");
-      }
-
-      const { fills, failures: fillFailures } = await awaitOrderFills(accessToken, placed.orderIds);
-      if (fills.length === 0) {
-        throw fillFailures[0] ?? placed.failures[0] ?? new Error("All 9:15 entry orders failed");
-      }
-      clearKiteRejectedIp();
-      if (!applyOwnEntryFills(resolved.tradingsymbol, resolved.lotSize, fills)) {
-        throw new Error("9:15 entry orders reported no filled quantity");
+      if (!entrySucceeded) {
+        if (isPastNineFifteenMarginRetryWindow()) break;
+        continue;
       }
 
       await finalizeNineFifteenEntry(accessToken, dateIst, resolved, attempt, splitLabel);
       return;
     } catch (err) {
       lastFailure = err instanceof Error ? err.message : "Entry failed";
-      if (isMarginRelatedOrderError(lastFailure) && lastAttemptLots > 0) {
-        maxLotsCap = lastAttemptLots - 1;
-      } else if (/REJECTED/i.test(lastFailure) && lastAttemptLots > 1) {
-        maxLotsCap = lastAttemptLots - 1;
+      const nextLots = nextNineFifteenLotsAfterMarginError(lastAttemptLots, err);
+      if (nextLots > 0 && !isPastNineFifteenMarginRetryWindow()) {
+        maxLotsCap = nextLots;
+        pushLog(
+          `9:15 margin short at ${lastAttemptLots} lot(s) — retrying instantly at ${nextLots} (until 9:15:15)`,
+          "warning",
+        );
+        continue;
       }
       pushLog(`9:15 entry attempt ${attempt} failed · ${lastFailure}`, "warning");
-      if (!isRetryableEntryOrderError(lastFailure) && !/LTP unavailable|ATM PE not found/i.test(lastFailure)) {
+      if (!isNineFifteenEntryRetryableError(lastFailure, err)) {
         break;
       }
-      if (isPastNineFifteenEntryWindow()) break;
+      if (isPastNineFifteenMarginRetryWindow()) break;
       await new Promise((resolve) => setTimeout(resolve, entryRetryDelayMs()));
     }
   }
@@ -2409,12 +2950,16 @@ async function tryEnterNineFifteen(accessToken: string, dateIst: string) {
 
   clearFailedEntryAttempt();
   leg = null;
-  settleNineFifteen(`9:15 trade not taken · ${lastFailure || "entry window closed"}`, "warning");
+  settleNineFifteen(
+    `9:15 trade not taken · ${lastFailure || "not filled by 9:15:15 (margin retries exhausted)"}`,
+    "warning",
+  );
 }
 
 async function tryEnter(accessToken: string, dateIst: string) {
   phase = "entering";
-  message = "Placing 9:16:00 entry…";
+  tradeSlot = "nine-sixteen";
+  message = "Placing 9:16:01 entry…";
   clearFailedEntryAttempt();
 
   if (nineFifteenOverranMinute) {
@@ -2438,7 +2983,7 @@ async function tryEnter(accessToken: string, dateIst: string) {
 
   open915 = bar.open;
   pushLog(
-    `9:16:00 entry check · 9:15:00 open ${bar.open.toFixed(2)} · 9:15:59 close ${bar.close.toFixed(2)} (WS ticks) · Δ ${bar.change.toFixed(2)} (${bar.direction})`,
+    `9:16:01 entry check · 9:15:00 open ${bar.open.toFixed(2)} · 9:15:59 close ${bar.close.toFixed(2)} (WS ticks) · Δ ${bar.change.toFixed(2)} (${bar.direction})`,
     "info",
   );
   const entryDecision = decide915Entry(bar);
@@ -2466,14 +3011,33 @@ async function tryEnter(accessToken: string, dateIst: string) {
   while (!isPast916EntryWindow()) {
     attempt += 1;
     clearFailedEntryAttempt();
-    message = attempt === 1 ? "Placing 9:16:00 entry…" : `Retrying entry (${attempt}) until 9:16:30…`;
+    message = attempt === 1 ? "Placing 9:16:01 entry…" : `Retrying entry (${attempt}) until 9:16:30…`;
 
     try {
       const resolved = await resolveEntryOption(accessToken, nextLeg, attempt, dateIst);
       if (!resolved) throw new Error("ATM option not found");
 
-      const optionLtp = await fetchOptionLtp(accessToken, resolved.tradingsymbol);
-      if (optionLtp <= 0) throw new Error("Option LTP unavailable for sizing");
+      const {
+        ltp: optionLtp,
+        entryLimitPrice,
+        firstLtp,
+        secondLtp,
+        spikePct,
+        staleFirstQuote,
+        source: ltpSource,
+      } = await resolveConservativeEntryLtp(accessToken, resolved, attempt);
+      const ltpSourceLabel =
+        ltpSource === "ws-91601"
+          ? "WS 9:16:01"
+          : ltpSource === "ws-consecutive"
+            ? "WS consecutive"
+            : "REST";
+      if (staleFirstQuote) {
+        pushLog(
+          `Entry LTP ${ltpSourceLabel} · 1st ₹${firstLtp.toFixed(2)} · 2nd ₹${secondLtp.toFixed(2)} · sizing on ₹${optionLtp.toFixed(2)} (${spikePct.toFixed(1)}% spike dropped) · limit BUY @ ₹${entryLimitPrice.toFixed(2)}`,
+          "info",
+        );
+      }
 
       const sizing = await resolveEntryQuantity(accessToken, resolved.lotSize, optionLtp, {
         maxLots: maxLotsCap,
@@ -2490,7 +3054,7 @@ async function tryEnter(accessToken: string, dateIst: string) {
       const splitLabel = formatLotSplitLabel(lotChunks);
 
       pushLog(
-        `Entry attempt ${attempt} · ${legLabel(nextLeg)} ${resolved.tradingsymbol} @ ₹${optionLtp.toFixed(2)} · ${modeLabel} · ${splitLabel} · ₹${Math.floor(sizing.availableBalance)} avail`,
+        `Entry attempt ${attempt} · ${legLabel(nextLeg)} ${resolved.tradingsymbol} · limit BUY @ ₹${entryLimitPrice.toFixed(2)} (${ltpSourceLabel}: 1st ₹${firstLtp.toFixed(2)} · 2nd ₹${secondLtp.toFixed(2)}, size on ₹${optionLtp.toFixed(2)}) · ${modeLabel} · ${splitLabel} · ₹${Math.floor(sizing.availableBalance)} avail`,
         attempt === 1 ? "success" : "info",
       );
 
@@ -2520,16 +3084,38 @@ async function tryEnter(accessToken: string, dateIst: string) {
       const orderQuantities = lotChunks.map((lots) => lots * resolved.lotSize);
       // Claim the contract before the first BUY leaves, so a crash mid-entry still recovers.
       ownedSymbol = resolved.tradingsymbol;
-      const placed = await placeSplitMarketOrders(accessToken, {
+      let placed = await placeSplitLimitOrders(accessToken, {
         tradingsymbol: resolved.tradingsymbol,
         transaction_type: "BUY",
         quantities: orderQuantities,
+        price: entryLimitPrice,
       });
       for (const failure of placed.failures) {
-        pushLog(`Entry order rejected at placement · ${failure.message}`, "warning");
+        pushLog(`Entry limit rejected at placement · ${failure.message}`, "warning");
       }
 
-      const { fills, failures: fillFailures } = await awaitOrderFills(accessToken, placed.orderIds);
+      let { fills, failures: fillFailures } = await awaitOrderFills(
+        accessToken,
+        placed.orderIds,
+        ENTRY_LIMIT_FILL_TIMEOUT_MS,
+      );
+
+      if (fills.length === 0 && placed.orderIds.length > 0) {
+        await cancelOpenOrders(accessToken, placed.orderIds);
+        pushLog(
+          `Entry limit @ ₹${entryLimitPrice.toFixed(2)} did not fill in ${ENTRY_LIMIT_FILL_TIMEOUT_MS / 1000}s · market backup`,
+          "warning",
+        );
+        placed = await placeSplitMarketOrders(accessToken, {
+          tradingsymbol: resolved.tradingsymbol,
+          transaction_type: "BUY",
+          quantities: orderQuantities,
+        });
+        for (const failure of placed.failures) {
+          pushLog(`Entry market backup rejected · ${failure.message}`, "warning");
+        }
+        ({ fills, failures: fillFailures } = await awaitOrderFills(accessToken, placed.orderIds));
+      }
 
       if (fills.length === 0) {
         const firstErr = fillFailures[0] ?? placed.failures[0];
@@ -2612,7 +3198,7 @@ async function refreshLiveQuotesInner(accessToken: string, dateIst: string) {
 
   if (syncPosition && tradingsymbol && isOwnPosition(tradingsymbol)) {
     try {
-      const pos = await fetchMisPosition(accessToken, tradingsymbol, "MIS");
+      const pos = await fetchMisPosition(accessToken, tradingsymbol, activeKiteProduct());
       if (pos) {
         applyOwnPositionSync(pos);
         lastPositionSyncAt = now;
@@ -2679,16 +3265,33 @@ async function refreshLiveQuotesInner(accessToken: string, dateIst: string) {
   saveBotState(dateIst);
 }
 
-async function maybeHardStopExit(accessToken: string, slotLabel: string): Promise<boolean> {
+async function maybeHardStopExit(accessToken: string): Promise<boolean> {
   if (entrySpot <= 0 || lastSpot == null || lastSpot <= 0 || !leg) return false;
   if (!shouldHardStopNineSixteen(lastSpot, entrySpot, leg)) return false;
 
   const stopSpot = computeHardStopSpot(entrySpot, leg);
+  const tag = legTradeTag();
+  await cancelLegTakeProfitOrders(accessToken);
   await squareOff(
     accessToken,
-    `${slotLabel} hard stop at ${getHardStopStartLabel()} · Nifty ${lastSpot.toFixed(2)} is ` +
+    `${tag} hard stop at ${getHardStopStartLabel()} · Nifty ${lastSpot.toFixed(2)} is ` +
       `${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} pts adverse from entry ${entrySpot.toFixed(2)} ` +
       `(stop ${stopSpot.toFixed(2)})`,
+  );
+  return true;
+}
+
+async function maybeHybrid916IndexExit(accessToken: string): Promise<boolean> {
+  if (tradeSlot !== "nine-sixteen" || leg !== "PE_BUY") return false;
+  if (indexExitTargetPoints <= 0 || entrySpot <= 0 || indexExitTargetSpot == null) return false;
+  if (lastSpot == null || lastSpot <= 0) return false;
+  if (!shouldExitNineSixteen(lastSpot, entrySpot, leg, indexExitTargetPoints)) return false;
+
+  await cancelLegTakeProfitOrders(accessToken);
+  await squareOff(
+    accessToken,
+    `9:16 index exit · Nifty ${lastSpot.toFixed(2)} hit ${indexExitSchedule ?? `flat −${indexExitTargetPoints}`} ` +
+      `(target ${indexExitTargetSpot.toFixed(2)} from entry ${entrySpot.toFixed(2)}) · market sell`,
   );
   return true;
 }
@@ -2700,8 +3303,15 @@ async function checkAndMaybeExitTakeProfitLeg(accessToken: string, dateIst: stri
     if (isReadyToSeal915Close()) seal915CloseFromTicks(dateIst);
 
     if (!nineFifteenOverranMinute && isPastNineFifteenMinute()) {
-      nineFifteenOverranMinute = true;
-      pushLog("9:15 leg still open at 9:16:00 · the 9:16 trade is skipped today", "warning");
+      if (nineFifteenSmallBodyExitArmed) {
+        pushLog(
+          "9:15 leg still open at 9:16:00 · |Δ| < 5 at WS close · exit armed for 9:16:01 WS tick",
+          "warning",
+        );
+      } else {
+        nineFifteenOverranMinute = true;
+        pushLog("9:15 leg still open at 9:16:00 · the 9:16 trade is skipped today", "warning");
+      }
     }
   }
 
@@ -2709,9 +3319,6 @@ async function checkAndMaybeExitTakeProfitLeg(accessToken: string, dateIst: stri
     await squareOff(accessToken, "End of day square-off");
     return true;
   }
-
-  const tag = legTradeTag();
-  if (await maybeHardStopExit(accessToken, tag)) return true;
 
   await syncLegTakeProfitOrders(accessToken, dateIst);
 
@@ -2725,7 +3332,7 @@ async function checkAndMaybeExitTakeProfitLeg(accessToken: string, dateIst: stri
 
   if (tradingsymbol && quantity > 0) {
     try {
-      const brokerQty = await fetchNetQty(accessToken, tradingsymbol);
+      const brokerQty = await fetchNetQty(accessToken, tradingsymbol, activeKiteProduct());
       if (brokerQty <= 0) {
         await completeLegTakeProfitExit(accessToken, dateIst, "limit");
         return true;
@@ -2742,10 +3349,23 @@ async function checkAndMaybeExitTakeProfitLeg(accessToken: string, dateIst: stri
     }
   }
 
+  if (tradeSlot === "nine-sixteen" && phase === "in_position") {
+    maybeRetargetHybrid916GreenMinute(dateIst);
+  }
+
+  if (await maybeHybrid916IndexExit(accessToken)) return true;
+
+  if (await maybeHardStopExit(accessToken)) return true;
+
   const legPnl = ownLegUnrealisedPnl(entryPrice, quantity, lastOptionPrice);
   const tpPct = activeLegTakeProfitPct(dateIst);
   if (shouldExitNineFifteenTakeProfit(legPnl, entryPrice, quantity, tpPct)) {
     await cancelLegTakeProfitOrders(accessToken);
+    const tag = legTradeTag();
+    pushLog(
+      `${tag} take-profit market backup · P&L +₹${Math.round(legPnl ?? 0)} reached +${tpPct}% aim · cancelling limit · market sell`,
+      "success",
+    );
     await squareOff(
       accessToken,
       formatNineFifteenExitSummary({
@@ -2755,6 +3375,7 @@ async function checkAndMaybeExitTakeProfitLeg(accessToken: string, dateIst: stri
         pnl: legPnl,
         via: "market",
         takeProfitPct: tpPct,
+        legTag: tag,
       }),
     );
     return true;
@@ -2796,12 +3417,12 @@ async function tickInPosition(accessToken: string, dateIst: string) {
     }
   } else if (Date.now() - lastPositionSyncAt >= 5000 && tradingsymbol && isOwnPosition(tradingsymbol)) {
     try {
-      const pos = await fetchMisPosition(accessToken, tradingsymbol, "MIS");
+      const pos = await fetchMisPosition(accessToken, tradingsymbol, activeKiteProduct());
       if (pos) {
         applyOwnPositionSync(pos);
         lastPositionSyncAt = Date.now();
-        // No option tick feed (token unresolved) — positions LTP keeps the P&L exit alive.
-        if (optionInstrumentToken <= 0 && pos.last_price > 0) {
+        // Positions LTP keeps take-profit market backup alive when option ticks stall.
+        if (pos.last_price > 0) {
           lastOptionPrice = pos.last_price;
         }
         if (lastOptionPrice != null && lastOptionPrice > 0 && entryPrice > 0 && quantity > 0) {
@@ -2925,7 +3546,7 @@ async function mainLoop() {
       }
     } catch (err) {
       const note = err instanceof Error ? err.message : "Reconcile failed";
-      // Transient HTML/JSON glitches must not block WS capture or 9:16:00 entry
+      // Transient HTML/JSON glitches must not block WS capture or 9:16:01 entry
       if (/HTML instead of JSON|non-JSON|empty body|Unexpected token|is not valid JSON|502|503|504|429/i.test(note)) {
         pushLog(`Reconcile deferred (Kite glitch): ${note}`, "warning");
       } else if (/api_key|access_token|TokenException|Incorrect/i.test(note)) {
@@ -2983,7 +3604,7 @@ async function mainLoop() {
 
     if (nineFifteenEnabled && !nineFifteenSettled) {
       if (isReadyForNineFifteenPreResolve()) {
-        void preResolveNineFifteenPe(session.accessToken, ctx.dateIST).catch(() => {
+        void preResolveNineFifteenAtmLegs(session.accessToken, ctx.dateIST).catch(() => {
           /* logged inside */
         });
       }
@@ -3040,7 +3661,7 @@ async function mainLoop() {
     } else if (capturedClose915 == null || capturedClose915 <= 0) {
       message = `Open ${capturedOpen915.toFixed(2)} · waiting for last tick before 9:16:00`;
     } else {
-      message = `9:15 WS OHLC ready · waiting for 9:16:00 entry · ${Math.ceil(waitMs / 1000)}s`;
+      message = `9:15 WS OHLC ready · waiting for 9:16:01 entry · ${Math.ceil(waitMs / 1000)}s`;
     }
   } catch (err) {
     await handleBotLoopError(err);
@@ -3049,7 +3670,7 @@ async function mainLoop() {
   }
 }
 
-/** Shared recovery for both the poll loop and the 9:16:00 entry burst. */
+/** Shared recovery for both the poll loop and the 9:16:01 entry burst. */
 async function handleBotLoopError(err: unknown) {
   const wasEntering = phase === "entering";
   const holdsPosition =
@@ -3084,7 +3705,7 @@ async function handleBotLoopError(err: unknown) {
 }
 
 /**
- * Seal the 9:15 close and place the entry the instant 9:16:00 arrives. The poll loop wakes on
+ * Seal the 9:15 close and place the entry the instant 9:16:01 arrives. The poll loop wakes on
  * a 50–250ms cadence, and that lag lands directly on the order timestamp.
  */
 async function runEntryBurst() {
@@ -3095,7 +3716,7 @@ async function runEntryBurst() {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   if (loopBusy) {
-    pushLog("9:16:00 timer yielded to in-flight poll · entry continues on the poll loop", "warning");
+    pushLog("9:16:01 timer yielded to in-flight poll · entry continues on the poll loop", "warning");
     return;
   }
 
@@ -3182,7 +3803,7 @@ async function runNineFifteenEntryBurst() {
   }
 }
 
-/** Same wall-clock re-arming as the 9:16:00 timer below, aimed at 9:15:11.000. */
+/** Same wall-clock re-arming as the 9:16:01 timer below, aimed at 9:15:11.000. */
 function armNineFifteenTimer() {
   const ctx = getIndianMarketContext();
   if (ctx.sessionStatus === "closed_weekend" || ctx.sessionStatus === "post_market") return;
@@ -3204,7 +3825,7 @@ function armNineFifteenTimer() {
 }
 
 /**
- * Aim a one-shot timer at 9:16:00.000 IST. Re-armed on every poll so the delay is recomputed
+ * Aim a one-shot timer at 9:16:01.000 IST. Re-armed on every poll so the delay is recomputed
  * from the wall clock each time: one long setTimeout would drift under load and would not
  * follow an NTP correction, and by 9:15:59 the poll runs every 50ms so the final arm lands
  * within milliseconds of the target.
@@ -3225,7 +3846,7 @@ function armEntryInstantTimer() {
 
   if (entryTimerDate !== ctx.dateIST) {
     entryTimerDate = ctx.dateIST;
-    pushLog(`9:16:00.000 entry armed · T-${(delay / 1000).toFixed(1)}s`, "info");
+    pushLog(`9:16:01.000 entry armed · T-${(delay / 1000).toFixed(1)}s`, "info");
   }
 }
 
@@ -3300,7 +3921,7 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
       ? nineFifteenPnlRemainingToTarget(pnl, entryPrice, quantity, tpPct)
       : null;
   const tpExitSchedule = onNineFifteenLeg
-    ? getNineFifteenLadderLabel(ctx.dateIST)
+    ? getNineFifteenLadderLabel(ctx.dateIST, leg)
     : onNineSixteenLeg
       ? getNineSixteenLadderLabel(ctx.dateIST)
       : null;
@@ -3317,7 +3938,8 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
     wsConnected: isKiteTickerConnected(),
     entrySpot: entrySpot > 0 ? entrySpot : null,
     exitMode: inTrade ? exitMode : null,
-    indexExitSchedule: null,
+    indexExitSchedule:
+      inTrade && tradeSlot === "nine-sixteen" && indexExitSchedule ? indexExitSchedule : null,
     hardStopSpot:
       inTrade && entrySpot > 0 && leg ? computeHardStopSpot(entrySpot, leg) : null,
     hardStopActive: inTrade && isHardStopWindowActive(),
@@ -3325,18 +3947,25 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
     hardStopStartLabel: getHardStopStartLabel(),
     leg,
     tradingsymbol,
-    targetSpot: null,
+    targetSpot: inTrade && tradeSlot === "nine-sixteen" ? indexExitTargetSpot : null,
     lastSpot,
     entryPrice: entryPrice > 0 ? entryPrice : null,
     lastOptionPrice,
     quantity: quantity > 0 ? quantity : null,
     unrealisedPnl: pnl,
-    niftyPointsToTarget: null,
+    niftyPointsToTarget:
+      inTrade &&
+      tradeSlot === "nine-sixteen" &&
+      lastSpot != null &&
+      indexExitTargetSpot != null &&
+      leg
+        ? niftyPointsToHybrid916Target(lastSpot, indexExitTargetSpot, leg)
+        : null,
     pnlTargetAmount,
     pnlTargetPct,
     pnlExitActive: pnlTrailArmed,
     pnlExitStartLabel: getPnlExitStartLabel(),
-    pnlExitSchedule: tpExitSchedule ?? getNineFifteenLadderLabel(ctx.dateIST),
+    pnlExitSchedule: tpExitSchedule ?? getNineFifteenLadderLabel(ctx.dateIST, leg),
     pnlPct,
     pnlLockedPct: lockedPnlPct,
     pnlStopPct,
@@ -3355,7 +3984,7 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
     nineFifteenSettled,
     nineFifteenNote,
     nineFifteenBlocked916: nineFifteenOverranMinute,
-    nineFifteenLadder: getNineFifteenLadderLabel(ctx.dateIST),
+    nineFifteenLadder: getNineFifteenLadderLabel(ctx.dateIST, leg),
     nineFifteenTakeProfitPct: onTpLimitLeg ? tpPct : NINE_FIFTEEN_TAKE_PROFIT_PCT,
     nineFifteenTpLimitPrice:
       onTpLimitLeg && nineFifteenTpLimitPrice > 0 ? nineFifteenTpLimitPrice : null,
@@ -3423,7 +4052,7 @@ export async function getNineSixteenBotStatusLive(): Promise<NineSixteenBotStatu
   loadBotState(ctx.dateIST);
 
   try {
-    // UI polling must not spend Kite rate limit during the 9:16:00 entry burst.
+    // UI polling must not spend Kite rate limit during the 9:16:01 entry burst.
     if (!isInNineSixteenBurst()) {
       await reconcilePositionWithKite(session.accessToken, ctx.dateIST);
     }
@@ -3486,7 +4115,7 @@ export function startNineSixteenMonitorLoop() {
   if (phase === "off") {
     phase = "waiting";
     message = enabled
-      ? "Server bot waiting for Kite websocket 9:15 ticks"
+      ? "Server bot waiting for Kite websocket 9:15 ticks · 9:16 armed"
       : "9:16 trading disabled — websocket monitor active";
   }
   scheduleNext();
@@ -3495,69 +4124,53 @@ export function startNineSixteenMonitorLoop() {
 export function setNineSixteenBotEnabled(next: boolean) {
   enabled = next;
   startNineSixteenMonitorLoop();
-  if (!enabled) {
-    if (entryTimer) clearTimeout(entryTimer);
-    entryTimer = null;
-    entryTimerDate = null;
-    if (phase === "in_position" || phase === "exiting") {
-      const dateIst = getIndianMarketContext().dateIST;
+  const dateIst = getIndianMarketContext().dateIST;
+  if (phase === "in_position" || phase === "exiting") {
+    if (!enabled) {
       message =
         tradeSlot === "nine-fifteen"
-          ? `9:16 trading disabled · still managing open 9:15 position · ${getNineFifteenLadderLabel(dateIst)}`
+          ? `9:16 trading disabled · still managing open 9:15 position · ${getNineFifteenLadderLabel(dateIst, leg)}`
           : `9:16 trading disabled · still managing open position · ${getNineSixteenLadderLabel(dateIst)}`;
-      pushLog("9:16 trading disabled — open position still managed", "warning");
-    } else if (phase === "done") {
-      message = isKiteTickerConnected()
+    } else {
+      message =
+        tradeSlot === "nine-fifteen"
+          ? `In 9:15 position · 9:16 armed · ${getNineFifteenLadderLabel(dateIst, leg)}`
+          : `In position · ${getNineSixteenLadderLabel(dateIst)}`;
+    }
+  } else if (phase === "done") {
+    message = enabled
+      ? isKiteTickerConnected()
+        ? "Session complete · websocket live until 16:00"
+        : "Session complete"
+      : isKiteTickerConnected()
         ? "9:16 trading disabled · websocket live until 16:00"
         : "9:16 trading disabled · session complete";
-      pushLog("9:16 trading disabled — websocket monitor continues", "info");
-    } else {
-      phase = "waiting";
-      message = isKiteTickerConnected()
-        ? "9:16 trading disabled · websocket live"
-        : "9:16 trading disabled — websocket monitor active";
-      pushLog("9:16 trading disabled — websocket monitor continues", "info");
-    }
-    scheduleNext();
-    return;
+  } else {
+    phase = phase === "off" ? "waiting" : phase;
+    message = enabled
+      ? isKiteTickerConnected()
+        ? "9:15 + 9:16 trading armed · websocket live"
+        : "9:15 + 9:16 trading armed · websocket connecting"
+      : isKiteTickerConnected()
+        ? "9:15 trading armed · 9:16 entries disabled on server"
+        : "9:15 trading armed · websocket connecting";
   }
-  if (phase === "off") phase = "waiting";
-  message = "9:16 trading enabled — WS 9:00–16:00 · 9:16:00 entry";
-  pushLog("9:16 trading enabled", "info");
   scheduleNext();
 }
 
-export function setNineFifteenBotEnabled(next: boolean) {
-  nineFifteenEnabled = next;
+export function setNineFifteenBotEnabled(_next: boolean) {
+  nineFifteenEnabled = true;
   startNineSixteenMonitorLoop();
-  if (!nineFifteenEnabled) {
-    if (nineFifteenTimer) clearTimeout(nineFifteenTimer);
-    nineFifteenTimer = null;
-    nineFifteenTimerDate = null;
-    pushLog(
-      tradeSlot === "nine-fifteen" && (phase === "in_position" || phase === "exiting")
-        ? "9:15 trading disabled — open 9:15 position still managed"
-        : "9:15 trading disabled",
-      "info",
-    );
-  } else {
-    pushLog("9:15 trading enabled — red at the 9:15:10 read buys the ATM PE at 9:15:11", "info");
-  }
   scheduleNext();
 }
 
 export function startNineSixteenBot() {
   startNineSixteenLiveMonitor();
   startNineSixteenMonitorLoop();
-  if (nineFifteenEnabled && enabled) {
-    pushLog("9:15 and 9:16 trading enabled on startup", "info");
-  } else if (enabled) {
-    pushLog("9:16 trading enabled on startup", "info");
-  } else if (nineFifteenEnabled) {
-    pushLog("9:15 trading enabled on startup — red at 9:15:10 read buys the ATM PE at 9:15:11", "info");
-  } else {
-    pushLog("9:16 websocket monitor started (trading disabled)", "info");
-  }
+  pushLog(
+    "9:15 + 9:16 trading armed on startup — 9:15: red ≥ 5 pts → PE · green ≥ 10 pts → CE at 9:15:11 · 9:16: red |Δ| ≥ 15 → PE at 9:16:01",
+    "info",
+  );
 }
 
 export async function listBotTradeLogs() {

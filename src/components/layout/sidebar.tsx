@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
-import { Activity, ChartColumn, Clock, History, Hourglass, LogOut, Menu, Settings, Target, Wallet, X, Zap } from "lucide-react";
+import { Activity, ChartColumn, Clock, Gauge, History, Hourglass, LineChart, LogOut, Menu, Settings, Target, Wallet, X, Zap } from "lucide-react";
 import { useState } from "react";
 import { useAuth } from "@/contexts/auth-context";
 import { useKite } from "@/contexts/kite-context";
@@ -9,6 +9,8 @@ const navItems = [
   { href: "/dashboard/backtesting", label: "Backtesting", icon: ChartColumn },
   { href: "/dashboard/nine-fifteen-backtest", label: "9:15 Backtest", icon: Target },
   { href: "/dashboard/nifty-one-hour", label: "NIFTY 50 – 1 Hour", icon: Hourglass },
+  { href: "/dashboard/nifty-rsi", label: "RSI", icon: LineChart },
+  { href: "/dashboard/nifty-rsi-speed", label: "RSI Speed-O-Meter", icon: Gauge },
   { href: "/dashboard/log-test", label: "Log Test", icon: Activity },
   { href: "/dashboard/trades", label: "Trades", icon: History },
   { href: "/dashboard/portfolio", label: "Portfolio", icon: Wallet },

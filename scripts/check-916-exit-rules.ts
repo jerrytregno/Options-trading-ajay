@@ -1,5 +1,5 @@
 /**
- * Sanity check for 9:16 index / hard-stop helpers (hard stop is live on both 9:15 and 9:16 from 10:00).
+ * Sanity check for 9:16 index helpers (hard stop removed from live 9:15/9:16 bots).
  *
  * Run: npx tsx scripts/check-916-exit-rules.ts
  */
@@ -9,6 +9,17 @@ import {
   shouldExitNineSixteen,
   shouldExitOnPnlTarget,
   shouldHardStopNineSixteen,
+  hybrid916IndexTargetPoints,
+  computeHybrid916IndexExitSpot,
+  is916RedConfirmFromCaptures,
+  isIn91559WsCloseSecond,
+  isIn91600WsOpenSecond,
+  isIn91659WsCloseSecond,
+  isPast916GreenMinuteRetarget,
+  is916MinuteGreenClose,
+  NINE_FIFTEEN_WS_CLOSE_59_SEC,
+  NINE_SIXTEEN_WS_OPEN_00_SEC,
+  NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE,
   isTuesdayIst,
   getIndexExitScheduleLabel,
   getPnlExitScheduleLabel,
@@ -87,7 +98,8 @@ for (const [name, t, pnl, want] of pnlCases) {
   );
 }
 
-// Hard stop: ±30 from the fill spot, scanning only from 10:00 IST.
+// Hard stop: from 10:00 IST, ±30 adverse Nifty from entry spot (both 9:15 and 9:16 legs).
+console.log("\n--- 10:00 hard stop (±30 from entry spot) ---");
 const cases: [string, number, "CE_BUY" | "PE_BUY", string, boolean][] = [
   ["CE -29 @09:59", 23971, "CE_BUY", "09:59:59", false],
   ["CE -30 @09:59", 23970, "CE_BUY", "09:59:59", false],
@@ -103,3 +115,50 @@ for (const [name, spot, leg, t, want] of cases) {
   const got = shouldHardStopNineSixteen(spot, entrySpot, leg, undefined, wed(t));
   console.log("hard stop", name, "=>", got ? "EXIT" : "hold", got === want ? "ok" : `MISMATCH (want ${want})`);
 }
+
+console.log("\n--- hybrid 916 parallel index exit ---");
+console.log(
+  "91559 sec",
+  isIn91559WsCloseSecond(wed("09:15:59.500")),
+  !isIn91559WsCloseSecond(wed("09:15:58.500")) ? "ok" : "MISMATCH",
+);
+console.log(
+  "91600 sec",
+  isIn91600WsOpenSecond(wed("09:16:00.100")),
+  !isIn91600WsOpenSecond(wed("09:16:01.100")) ? "ok" : "MISMATCH",
+);
+console.log("sec constants", NINE_FIFTEEN_WS_CLOSE_59_SEC, NINE_SIXTEEN_WS_OPEN_00_SEC);
+const close91559 = 24_000;
+const open916Red = 23_995;
+const open916Gap = 24_001;
+console.log(
+  "red confirm",
+  is916RedConfirmFromCaptures(open916Red, close91559),
+  hybrid916IndexTargetPoints(open916Red, close91559) === 12 ? "ok" : "MISMATCH",
+);
+console.log(
+  "green gap",
+  !is916RedConfirmFromCaptures(open916Gap, close91559),
+  hybrid916IndexTargetPoints(open916Gap, close91559) === 8 ? "ok" : "MISMATCH",
+);
+const entrySpotHybrid = 24_010;
+const target12 = computeHybrid916IndexExitSpot(entrySpotHybrid, 12, "PE_BUY");
+console.log(
+  "PE −12 hit",
+  shouldExitNineSixteen(target12, entrySpotHybrid, "PE_BUY", 12) ? "ok" : "MISMATCH",
+);
+console.log(
+  "PE −12 hold",
+  !shouldExitNineSixteen(target12 + 0.05, entrySpotHybrid, "PE_BUY", 12) ? "ok" : "MISMATCH",
+);
+console.log(
+  "91659 green minute",
+  is916MinuteGreenClose(24_005, 24_000),
+  !is916MinuteGreenClose(24_000, 24_000.05) ? "ok" : "MISMATCH",
+);
+console.log(
+  "917 retarget window",
+  isPast916GreenMinuteRetarget(wed("09:17:00")),
+  !isPast916GreenMinuteRetarget(wed("09:16:59.999")) ? "ok" : "MISMATCH",
+);
+console.log("green minute target pts", NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE);

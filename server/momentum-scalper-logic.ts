@@ -13,9 +13,9 @@ import {
   DAY_SCALPER_TRADE_WINDOW_OPEN,
 } from "../src/types/day-scalper.js";
 
-/** Live bot defaults — min range 5 pts, close→mark gap 1.5 pt, initial stop −4% P&L, no hold. */
+/** Live bot defaults — min range 3 pts, close→mark gap 1.5 pt, initial stop −2% P&L held 3s. */
 export const MOMENTUM_SCALPER_LIVE_RULES: DayScalperRules = {
-  minMovePts: 5,
+  minMovePts: 3,
   signalMeasure: "range",
   triggerPts: DAY_SCALPER_TRIGGER_PTS,
   initialTargetPts: DAY_SCALPER_INITIAL_TARGET_PTS,
@@ -140,12 +140,10 @@ export const MOMENTUM_SCALPER_RSI_PE_MIN = 30;
 
 /**
  * Live Traps only — entries are allowed only when Wilder RSI(14) on Nifty 1-min closes is inside
- * one of these bands (inclusive). Traps backtests use the same bands when the RSI filter toggle is on.
+ * this band (inclusive). Traps backtests use the same band when the RSI filter toggle is on.
  */
 export const MOMENTUM_LIVE_RSI_ALLOWED_BUCKETS: ReadonlyArray<{ min: number; max: number }> = [
-  { min: 0, max: 10 },
-  { min: 40, max: 50 },
-  { min: 70, max: 100 },
+  { min: 40, max: 60 },
 ];
 
 export function formatMomentumLiveRsiBucketsLabel(): string {
@@ -157,7 +155,7 @@ export interface MomentumRsiEntryBlock {
   reason?: string;
 }
 
-/** Wilder RSI from a 1-min Nifty close series; the last close may be the live bar updating on ticks. */
+/** Wilder RSI(14) on Nifty 1-min closes from Zerodha historical candles. */
 export function momentumLiveRsiFromBarCloses(
   barCloses: number[],
   period = MOMENTUM_SCALPER_RSI_PERIOD,
@@ -167,7 +165,7 @@ export function momentumLiveRsiFromBarCloses(
   return rsi != null && Number.isFinite(rsi) ? Math.round(rsi * 10) / 10 : null;
 }
 
-/** True when RSI sits in a live-allowed band (0–10, 40–50, or 70–100). */
+/** True when RSI sits in the live-allowed band (40–60). */
 export function momentumLiveRsiAllowsEntry(rsi: number | null): boolean {
   if (rsi == null || !Number.isFinite(rsi)) return false;
   return MOMENTUM_LIVE_RSI_ALLOWED_BUCKETS.some((b) => rsi >= b.min && rsi <= b.max);
@@ -175,7 +173,7 @@ export function momentumLiveRsiAllowsEntry(rsi: number | null): boolean {
 
 export function momentumLiveRsiBlocksEntry(rsi: number | null): MomentumRsiEntryBlock {
   if (rsi == null || !Number.isFinite(rsi)) {
-    return { blocked: true, reason: "RSI not ready — need 14 prior 1-min Nifty closes from ticks" };
+    return { blocked: true, reason: "RSI not ready — waiting for Zerodha 1-min Nifty history" };
   }
   if (momentumLiveRsiAllowsEntry(rsi)) return { blocked: false };
   return {
@@ -214,6 +212,20 @@ export const MOMENTUM_SCALPER_GATE_SCAN_SEC = 1;
 
 /** After the gate passes, Nifty must retrace this many points from the start before entry. */
 export const MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS = 2;
+/** How many losing Traps trades end the session early (negative premium P&L). */
+export const MOMENTUM_SCALPER_MAX_LOSSES_PER_DAY = 2;
+/** @deprecated Live Traps enters at market on the 2-pt pullback — kept for legacy scripts. */
+export const MOMENTUM_SCALPER_ENTRY_LIMIT_DISCOUNT_PCT = 0.5;
+
+/** @deprecated Live Traps no longer uses a discounted limit entry. */
+export function momentumEntryLimitBuyPrice(
+  ltp: number,
+  discountPct = MOMENTUM_SCALPER_ENTRY_LIMIT_DISCOUNT_PCT,
+): number {
+  if (!(ltp > 0)) return 0;
+  const raw = ltp * (1 - discountPct / 100);
+  return Math.round(roundToOptionTick(raw) * 100) / 100;
+}
 
 /** @deprecated Live Traps no longer uses a 10-second gate window — kept for legacy scripts. */
 export const MOMENTUM_GATE_READ_SEC = 10;
@@ -419,15 +431,10 @@ export function msUntilSecondOfCurrentIstMinute(targetSec: number, nowMs = Date.
 }
 
 /**
- * The Traps entry is a market buy at second :11 when the 10-second momentum gate was seen.
+ * Live Traps entry: after the 2-pt index pullback, resolve ATM and market-buy MIS.
+ * On fill, a +1% take-profit limit sell is placed immediately.
  *
- * It used to rest a MIS limit ₹0.5 under the marked premium for 50 seconds, waiting for the option
- * to retrace onto it. That bought a better fill on the trades it caught and nothing at all on the
- * rest: a setup whose premium ran straight up was simply dropped, which is the half of the
- * distribution the signal is trying to be in. Crossing the spread costs less than missing those.
- *
- * The pullback helpers above are still the Day Scalper backtest's entry model, which is why they
- * remain here; nothing on the Traps path reads them.
+ * The pullback helpers below are still the Day Scalper backtest's entry model.
  */
 
 /**
@@ -503,6 +510,12 @@ export function formatMomentumLiveScheduleLabel(): string {
   return `after 9:16:30–${MOMENTUM_SCALPER_LIVE_RULES.tradeWindowCloseIst}`;
 }
 
+/** When false/0/no, Traps cannot be armed from the UI — server admin disabled it. */
+export function isTrapsBotHardDisabled(): boolean {
+  const raw = process.env.MOMENTUM_SCALPER_BOT_ENABLED?.trim().toLowerCase();
+  return raw === "0" || raw === "false" || raw === "no";
+}
+
 /** Next scan start today, or null when already inside the window or past cutoff. */
 export function momentumNextLiveEntryOpenMins(nowMins: number): number | null {
   if (momentumLiveEntryAllowed(nowMins)) return null;
@@ -536,16 +549,13 @@ export interface MomentumExitProfileConfig {
   rungs: number[];
 }
 
-/**
- * Standard P&L ladder from entry: +0.50%, +0.70%, +1%, then +0.5% steps (1.5, 2, 2.5, …).
- *
- * Reaching a rung only moves the ladder on — it locks that rung as the floor and points the next
- * target one rung higher. Nothing is sold until price comes back down and touches the locked
- * floor. Exits use option premium % only, never the Nifty index.
- */
-export const MOMENTUM_SCALPER_PNL_ARM_PCT = 0.5;
-/** Second rung after the initial +0.5% floor — kept separate from the +0.5% steps that follow +1%. */
+/** Resting take-profit limit placed at entry — +1% on premium paid. */
+export const MOMENTUM_SCALPER_TAKE_PROFIT_PCT = 1;
+/** @deprecated Ladder removed — alias kept for scripts and status fields. */
+export const MOMENTUM_SCALPER_PNL_ARM_PCT = MOMENTUM_SCALPER_TAKE_PROFIT_PCT;
+/** @deprecated Ladder removed. */
 export const MOMENTUM_SCALPER_PNL_SECOND_RUNG_PCT = 0.7;
+/** @deprecated Ladder removed. */
 export const MOMENTUM_SCALPER_PNL_STEP_PCT = 0.5;
 /**
  * How far below the locked floor the exit limit is priced.
@@ -555,22 +565,13 @@ export const MOMENTUM_SCALPER_PNL_STEP_PCT = 0.5;
  * trades on arrival. Pricing it at the floor itself would rest at the offer and wait.
  */
 export const MOMENTUM_PROFIT_EXIT_GIVEBACK_PCT = 0.1;
-/** Loss at or below this % of premium (P&L ≤ −4%) triggers the initial stop. */
-export const MOMENTUM_SCALPER_INITIAL_STOP_LOSS_PCT = 4;
+/** Loss at or below this % of premium (P&L ≤ −2%) starts the stop hold timer. */
+export const MOMENTUM_SCALPER_INITIAL_STOP_LOSS_PCT = 2;
 /** Display / API alias for the initial stop level on the P&L scale. */
 export const MOMENTUM_SCALPER_INITIAL_STOP_PNL_PCT = -MOMENTUM_SCALPER_INITIAL_STOP_LOSS_PCT;
-/**
- * No grace period: the first reading at −4% or worse exits.
- *
- * The stop used to sit at −3% and wait three unbroken seconds, so a trade could ride a spike back
- * out of trouble. The wider level pays for that on its own — by −4% the move has already had its
- * room, and holding past it only means selling further down.
- */
-export const MOMENTUM_SCALPER_INITIAL_STOP_HOLD_MS = 0;
-/**
- * Backstop for a collapse that arrives after a rung is already locked, where the initial stop no
- * longer applies. Below the ladder's floor this is unreachable — the instant −4% exit fires first.
- */
+/** Exit only after P&L stays at or below −2% for three continuous seconds. */
+export const MOMENTUM_SCALPER_INITIAL_STOP_HOLD_MS = 3000;
+/** @deprecated Hard stop removed — kept so older scripts compile. */
 export const MOMENTUM_SCALPER_HARD_STOP_LOSS_PCT = 6;
 
 /** Opening-window ladder: first rung +5%, then +5% steps; initial stop below −10% held 15s. */
@@ -614,13 +615,13 @@ export const MOMENTUM_OPENING_PNL_RUNGS: number[] = buildMomentumPnlRungs(
 export const MOMENTUM_SCALPER_PNL_MAX_LOCK_PCT = 200;
 
 export const MOMENTUM_STANDARD_EXIT_CONFIG: MomentumExitProfileConfig = {
-  armPct: MOMENTUM_SCALPER_PNL_ARM_PCT,
-  stepPct: MOMENTUM_SCALPER_PNL_STEP_PCT,
+  armPct: MOMENTUM_SCALPER_TAKE_PROFIT_PCT,
+  stepPct: 0,
   initialStopLossPct: MOMENTUM_SCALPER_INITIAL_STOP_LOSS_PCT,
   initialStopHoldMs: MOMENTUM_SCALPER_INITIAL_STOP_HOLD_MS,
   hardStopLossPct: MOMENTUM_SCALPER_HARD_STOP_LOSS_PCT,
   maxLockPct: MOMENTUM_SCALPER_PNL_MAX_LOCK_PCT,
-  rungs: MOMENTUM_SCALPER_PNL_RUNGS,
+  rungs: [MOMENTUM_SCALPER_TAKE_PROFIT_PCT],
 };
 
 export const MOMENTUM_OPENING_EXIT_CONFIG: MomentumExitProfileConfig = {
@@ -663,6 +664,23 @@ export function momentumOptionPriceForPnlPct(entryPrice: number, pnlPct: number)
   return Math.round(roundToOptionTick(raw) * 100) / 100;
 }
 
+/** Limit sell price for the fixed +1% take-profit placed at entry. */
+export function momentumTakeProfitLimitPrice(
+  entryPrice: number,
+  tpPct = MOMENTUM_SCALPER_TAKE_PROFIT_PCT,
+): number {
+  return momentumOptionPriceForPnlPct(entryPrice, tpPct);
+}
+
+/** Market backup once live P&L reaches the take-profit target but the limit has not filled. */
+export function shouldMomentumTakeProfitMarketBackup(
+  pnlPct: number | null,
+  tpPct = MOMENTUM_SCALPER_TAKE_PROFIT_PCT,
+): boolean {
+  if (pnlPct == null || !Number.isFinite(pnlPct)) return false;
+  return pnlPct + 1e-9 >= tpPct;
+}
+
 /** Profit the exit aims for when the locked floor is touched: the floor less the giveback. */
 export function momentumProfitExitPnlPct(
   lockedPnlPct: number,
@@ -674,31 +692,61 @@ export function momentumProfitExitPnlPct(
 /**
  * Marketable limit price for a profit exit off the locked floor.
  *
- * Never allowed to land at or below the entry price: a floor that is smaller than the giveback
- * would otherwise price the sell at a loss, which is the one thing this exit exists to avoid.
+ * Priced off entry while the market is still at or above the aim: the sell goes through the touch
+ * and trades on arrival, and it is never allowed to land at or below entry, because a floor
+ * smaller than the giveback would otherwise price the sell at a loss.
+ *
+ * When the floor is touched *late* the market is already under the aim, and pricing off entry
+ * would rest the order above the touch where it can never fill. Passing the live premium switches
+ * the sell to a giveback under that instead, so it still crosses and takes what the market gives.
  */
 export function momentumProfitExitLimitPrice(
   entryPrice: number,
   lockedPnlPct: number,
+  lastPrice: number | null = null,
   givebackPct = MOMENTUM_PROFIT_EXIT_GIVEBACK_PCT,
 ): number {
   if (!(entryPrice > 0) || !(lockedPnlPct > 0)) return 0;
   const targetPct = Math.max(momentumProfitExitPnlPct(lockedPnlPct, givebackPct), 0);
-  const price = momentumOptionPriceForPnlPct(entryPrice, targetPct);
-  return price > entryPrice ? price : momentumOptionPriceForPnlPct(entryPrice, lockedPnlPct);
+  const aimed = momentumOptionPriceForPnlPct(entryPrice, targetPct);
+  const atAim =
+    aimed > entryPrice ? aimed : momentumOptionPriceForPnlPct(entryPrice, lockedPnlPct);
+  if (lastPrice == null || !Number.isFinite(lastPrice) || lastPrice <= 0) return atAim;
+  if (lastPrice >= atAim) return atAim;
+  const crossed = Math.round(roundToOptionTick(lastPrice * (1 - givebackPct / 100)) * 100) / 100;
+  return crossed > 0 ? crossed : atAim;
 }
 
-/** Market backup once live P&L reaches the giveback aim under a locked floor. */
+/**
+ * Round-trip cost allowance as a percentage of the premium paid.
+ *
+ * Brokerage, STT, exchange charges, GST and stamp duty on a Nifty option round trip come to about
+ * a quarter of a percent of the premium, so a fill under this is a losing trade however green the
+ * unrealised number looks.
+ */
+export const MOMENTUM_ROUND_TRIP_COST_PCT = 0.25;
+
+/**
+ * Market backup once live P&L reaches the giveback aim under a locked floor.
+ *
+ * Bounded below by the round-trip cost, because "at or under the aim" on its own is satisfied just
+ * as well by a collapsed premium as by a clean touch — and this routine crosses at market, so an
+ * unbounded test lets the exit that exists to bank a locked profit be the one that books the loss.
+ * Under the bound there is no profit left to protect and the −4% stop owns the trade.
+ */
 export function shouldMomentumProfitExitMarketBackup(
   pnlPct: number | null,
   lockedFloorPct: number,
   givebackPct = MOMENTUM_PROFIT_EXIT_GIVEBACK_PCT,
+  minPnlPct = MOMENTUM_ROUND_TRIP_COST_PCT,
 ): boolean {
   if (lockedFloorPct <= 0 || pnlPct == null || !Number.isFinite(pnlPct)) return false;
+  if (pnlPct < minPnlPct - 1e-9) return false;
   return pnlPct <= momentumProfitExitPnlPct(lockedFloorPct, givebackPct) + 1e-9;
 }
 
-/**: the premium goes to zero and nothing more is at
+/**
+ * The worst a long option can print: the premium goes to zero and nothing more is at
  * risk. A reading below this is arithmetically impossible, so it is bad data — a stale or
  * mispriced tick, or an entry price that never got booked properly.
  */
@@ -852,13 +900,10 @@ export interface MomentumExitInput {
 }
 
 /**
- * Exit engine:
+ * Exit engine (live Traps):
  *
- * 1. Pre-ladder — while no profit rung is locked, a breach of the initial P&L stop exits. The
- *    standard profile exits on the first breaching reading; the opening profile holds one out
- *    first, and recovering above the stop cancels that hold.
- * 2. P&L ladder — reaching a rung locks it as the floor and points the target one rung higher;
- *    the exit fires only when P&L later comes back down to that floor.
+ * Take profit is a resting limit at +1% placed at entry — not evaluated here.
+ * Stop: P&L at or below −2% must hold for three continuous seconds, then exit at market.
  */
 export function evaluateMomentumExit(
   state: MomentumScalperExitState,
@@ -872,74 +917,30 @@ export function evaluateMomentumExit(
   const spot = input.spot;
   if (!(spot > 0)) return { state: next };
 
-  // Stage 0 — hard floor. Checked before anything else and regardless of the ladder, because a
-  // locked rung is no reason to sit through a collapse either.
-  if (
+  const initialStopBreached =
     isPlausibleMomentumPnlPct(input.pnlPct, config.maxLockPct) &&
     input.pnlPct != null &&
-    input.pnlPct <= -config.hardStopLossPct
-  ) {
-    return {
-      state: next,
-      exit: {
-        outcome: "stop",
-        exitIndexPrice: spot,
-        lockedPnlPct: next.lockedPnlPct,
-        hardStop: true,
-      },
-    };
-  }
+    (profile === "opening"
+      ? input.pnlPct < -config.initialStopLossPct
+      : input.pnlPct <= -config.initialStopLossPct);
 
-  // Stage 1 — initial P&L stop, only while no profit rung is locked.
-  if (next.lockedPnlPct < config.armPct) {
-    const initialStopBreached =
-      isPlausibleMomentumPnlPct(input.pnlPct, config.maxLockPct) &&
-      input.pnlPct != null &&
-      (profile === "opening"
-        ? input.pnlPct < -config.initialStopLossPct
-        : input.pnlPct <= -config.initialStopLossPct);
-    if (initialStopBreached) {
-      if (config.initialStopHoldMs <= 0) {
-        return {
-          state: next,
-          exit: { outcome: "stop", exitIndexPrice: spot, lockedPnlPct: 0 },
-        };
-      }
-      if (next.initialStopBreachSinceMs == null) {
-        next.initialStopBreachSinceMs = input.nowMs;
-      } else if (input.nowMs - next.initialStopBreachSinceMs >= config.initialStopHoldMs) {
-        return {
-          state: next,
-          exit: { outcome: "stop", exitIndexPrice: spot, lockedPnlPct: 0 },
-        };
-      }
-    } else if (isPlausibleMomentumPnlPct(input.pnlPct, config.maxLockPct)) {
-      // Any usable reading that is not a breach cancels the timer. Comparing against the stop
-      // level again would leave a dead zone for the opening profile, whose breach is strictly
-      // below −10%: a P&L sitting at exactly −10% would neither breach nor reset, so the elapsed
-      // hold would keep accruing across a stretch the rule does not count.
-      next.initialStopBreachSinceMs = null;
+  if (initialStopBreached) {
+    if (config.initialStopHoldMs <= 0) {
+      return {
+        state: next,
+        exit: { outcome: "stop", exitIndexPrice: spot, lockedPnlPct: 0 },
+      };
     }
-  }
-
-  // Stage 2 — P&L ladder (premium % only).
-  const lockedBefore = next.lockedPnlPct;
-  next.lockedPnlPct = nextMomentumLockedPnlPct(next.lockedPnlPct, input.pnlPct, profile);
-
-  // Reaching a rung only moves the ladder on. Selling here would exit every trade the moment it
-  // first touched the arm rung, since the floor and the price are the same number on that evaluation.
-  if (next.lockedPnlPct > lockedBefore) return { state: next };
-
-  if (
-    next.lockedPnlPct >= config.armPct &&
-    input.pnlPct != null &&
-    Number.isFinite(input.pnlPct) &&
-    input.pnlPct <= next.lockedPnlPct
-  ) {
-    return {
-      state: next,
-      exit: { outcome: "trail-stop", exitIndexPrice: spot, lockedPnlPct: next.lockedPnlPct },
-    };
+    if (next.initialStopBreachSinceMs == null) {
+      next.initialStopBreachSinceMs = input.nowMs;
+    } else if (input.nowMs - next.initialStopBreachSinceMs >= config.initialStopHoldMs) {
+      return {
+        state: next,
+        exit: { outcome: "stop", exitIndexPrice: spot, lockedPnlPct: 0 },
+      };
+    }
+  } else if (isPlausibleMomentumPnlPct(input.pnlPct, config.maxLockPct)) {
+    next.initialStopBreachSinceMs = null;
   }
 
   return { state: next };

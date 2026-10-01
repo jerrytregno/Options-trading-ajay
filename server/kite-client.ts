@@ -1,4 +1,8 @@
-import { normalizeKiteOrderBody, resolveMarketProtection } from "../src/lib/kite-orders.js";
+import {
+  marketProtectionForSide,
+  normalizeKiteOrderBody,
+  roundToOptionTick,
+} from "../src/lib/kite-orders.js";
 import { kiteHttpFetch } from "./kite-http.js";
 import { enrichKiteIpOrderError } from "./trading-ip.js";
 
@@ -172,12 +176,16 @@ export async function placeRegularMarketOrder(
     quantity: number;
   },
 ): Promise<string> {
-  const marketProtection = resolveMarketProtection(process.env.KITE_MARKET_PROTECTION);
+  const marketProtection = marketProtectionForSide(
+    order.transaction_type,
+    process.env.KITE_MARKET_PROTECTION,
+  );
   const body = normalizeKiteOrderBody(
     {
       ...order,
       order_type: "MARKET",
       variety: "regular",
+      market_protection: marketProtection,
     },
     marketProtection,
   );
@@ -242,7 +250,7 @@ export async function fetchMisPosition(
   };
 }
 
-export async function findOpenNiftyMisOption(accessToken: string) {
+export async function findOpenNiftyOption(accessToken: string, product = "MIS") {
   const data = await kiteGet<{
     net?: {
       tradingsymbol: string;
@@ -257,12 +265,17 @@ export async function findOpenNiftyMisOption(accessToken: string) {
   return (
     data.net?.find(
       (p) =>
-        p.product === "MIS" &&
+        p.product === product &&
         p.quantity > 0 &&
         p.tradingsymbol.startsWith("NIFTY") &&
         (p.tradingsymbol.endsWith("CE") || p.tradingsymbol.endsWith("PE")),
     ) ?? null
   );
+}
+
+/** @deprecated use findOpenNiftyOption(accessToken, "MIS") */
+export async function findOpenNiftyMisOption(accessToken: string) {
+  return findOpenNiftyOption(accessToken, "MIS");
 }
 
 export async function fetchNiftyAndOptionQuotes(
@@ -517,7 +530,7 @@ export async function placeRegularLimitOrder(
   const body = normalizeKiteOrderBody({
     ...order,
     order_type: "LIMIT",
-    price: Number(order.price.toFixed(2)),
+    price: Number(roundToOptionTick(order.price).toFixed(2)),
     variety: "regular",
     validity: "DAY",
   });

@@ -183,6 +183,45 @@
   gap: 1rem;
 }
 
+.nf-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.nf-window-filter {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.25rem;
+  border-radius: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: color-mix(in srgb, var(--card) 88%, var(--background));
+}
+
+.nf-both-red-toggle {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.55rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: color-mix(in srgb, var(--card) 88%, var(--background));
+  font-size: 0.8125rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.nf-both-red-toggle input {
+  accent-color: var(--primary);
+}
+
+.nf-both-red-toggle-hint {
+  font-size: 0.75rem;
+}
+
 .nf-live-rules {
   margin-bottom: 1rem;
   padding: 1rem 1.15rem;
@@ -306,6 +345,12 @@
 
 .nf-error {
   border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+.nf-loading--inline {
+  padding: 0.65rem 0.85rem;
+  font-size: 0.875rem;
+  color: var(--text-muted, #94a3b8);
 }
 
 .nf-summary-grid {
@@ -1184,6 +1229,15 @@
 
 .nf-wins-details {
   border-color: color-mix(in srgb, #4ade80 30%, var(--border));
+}
+
+.nf-wins-late-details {
+  margin-top: 0.75rem;
+  border-color: color-mix(in srgb, #4ade80 30%, var(--border));
+}
+
+.nf-loss-day--win > .nf-loss-day-summary {
+  border-left: 3px solid color-mix(in srgb, #4ade80 55%, transparent);
 }
 
 .nf-wins-hourly {

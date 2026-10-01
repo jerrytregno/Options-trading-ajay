@@ -1,6 +1,6 @@
 /**
  * Traps live entry: any tick in candle 2's first second vs last tick of candle 1 (+0.1 gate),
- * then 2-pt pullback from the first tick of candle 2 before market buy.
+ * then 2-pt pullback from the first tick of candle 2 before MIS market buy.
  *
  * Run: npx tsx scripts/check-momentum-market-entry.ts
  */
@@ -28,7 +28,7 @@ function report(name: string, ok: boolean, detail: string) {
 
 console.log(
   `range ≥ ${MOMENTUM_SCALPER_LIVE_RULES.minMovePts} pts · first-second gate ±` +
-    `${MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS} · ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback entry\n`,
+    `${MOMENTUM_SCALPER_MOMENTUM_OPEN_GAP_PTS} · ${MOMENTUM_SCALPER_ENTRY_PULLBACK_PTS} pt pullback · market entry\n`,
 );
 
 report(
@@ -37,8 +37,8 @@ report(
   `got ${MOMENTUM_SCALPER_GATE_SCAN_SEC}s`,
 );
 report(
-  "min range is 5 pts",
-  MOMENTUM_SCALPER_LIVE_RULES.minMovePts === 5,
+  "min range is 3 pts",
+  MOMENTUM_SCALPER_LIVE_RULES.minMovePts === 3,
   `got ${MOMENTUM_SCALPER_LIVE_RULES.minMovePts}`,
 );
 report(
