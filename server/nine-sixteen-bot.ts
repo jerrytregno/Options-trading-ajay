@@ -38,9 +38,9 @@ import {
   NINE_SIXTEEN_HARD_STOP_INDEX_POINTS,
   hybrid916IndexExitLabel,
   hybrid916IndexTargetPoints,
-  hybrid916GreenMinuteExitLabel,
+  hybrid916MinuteRetargetLabel,
   computeHybrid916IndexExitSpot,
-  is916MinuteGreenClose,
+  is916MinuteAgainstLeg,
   isPast916GreenMinuteRetarget,
   NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE,
   shouldExitNineSixteen,
@@ -653,7 +653,7 @@ const NINE_FIFTEEN_TP_PLACE_MAX_ATTEMPTS = 15;
 function legTakeProfitPctForSlot(dateIst: string): number {
   return tradeSlot === "nine-fifteen"
     ? getNineFifteenTakeProfitPct(dateIst, leg)
-    : getNineSixteenTakeProfitPct(dateIst);
+    : getNineSixteenTakeProfitPct(dateIst, leg);
 }
 
 function legTradeTag(): "9:15" | "9:16" {
@@ -767,7 +767,7 @@ function loadBotState(dateIst: string) {
       parsed.nineFifteenTakeProfitPct ??
       (tradeSlot === "nine-fifteen"
         ? getNineFifteenTakeProfitPct(dateIst, leg)
-        : getNineSixteenTakeProfitPct(dateIst));
+        : getNineSixteenTakeProfitPct(dateIst, leg));
     capturedOpen916Nifty = parsed.capturedOpen916Nifty ?? null;
     capturedClose91559 = parsed.capturedClose91559 ?? null;
     capturedClose91659 = parsed.capturedClose91659 ?? null;
@@ -784,14 +784,14 @@ function loadBotState(dateIst: string) {
       armHybrid916IndexExit();
     }
     if (tradeSlot === "nine-sixteen" && phase === "in_position" && !hybrid916GreenMinuteRetargeted) {
-      maybeRetargetHybrid916GreenMinute(dateIst);
+      maybeRetargetHybrid916Minute(dateIst);
     }
     nineFifteenTpLastSyncedAt = null;
     nineFifteenTpLastLogKey = "";
     message =
       tradeSlot === "nine-fifteen"
         ? `In 9:15 position · ${getNineFifteenLadderLabel(dateIst, leg)}`
-        : `In position · ${getNineSixteenLadderLabel(dateIst)}`;
+        : `In position · ${getNineSixteenLadderLabel(dateIst, leg)}`;
   } catch {
     /* ignore corrupt state */
   }
@@ -1044,7 +1044,7 @@ async function reconcilePositionWithKiteInner(accessToken: string, dateIst: stri
     message =
       tradeSlot === "nine-fifteen"
         ? `In 9:15 position · ${getNineFifteenLadderLabel(dateIst, leg)}`
-        : `In position · ${getNineSixteenLadderLabel(dateIst)}`;
+        : `In position · ${getNineSixteenLadderLabel(dateIst, leg)}`;
     saveBotState(dateIst);
     return;
   }
@@ -1177,6 +1177,7 @@ function armHybrid916IndexExit() {
   const close91559 = capturedClose91559;
   if (
     tradeSlot !== "nine-sixteen" ||
+    !leg ||
     close91559 == null ||
     close91559 <= 0 ||
     entrySpot <= 0
@@ -1185,9 +1186,9 @@ function armHybrid916IndexExit() {
     return;
   }
   const open916 = capturedOpen916Nifty ?? entrySpot;
-  indexExitTargetPoints = hybrid916IndexTargetPoints(open916, close91559);
-  indexExitTargetSpot = computeHybrid916IndexExitSpot(entrySpot, indexExitTargetPoints, "PE_BUY");
-  indexExitSchedule = hybrid916IndexExitLabel(open916, close91559);
+  indexExitTargetPoints = hybrid916IndexTargetPoints(open916, close91559, leg);
+  indexExitTargetSpot = computeHybrid916IndexExitSpot(entrySpot, indexExitTargetPoints, leg);
+  indexExitSchedule = hybrid916IndexExitLabel(open916, close91559, leg);
   pushLog(
     `Parallel index exit armed · ${indexExitSchedule} · entry Nifty ${entrySpot.toFixed(2)} · ` +
       `target ${indexExitTargetSpot.toFixed(2)} · market sell vs resting TP limit (first wins)`,
@@ -1195,27 +1196,28 @@ function armHybrid916IndexExit() {
   );
 }
 
-function maybeRetargetHybrid916GreenMinute(dateIst: string, nowMs = Date.now()) {
+function maybeRetargetHybrid916Minute(dateIst: string, nowMs = Date.now()) {
   if (tradeSlot !== "nine-sixteen" || phase !== "in_position" || hybrid916GreenMinuteRetargeted) return;
-  if (!isPast916GreenMinuteRetarget(nowMs)) return;
+  if (!leg || !isPast916GreenMinuteRetarget(nowMs)) return;
   if (capturedClose91559 == null || capturedClose91559 <= 0) return;
   if (capturedClose91659 == null || capturedClose91659 <= 0) return;
   if (entrySpot <= 0) return;
 
   hybrid916GreenMinuteRetargeted = true;
 
-  if (!is916MinuteGreenClose(capturedClose91659, capturedClose91559)) {
+  if (!is916MinuteAgainstLeg(capturedClose91659, capturedClose91559, leg)) {
     saveBotState(dateIst);
     return;
   }
 
   const prevPts = indexExitTargetPoints;
+  const sign = leg === "CE_BUY" ? "+" : "−";
   indexExitTargetPoints = NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE;
-  indexExitTargetSpot = computeHybrid916IndexExitSpot(entrySpot, indexExitTargetPoints, "PE_BUY");
-  indexExitSchedule = hybrid916GreenMinuteExitLabel(capturedClose91659, capturedClose91559);
+  indexExitTargetSpot = computeHybrid916IndexExitSpot(entrySpot, indexExitTargetPoints, leg);
+  indexExitSchedule = hybrid916MinuteRetargetLabel(capturedClose91659, capturedClose91559, leg);
   pushLog(
     `Parallel index exit retargeted at 9:17 · ${indexExitSchedule}` +
-      (prevPts > 0 ? ` · was −${prevPts}` : "") +
+      (prevPts > 0 ? ` · was ${sign}${prevPts}` : "") +
       ` · entry Nifty ${entrySpot.toFixed(2)} · target ${indexExitTargetSpot.toFixed(2)}`,
     "info",
   );
@@ -1456,7 +1458,7 @@ function handleBotTick(tick: NiftyTick) {
       saveCaptures(dateIst);
     }
     if (tradeSlot === "nine-sixteen" && phase === "in_position") {
-      maybeRetargetHybrid916GreenMinute(dateIst, tick.receivedAtMs);
+      maybeRetargetHybrid916Minute(dateIst, tick.receivedAtMs);
     }
     recordRawTick(tick, "nifty");
     if (
@@ -2329,14 +2331,14 @@ async function finalizeEntryInPosition(
   }
 
   phase = "in_position";
-  message = `In position · ${getNineSixteenLadderLabel(dateIst)}`;
+  message = `In position · ${getNineSixteenLadderLabel(dateIst, leg)}`;
   pushLog(
     `Entry filled on attempt ${attempt} · ${splitLabel} · ${quantity} qty @ ₹${entryPrice.toFixed(2)}` +
       (entrySpot > 0 ? ` · Nifty spot ${entrySpot.toFixed(2)}` : "") +
       ` · ${exitMode} band (entry only)`,
     "success",
   );
-  pushLog(getNineSixteenLadderLabel(dateIst), "info");
+  pushLog(getNineSixteenLadderLabel(dateIst, leg), "info");
   pushLog(getHardStopScheduleLabel(), "info");
   pushLog(
     optionInstrumentToken > 0
@@ -3282,15 +3284,16 @@ async function maybeHardStopExit(accessToken: string): Promise<boolean> {
 }
 
 async function maybeHybrid916IndexExit(accessToken: string): Promise<boolean> {
-  if (tradeSlot !== "nine-sixteen" || leg !== "PE_BUY") return false;
+  if (tradeSlot !== "nine-sixteen" || (leg !== "PE_BUY" && leg !== "CE_BUY")) return false;
   if (indexExitTargetPoints <= 0 || entrySpot <= 0 || indexExitTargetSpot == null) return false;
   if (lastSpot == null || lastSpot <= 0) return false;
   if (!shouldExitNineSixteen(lastSpot, entrySpot, leg, indexExitTargetPoints)) return false;
 
+  const sign = leg === "CE_BUY" ? "+" : "−";
   await cancelLegTakeProfitOrders(accessToken);
   await squareOff(
     accessToken,
-    `9:16 index exit · Nifty ${lastSpot.toFixed(2)} hit ${indexExitSchedule ?? `flat −${indexExitTargetPoints}`} ` +
+    `9:16 index exit · Nifty ${lastSpot.toFixed(2)} hit ${indexExitSchedule ?? `flat ${sign}${indexExitTargetPoints}`} ` +
       `(target ${indexExitTargetSpot.toFixed(2)} from entry ${entrySpot.toFixed(2)}) · market sell`,
   );
   return true;
@@ -3350,7 +3353,7 @@ async function checkAndMaybeExitTakeProfitLeg(accessToken: string, dateIst: stri
   }
 
   if (tradeSlot === "nine-sixteen" && phase === "in_position") {
-    maybeRetargetHybrid916GreenMinute(dateIst);
+    maybeRetargetHybrid916Minute(dateIst);
   }
 
   if (await maybeHybrid916IndexExit(accessToken)) return true;
@@ -3923,7 +3926,7 @@ function buildStatusSnapshot(): NineSixteenBotStatus {
   const tpExitSchedule = onNineFifteenLeg
     ? getNineFifteenLadderLabel(ctx.dateIST, leg)
     : onNineSixteenLeg
-      ? getNineSixteenLadderLabel(ctx.dateIST)
+      ? getNineSixteenLadderLabel(ctx.dateIST, leg)
       : null;
 
   const inTrade = phase === "in_position" || phase === "exiting";
@@ -4130,12 +4133,12 @@ export function setNineSixteenBotEnabled(next: boolean) {
       message =
         tradeSlot === "nine-fifteen"
           ? `9:16 trading disabled · still managing open 9:15 position · ${getNineFifteenLadderLabel(dateIst, leg)}`
-          : `9:16 trading disabled · still managing open position · ${getNineSixteenLadderLabel(dateIst)}`;
+          : `9:16 trading disabled · still managing open position · ${getNineSixteenLadderLabel(dateIst, leg)}`;
     } else {
       message =
         tradeSlot === "nine-fifteen"
           ? `In 9:15 position · 9:16 armed · ${getNineFifteenLadderLabel(dateIst, leg)}`
-          : `In position · ${getNineSixteenLadderLabel(dateIst)}`;
+          : `In position · ${getNineSixteenLadderLabel(dateIst, leg)}`;
     }
   } else if (phase === "done") {
     message = enabled
@@ -4168,7 +4171,7 @@ export function startNineSixteenBot() {
   startNineSixteenLiveMonitor();
   startNineSixteenMonitorLoop();
   pushLog(
-    "9:15 + 9:16 trading armed on startup — 9:15: red ≥ 5 pts → PE · green ≥ 10 pts → CE at 9:15:11 · 9:16: red |Δ| ≥ 15 → PE at 9:16:01",
+    "9:15 + 9:16 trading armed on startup — 9:15: red ≥ 5 pts → PE · green ≥ 10 pts → CE at 9:15:11 · 9:16: |Δ| ≥ 15 · red → PE · green → CE at 9:16:01",
     "info",
   );
 }

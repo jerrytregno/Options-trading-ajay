@@ -3,10 +3,12 @@ import { Activity, ChartColumn, Clock, Gauge, History, Hourglass, LineChart, Log
 import { useState } from "react";
 import { useAuth } from "@/contexts/auth-context";
 import { useKite } from "@/contexts/kite-context";
+import { NINE_FIFTEEN_GREEN_916_BACKTEST_TITLE, NINE_FIFTEEN_RED_916_BACKTEST_TITLE } from "@/types/nine-fifteen";
 
 const navItems = [
   { href: "/dashboard/nine-fifteen", label: "9:15 Candle", icon: Clock },
-  { href: "/dashboard/backtesting", label: "Backtesting", icon: ChartColumn },
+  { href: "/dashboard/backtesting", label: NINE_FIFTEEN_RED_916_BACKTEST_TITLE, icon: ChartColumn },
+  { href: "/dashboard/backtesting-green", label: NINE_FIFTEEN_GREEN_916_BACKTEST_TITLE, icon: ChartColumn },
   { href: "/dashboard/nine-fifteen-backtest", label: "9:15 Backtest", icon: Target },
   { href: "/dashboard/nifty-one-hour", label: "NIFTY 50 – 1 Hour", icon: Hourglass },
   { href: "/dashboard/nifty-rsi", label: "RSI", icon: LineChart },

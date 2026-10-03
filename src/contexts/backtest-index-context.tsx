@@ -1,4 +1,5 @@
 import { createContext, useContext, type ReactNode } from "react";
+import { NINE_FIFTEEN_RED_916_BACKTEST_TITLE } from "@/types/nine-fifteen";
 
 export interface BacktestIndexMeta {
   key: "nifty";
@@ -16,7 +17,7 @@ export interface BacktestIndexMeta {
 
 export const NIFTY_BACKTEST_META: BacktestIndexMeta = {
   key: "nifty",
-  title: "Backtesting",
+  title: NINE_FIFTEEN_RED_916_BACKTEST_TITLE,
   label: "Nifty 50",
   shortLabel: "Nifty",
   expiryWeekday: "Tuesday",

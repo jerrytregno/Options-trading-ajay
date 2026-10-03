@@ -15,13 +15,13 @@ import {
 const entryPrice = 40;
 const quantity = 130;
 
-function checkWeekday(label: string, dateIst: string, expectedPct: number) {
-  const pct = getNineSixteenTakeProfitPct(dateIst);
+function checkWeekday(label: string, dateIst: string, expectedPct: number, leg?: "CE_BUY" | "PE_BUY") {
+  const pct = getNineSixteenTakeProfitPct(dateIst, leg);
   const limit = nineFifteenTakeProfitLimitPrice(entryPrice, pct);
   const aim = nineFifteenTakeProfitAmount(entryPrice, quantity, pct);
   console.log(`\n${label} (${dateIst})`);
   console.log(`  take-profit: +${pct}% (expected ${expectedPct}%)`);
-  console.log(`  ladder: ${getNineSixteenLadderLabel(dateIst)}`);
+  console.log(`  ladder: ${getNineSixteenLadderLabel(dateIst, leg)}`);
   console.log(`  limit price: ₹${limit.toFixed(2)} per unit`);
   console.log(`  profit aim: ₹${Math.round(aim)} on ₹${Math.round(entryPrice * quantity)} deployed`);
   if (pct !== expectedPct) {
@@ -34,6 +34,13 @@ checkWeekday("Tuesday", "2026-09-01", 7);
 checkWeekday("Wednesday", "2026-09-02", 5);
 checkWeekday("Thursday", "2026-09-03", 5);
 checkWeekday("Friday", "2026-09-04", 7);
+checkWeekday("Monday PE", "2026-08-31", 5, "PE_BUY");
+checkWeekday("Tuesday PE", "2026-09-01", 7, "PE_BUY");
+checkWeekday("Monday CE", "2026-08-31", 3, "CE_BUY");
+checkWeekday("Tuesday CE", "2026-09-01", 3, "CE_BUY");
+checkWeekday("Wednesday CE", "2026-09-02", 3, "CE_BUY");
+checkWeekday("Thursday CE", "2026-09-03", 3, "CE_BUY");
+checkWeekday("Friday CE", "2026-09-04", 3, "CE_BUY");
 
 {
   const pct = getNineSixteenTakeProfitPct("2026-09-01");

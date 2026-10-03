@@ -427,19 +427,12 @@ export function exitModeFrom915Change(change: number): NineSixteenExitMode | nul
 /**
  * The 9:16 entry decision, taken on the sealed 9:15 bar.
  *
- * Short side only: a green 9:15 minute is left alone rather than bought as a CE. A red minute
- * enters only when |Δ| ≥ {@link NINE_SIXTEEN_MIN_915_ABS_DIFF} (main band).
+ * Red → PE · green → CE, each only when |Δ| ≥ {@link NINE_SIXTEEN_MIN_915_ABS_DIFF} (main band).
  */
 export function decide915Entry(bar: NineSixteen915Bar): NineSixteenEntryDecision {
   const diff = bar.change;
   if (bar.direction === "flat" || diff === 0) {
     return { action: "skip", reason: "9:15 bar flat (close equals open) — no trade" };
-  }
-  if (diff > 0) {
-    return {
-      action: "skip",
-      reason: `9:15 closed green (+${diff.toFixed(2)} pts) — the 9:16 trade only takes red candles`,
-    };
   }
   const exitMode = exitModeFrom915Change(diff);
   if (!exitMode) {
@@ -448,7 +441,7 @@ export function decide915Entry(bar: NineSixteen915Bar): NineSixteenEntryDecision
       reason: `9:15 move too small — |Δ| ${Math.abs(diff).toFixed(2)} pts (main band requires ≥ ${NINE_SIXTEEN_MIN_915_ABS_DIFF})`,
     };
   }
-  return { action: "enter", leg: "PE_BUY", exitMode };
+  return { action: "enter", leg: diff > 0 ? "CE_BUY" : "PE_BUY", exitMode };
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -586,20 +579,38 @@ export function shouldExitNineSixteen(
   return false;
 }
 
-/** Live 9:16 hybrid index exit — both red when 9:16:00 WS open ≤ 9:15:59 WS close. */
+/**
+ * Live 9:16 hybrid index exit — 9:16:00 WS open keeps the 9:15 colour (PE: open ≤ 9:15:59 close ·
+ * CE: open ≥ 9:15:59 close).
+ */
 export const NINE_SIXTEEN_HYBRID_INDEX_TARGET_RED_CONFIRM = 12;
-/** Live 9:16 hybrid index exit — when 9:16:00 open gaps above 9:15:59 close. */
+/** Live 9:16 hybrid index exit — 9:16:00 open gaps against the 9:15 colour. */
 export const NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_GAP = 8;
-/** Live 9:16 hybrid index exit — from 9:17:00 when 9:16:59 close > 9:15:59 close (green 9:16 minute). */
+/** Live 9:16 hybrid index exit — from 9:17:00 when the 9:16 minute closes against the entry leg. */
 export const NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE = 6;
 
 export function is916RedConfirmFromCaptures(open916: number, close91559: number): boolean {
   return open916 <= close91559 + 1e-9;
 }
 
-/** Flat PE index target from 9:16 entry spot: −12 both red · −8 green gap at 9:16:00 open. */
-export function hybrid916IndexTargetPoints(open916: number, close915: number): number {
-  return is916RedConfirmFromCaptures(open916, close915)
+export function is916GreenConfirmFromCaptures(open916: number, close91559: number): boolean {
+  return open916 >= close91559 - 1e-9;
+}
+
+/** 9:16:00 open keeps the 9:15 colour for this leg — the larger flat tier. */
+export function is916HybridConfirmFromCaptures(
+  open916: number,
+  close91559: number,
+  leg: TradeLeg = "PE_BUY",
+): boolean {
+  return leg === "CE_BUY"
+    ? is916GreenConfirmFromCaptures(open916, close91559)
+    : is916RedConfirmFromCaptures(open916, close91559);
+}
+
+/** Flat index target from 9:16 entry spot: 12 when 9:16:00 keeps the 9:15 colour · 8 on a gap against it. */
+export function hybrid916IndexTargetPoints(open916: number, close915: number, leg: TradeLeg = "PE_BUY"): number {
+  return is916HybridConfirmFromCaptures(open916, close915, leg)
     ? NINE_SIXTEEN_HYBRID_INDEX_TARGET_RED_CONFIRM
     : NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_GAP;
 }
@@ -608,9 +619,15 @@ export function computeHybrid916IndexExitSpot(entrySpot: number, targetPoints: n
   return leg === "CE_BUY" ? entrySpot + targetPoints : entrySpot - targetPoints;
 }
 
-export function hybrid916IndexExitLabel(open916: number, close91559: number): string {
-  const pts = hybrid916IndexTargetPoints(open916, close91559);
-  return is916RedConfirmFromCaptures(open916, close91559)
+export function hybrid916IndexExitLabel(open916: number, close91559: number, leg: TradeLeg = "PE_BUY"): string {
+  const pts = hybrid916IndexTargetPoints(open916, close91559, leg);
+  const confirm = is916HybridConfirmFromCaptures(open916, close91559, leg);
+  if (leg === "CE_BUY") {
+    return confirm
+      ? `flat +${pts} (9:16:00 open ≥ 9:15:59 close · both green · until 9:17:00)`
+      : `flat +${pts} (9:16:00 open < 9:15:59 close · red gap · until 9:17:00)`;
+  }
+  return confirm
     ? `flat −${pts} (9:16:00 open ≤ 9:15:59 close · both red · until 9:17:00)`
     : `flat −${pts} (9:16:00 open > 9:15:59 close · green gap · until 9:17:00)`;
 }
@@ -620,8 +637,25 @@ export function is916MinuteGreenClose(close91659: number, close91559: number): b
   return close91659 > close91559 + 1e-9;
 }
 
-export function hybrid916GreenMinuteExitLabel(close91659: number, close91559: number): string {
-  return `flat −${NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE} (9:16:59 close ${close91659.toFixed(2)} > 9:15:59 close ${close91559.toFixed(2)} · green 9:16 from 9:17:00)`;
+/** True when the 9:16 minute WS close (9:16:59 last tick) is below the 9:15:59 close. */
+export function is916MinuteRedClose(close91659: number, close91559: number): boolean {
+  return close91659 < close91559 - 1e-9;
+}
+
+/** 9:16 minute closed against the leg (green for PE · red for CE) — retarget to the 6-pt tier at 9:17. */
+export function is916MinuteAgainstLeg(close91659: number, close91559: number, leg: TradeLeg): boolean {
+  return leg === "CE_BUY"
+    ? is916MinuteRedClose(close91659, close91559)
+    : is916MinuteGreenClose(close91659, close91559);
+}
+
+export function hybrid916MinuteRetargetLabel(close91659: number, close91559: number, leg: TradeLeg): string {
+  const pts = NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE;
+  const c59 = close91659.toFixed(2);
+  const c15 = close91559.toFixed(2);
+  return leg === "CE_BUY"
+    ? `flat +${pts} (9:16:59 close ${c59} < 9:15:59 close ${c15} · red 9:16 from 9:17:00)`
+    : `flat −${pts} (9:16:59 close ${c59} > 9:15:59 close ${c15} · green 9:16 from 9:17:00)`;
 }
 
 /** Nifty index points still needed for a PE hybrid exit (0 when at/below target). */
@@ -1144,13 +1178,16 @@ export function getNineFifteenLadderLabel(dateIst?: string, leg?: string | null)
   );
 }
 
-/** Default take-profit on Tue/Fri (and unknown weekdays). */
+/** Default take-profit on Tue/Fri (and unknown weekdays) for the 9:16 PE leg. */
 export const NINE_SIXTEEN_TAKE_PROFIT_PCT = 7;
-/** Take-profit on Mon/Wed/Thu. */
+/** Take-profit on Mon/Wed/Thu for the 9:16 PE leg. */
 export const NINE_SIXTEEN_TAKE_PROFIT_PCT_EARLY = 5;
+/** Take-profit on every weekday for the 9:16 CE leg. */
+export const NINE_SIXTEEN_CE_TAKE_PROFIT_PCT = 3;
 
-/** Mon/Wed/Thu → 5% · Tue/Fri → 7%. */
-export function getNineSixteenTakeProfitPct(dateIst?: string): number {
+/** PE: Mon/Wed/Thu → 5% · Tue/Fri → 7% · CE: 3% every day. */
+export function getNineSixteenTakeProfitPct(dateIst?: string, leg?: TradeLeg | null): number {
+  if (leg === "CE_BUY") return NINE_SIXTEEN_CE_TAKE_PROFIT_PCT;
   if (!dateIst) return NINE_SIXTEEN_TAKE_PROFIT_PCT;
   const weekday = istWeekdayShortFromDateKey(dateIst);
   if (weekday === "Mon" || weekday === "Wed" || weekday === "Thu") {
@@ -1159,10 +1196,11 @@ export function getNineSixteenTakeProfitPct(dateIst?: string): number {
   return NINE_SIXTEEN_TAKE_PROFIT_PCT;
 }
 
-export function getNineSixteenLadderLabel(dateIst?: string): string {
-  const tpPct = getNineSixteenTakeProfitPct(dateIst);
+export function getNineSixteenLadderLabel(dateIst?: string, leg?: TradeLeg | null): string {
+  const tpPct = getNineSixteenTakeProfitPct(dateIst, leg);
+  const sign = leg === "CE_BUY" ? "+" : "−";
   return (
-    `+${tpPct}% take-profit limit on capital deployed · parallel flat −${NINE_SIXTEEN_HYBRID_INDEX_TARGET_RED_CONFIRM}/−${NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_GAP} Nifty index exit (market) · hard stop ±${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} from ${getHardStopStartLabel()} · 3:25 PM square-off`
+    `+${tpPct}% take-profit limit on capital deployed · parallel flat ${sign}${NINE_SIXTEEN_HYBRID_INDEX_TARGET_RED_CONFIRM}/${sign}${NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_GAP} Nifty index exit (market) · hard stop ±${NINE_SIXTEEN_HARD_STOP_INDEX_POINTS} from ${getHardStopStartLabel()} · 3:25 PM square-off`
   );
 }
 

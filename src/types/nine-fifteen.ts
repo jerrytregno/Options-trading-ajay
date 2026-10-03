@@ -17,6 +17,11 @@ export const BACKTEST_MAX_HISTORY_DAYS =
 /** Max sessions the backtesting page can show. */
 export const BACKTEST_MAX_SESSIONS = NSE_SESSIONS_TWO_YEARS;
 
+/** Backtesting page title for the live-aligned red PE @ 9:16 study. */
+export const NINE_FIFTEEN_RED_916_BACKTEST_TITLE = "9:16 backtesting red";
+/** Mirror study: green 9:15 · CE @ 9:16 · flat + exits. */
+export const NINE_FIFTEEN_GREEN_916_BACKTEST_TITLE = "9:16 backtesting green";
+
 /** Calendar lookback for a window button (matches server `calendarDaysForSessionLookback`). */
 export function backtestDaysForSessions(sessions: number): number {
   return Math.min(
@@ -335,6 +340,12 @@ export interface NineFifteenCandlesResult {
   /** Same band · only days where 9:16 open ≤ 9:15 close (both red) · flat −15 exit. */
   liveRedPeMain916BothRedFollow?: NineFifteenCePeStrategyStats;
   liveRedPeMain916BothRedFilterStats?: NineFifteenFollowFilterStats;
+  /** Green 9:15 · |Δ| ≥ 15 · CE @ 9:16 · flat +12 both green / +8 red gap (mirror of the red study). */
+  liveGreenCeMain916ConfirmFollow?: NineFifteenCePeStrategyStats;
+  liveGreenCeMain916ConfirmFilterStats?: NineFifteenFollowFilterStats;
+  /** Same band · only days where 9:16 open ≥ 9:15 close (both green) · flat +12 exit. */
+  liveGreenCeMain916BothGreenFollow?: NineFifteenCePeStrategyStats;
+  liveGreenCeMain916BothGreenFilterStats?: NineFifteenFollowFilterStats;
   /** Nifty — 9:17 two-candle confirm with 9:15 |Δ| > 30 · 9:16 |Δ| > 10 · ±15/10/5 exits. */
   niftyConfirm917Follow?: NineFifteenCePeStrategyStats;
   niftyConfirm917FilterStats?: NineFifteenFollowFilterStats;
@@ -358,6 +369,12 @@ export interface NineFifteenFollowBacktestBlock {
   /** Same band · only days where 9:16 open ≤ 9:15 close (both red) · flat −15 exit. */
   liveRedPeMain916BothRedFollow?: NineFifteenCePeStrategyStats;
   liveRedPeMain916BothRedFilterStats?: NineFifteenFollowFilterStats;
+  /** Green 9:15 · |Δ| ≥ 15 · CE @ 9:16 · flat +12 both green / +8 red gap (mirror of the red study). */
+  liveGreenCeMain916ConfirmFollow?: NineFifteenCePeStrategyStats;
+  liveGreenCeMain916ConfirmFilterStats?: NineFifteenFollowFilterStats;
+  /** Same band · only days where 9:16 open ≥ 9:15 close (both green) · flat +12 exit. */
+  liveGreenCeMain916BothGreenFollow?: NineFifteenCePeStrategyStats;
+  liveGreenCeMain916BothGreenFilterStats?: NineFifteenFollowFilterStats;
   /** Nifty — 9:17 two-candle confirm with 9:15 |Δ| > 30 · 9:16 |Δ| > 10 · ±15/10/5 exits. */
   niftyConfirm917Follow?: NineFifteenCePeStrategyStats;
   niftyConfirm917FilterStats?: NineFifteenFollowFilterStats;
@@ -382,9 +399,9 @@ export interface NineFifteenFollowFilterStats {
   skippedSmallBar: number;
   /** Red PE studies: passed |Δ| filter but 9:16 open was not ≥0.1 below 9:15 close. */
   skipped916Confirm?: number;
-  /** 916 hybrid: red confirm days using flat −15 from 9:16. */
+  /** 916 hybrid: 9:16 open keeps the 9:15 colour (both red / both green) — flat backtestTarget15 tier. */
   redConfirmFlat15Trades?: number;
-  /** 916 hybrid: green gap days using flat −10 from 9:16. */
+  /** 916 hybrid: 9:16 open flips against the 9:15 colour — flat gap tier. */
   greenGapFlat10Trades?: number;
   /** @deprecated use redConfirmFlat15Trades */
   redConfirmMainBandTrades?: number;

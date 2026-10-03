@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "@/pages/LoginPage";
 import NineFifteenPage from "@/pages/NineFifteenPage";
 import BacktestingPage from "@/pages/BacktestingPage";
+import NineSixteenGreenBacktestPage from "@/pages/NineSixteenGreenBacktestPage";
 import PortfolioPage from "@/pages/PortfolioPage";
 import SettingsPage from "@/pages/SettingsPage";
 import TradePage from "@/pages/TradePage";
@@ -19,6 +20,7 @@ export default function App() {
       <Route path="/dashboard" element={<Navigate to="/dashboard/nine-fifteen" replace />} />
       <Route path="/dashboard/nine-fifteen" element={<NineFifteenPage />} />
       <Route path="/dashboard/backtesting" element={<BacktestingPage />} />
+      <Route path="/dashboard/backtesting-green" element={<NineSixteenGreenBacktestPage />} />
       <Route path="/dashboard/nine-fifteen-backtest" element={<NineFifteenBacktestPage />} />
       <Route path="/dashboard/nifty-one-hour" element={<NiftyOneHourBacktestPage />} />
       <Route path="/dashboard/nifty-rsi" element={<NiftyRsiBacktestPage />} />

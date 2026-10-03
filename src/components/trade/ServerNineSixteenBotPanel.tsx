@@ -383,7 +383,7 @@ export function ServerNineSixteenBotPanel({ connected: _connected }: { connected
                 ? `9:15 · +${nineFifteenTpPct}% limit`
                 : onNineSixteenLeg
                   ? `9:16 · +${nineFifteenTpPct}% limit`
-                  : "9:16 · +5% / +7% limit (weekday)"}
+                  : "9:16 · PE +5% / +7% · CE +3% limit"}
             </span>
             <span className="pat-metric-hint">
               {onNineFifteenLeg ? (
@@ -406,24 +406,44 @@ export function ServerNineSixteenBotPanel({ connected: _connected }: { connected
                 </>
               ) : onNineSixteenLeg ? (
                 <>
-                  Target is <strong>+{nineFifteenTpPct}% profit on capital deployed</strong> (Mon/Wed/Thu{" "}
-                  <strong>5%</strong> · Tue/Fri <strong>7%</strong>). On fill at 9:16:01 a resting{" "}
+                  Target is <strong>+{nineFifteenTpPct}% profit on capital deployed</strong> (
+                  {status.leg === "CE_BUY" ? (
+                    <>
+                      CE <strong>3%</strong> every day
+                    </>
+                  ) : (
+                    <>
+                      PE Mon/Wed/Thu <strong>5%</strong> · Tue/Fri <strong>7%</strong>
+                    </>
+                  )}
+                  ). On fill at 9:16:01 a resting{" "}
                   <strong>limit sell</strong> is placed; retries instantly if Kite rejects
                   {status.nineFifteenTpLimitPrice != null
                     ? ` (limit ₹${formatNumber(status.nineFifteenTpLimitPrice, 2)} per unit today)`
                     : ""}
                   . <strong>Market backup</strong> at the same % if price prints before the limit fills.
-                  Parallel <strong>flat −12/−8/−6 Nifty index exit</strong> (−12 or −8 until 9:17:00; if the 9:16
-                  minute closes green, retarget to <strong>−6 from 9:17:00</strong>) runs alongside —{" "}
-                  <strong>first wins</strong>. <strong>3:25 PM</strong> square-off.
+                  {status.leg === "CE_BUY" ? (
+                    <>
+                      Parallel <strong>flat +12/+8/+6 Nifty index exit</strong> (+12 or +8 until 9:17:00; if the 9:16
+                      minute closes red, retarget to <strong>+6 from 9:17:00</strong>)
+                    </>
+                  ) : (
+                    <>
+                      Parallel <strong>flat −12/−8/−6 Nifty index exit</strong> (−12 or −8 until 9:17:00; if the 9:16
+                      minute closes green, retarget to <strong>−6 from 9:17:00</strong>)
+                    </>
+                  )}{" "}
+                  runs alongside — <strong>first wins</strong>. <strong>3:25 PM</strong> square-off.
                 </>
               ) : (
                 <>
-                  9:16 take-profit on <strong>capital deployed</strong>: Mon/Wed/Thu <strong>+5%</strong> · Tue/Fri{" "}
-                  <strong>+7%</strong> — resting limit sell with instant retries; market backup at the same %;
-                  parallel flat <strong>−12</strong> (9:16:00 open ≤ 9:15:59 close · both red) or <strong>−8</strong> (9:16:00
-                  open &gt; 9:15:59 close · green gap) until <strong>9:17:00</strong>; if 9:16:59 close &gt; 9:15:59 close
-                  (green 9:16 minute), retarget to <strong>−6 from 9:17:00</strong>. <strong>3:25 PM</strong> square-off.
+                  9:16 take-profit on <strong>capital deployed</strong>: PE Mon/Wed/Thu <strong>+5%</strong> · Tue/Fri{" "}
+                  <strong>+7%</strong> · CE <strong>+3%</strong> every day — resting limit sell with instant retries;
+                  market backup at the same %;
+                  parallel index exit — PE: flat <strong>−12</strong> (both red) / <strong>−8</strong> (green gap),{" "}
+                  <strong>−6</strong> from 9:17:00 if the 9:16 minute closes green · CE: flat <strong>+12</strong> (both
+                  green) / <strong>+8</strong> (red gap), <strong>+6</strong> from 9:17:00 if the 9:16 minute closes red.{" "}
+                  <strong>3:25 PM</strong> square-off.
                 </>
               )}
             </span>
@@ -626,7 +646,7 @@ export function ServerNineSixteenBotPanel({ connected: _connected }: { connected
                     {livePnlPct != null ? ` · now ${livePnlPct >= 0 ? "+" : ""}${formatNumber(livePnlPct, 2)}%` : ""}
                   </>
                 ) : (
-                  <>Mon/Wed/Thu +5% · Tue/Fri +7% on capital deployed</>
+                  <>PE Mon/Wed/Thu +5% · Tue/Fri +7% · CE +3% on capital deployed</>
                 )}
               </span>
             </div>
@@ -856,14 +876,17 @@ export function ServerNineSixteenBotPanel({ connected: _connected }: { connected
         <strong>3:25 PM</strong> square-off.
         <br />
         <br />
-        <strong>9:16 trade</strong> (armed on server): 9:15 WS close − open = Δ · flat or green → skip · red with{" "}
-        <strong>|Δ| ≥ 15</strong> → <strong>NRML limit BUY</strong> at the 2nd option WS tick @{" "}
+        <strong>9:16 trade</strong> (armed on server): 9:15 WS close − open = Δ · flat or |Δ| &lt; 15 → skip ·{" "}
+        <strong>|Δ| ≥ 15</strong> → red buys ATM PE, green buys ATM CE · <strong>NRML limit BUY</strong> at the 2nd
+        option WS tick @{" "}
         <strong>9:16:01</strong> (CE + PE WS from 9:15:58 · size on lower tick · market backup in 8s · retries until{" "}
         <strong>9:16:30</strong>). Skipped if the 9:15 leg is still open at 9:16:00. Exit: limit sell{" "}
-        <strong>+5% Mon/Wed/Thu</strong> · <strong>+7% Tue/Fri</strong> on capital deployed; market backup;{" "}
-        parallel flat <strong>−12</strong> / <strong>−8</strong> until 9:17:00; if 9:16:59 close &gt; 9:15:59 close (green
-        9:16 minute), retarget to <strong>−6 from 9:17:00</strong> — Nifty index exit via <strong>market sell</strong>{" "}
-        (first wins vs TP limit); <strong>3:25 PM</strong> square-off.
+        PE <strong>+5% Mon/Wed/Thu</strong> · <strong>+7% Tue/Fri</strong> · CE <strong>+3% every day</strong> on
+        capital deployed; market backup;{" "}
+        parallel flat <strong>−12</strong> / <strong>−8</strong> (PE) or <strong>+12</strong> / <strong>+8</strong> (CE)
+        until 9:17:00; if the 9:16 minute closes against the leg, retarget to <strong>−6</strong> / <strong>+6</strong>{" "}
+        from 9:17:00 — Nifty index exit via <strong>market sell</strong> (first wins vs TP limit);{" "}
+        <strong>3:25 PM</strong> square-off.
         {lastLiveAt && inPosition && (
           <> Last tick {getIndianMarketContext(new Date(lastLiveAt)).timeIST} IST.</>
         )}

@@ -17,6 +17,8 @@ import {
 import {
   backtestDaysForSessions,
   NSE_SESSIONS_ONE_YEAR,
+  NINE_FIFTEEN_RED_916_BACKTEST_TITLE,
+  NINE_FIFTEEN_GREEN_916_BACKTEST_TITLE,
   type NineFifteenCePeFailureTrade,
   type NineFifteenAltTargetAfterTime,
   type NineFifteenCePeStrategyStats,
@@ -733,7 +735,42 @@ function ConsolidatedBacktestResults({
 }
 
 
-function RedPeMainBacktestSection({
+export type NineSixteenBacktestVariant = "red" | "green";
+
+/** Copy for the red PE study and its green CE mirror — same rules, opposite colour and sign. */
+const NINE_SIXTEEN_VARIANT_COPY = {
+  red: {
+    title: NINE_FIFTEEN_RED_916_BACKTEST_TITLE,
+    colour: "red",
+    Colour: "Red",
+    opposite: "green",
+    Opposite: "Green",
+    side: "PE",
+    sign: "−",
+    confirmCmp: "≤",
+    gapCmp: ">",
+    bodyDiff: "9:15 open − close",
+    gapVerb: "gaps up",
+    gapWhere: "above",
+  },
+  green: {
+    title: NINE_FIFTEEN_GREEN_916_BACKTEST_TITLE,
+    colour: "green",
+    Colour: "Green",
+    opposite: "red",
+    Opposite: "Red",
+    side: "CE",
+    sign: "+",
+    confirmCmp: "≥",
+    gapCmp: "<",
+    bodyDiff: "9:15 close − open",
+    gapVerb: "gaps down",
+    gapWhere: "below",
+  },
+} as const;
+
+function Hybrid916BacktestSection({
+  variant,
   follow,
   filterStats,
   guideTargetPoints,
@@ -742,8 +779,9 @@ function RedPeMainBacktestSection({
   showHourlyWinBreakdown,
   showAlt20After1010OnLoss,
   secondCandleFlatExits,
-  bothRedOnly = false,
+  bothSameOnly = false,
 }: {
+  variant: NineSixteenBacktestVariant;
   follow: NineFifteenCePeStrategyStats;
   filterStats: NineFifteenFollowFilterStats;
   guideTargetPoints: number;
@@ -751,50 +789,49 @@ function RedPeMainBacktestSection({
   sessions: number;
   showHourlyWinBreakdown?: boolean;
   showAlt20After1010OnLoss?: boolean;
-  /** When set, 9:16 second-candle split: flat −red when both red, flat −green when 9:16 gaps up. */
-  secondCandleFlatExits?: { red: number; green: number };
-  /** Only days where 9:16 open ≤ 9:15 close — excludes green second candle. */
-  bothRedOnly?: boolean;
+  /** When set, 9:16 second-candle split: flat `confirm` when both candles match, flat `gap` when 9:16 flips. */
+  secondCandleFlatExits?: { confirm: number; gap: number };
+  /** Only days where the 9:16 open keeps the 9:15 colour — excludes the gap second candle. */
+  bothSameOnly?: boolean;
 }) {
   const index = useBacktestIndex();
+  const v = NINE_SIXTEEN_VARIANT_COPY[variant];
   const sc = (points: number) => points * index.pointScale;
   const mainBand = filterStats.minAbsDiff;
   const exclusive = filterStats.minAbsDiffExclusive === true;
   const sizeCompare = exclusive ? ">" : "≥";
   const skippedLabel = exclusive ? `|Δ| ≤ ${mainBand}` : `|Δ| < ${mainBand}`;
   const expiryDay = index.expiryWeekday;
-  const flatRed = secondCandleFlatExits?.red ?? 12;
-  const flatGreen = secondCandleFlatExits?.green ?? 8;
-  const cardTitle = bothRedOnly
-    ? `${filterStats.display?.filterTitle ?? `Red 9:15 · |Δ| ${sizeCompare} ${mainBand} · PE @ 9:16 · both red only · flat −${flatRed}`} (${historyLabel})`
-    : secondCandleFlatExits
-      ? `${filterStats.display?.filterTitle ?? `Red 9:15 · |Δ| ${sizeCompare} ${mainBand} · PE @ 9:16 · flat −${flatRed} (both red) · flat −${flatGreen} (green gap @ 9:16)`} (${historyLabel})`
-      : `Red 9:15 · |Δ| ${sizeCompare} ${mainBand} — PE @ 9:16 (${historyLabel})`;
+  const flatConfirm = secondCandleFlatExits?.confirm ?? 12;
+  const flatGap = secondCandleFlatExits?.gap ?? 8;
+  const cardTitle = `${v.title} (${historyLabel})`;
 
   return (
     <div className="card nf-cepe-guide nf-red-pe-main-first">
       <h2 className="card-title">{cardTitle}</h2>
       <p className="nf-cepe-steps text-muted">
-        Filtered to <strong>red 9:15 candles only</strong> with{" "}
-        <strong>|Δ| {sizeCompare} {sc(mainBand)}</strong> (9:15 open − close).
-        {bothRedOnly ? (
+        Filtered to <strong>{v.colour} 9:15 candles only</strong> with{" "}
+        <strong>|Δ| {sizeCompare} {sc(mainBand)}</strong> ({v.bodyDiff}).
+        {bothSameOnly ? (
           <>
             {" "}
-            <strong>Both red only</strong> — includes only days where{" "}
-            <strong>9:16 open ≤ 9:15 close</strong> (second candle also red). Green-gap days at 9:16 are
-            excluded. Take profit is a flat <strong>−{sc(flatRed)} Nifty points</strong> from the 9:16 entry.
+            <strong>Both {v.colour} only</strong> — includes only days where{" "}
+            <strong>9:16 open {v.confirmCmp} 9:15 close</strong> (second candle also {v.colour}). {v.Opposite}-gap
+            days at 9:16 are excluded. Take profit is a flat{" "}
+            <strong>{v.sign}{sc(flatConfirm)} Nifty points</strong> from the 9:16 entry.
           </>
         ) : secondCandleFlatExits ? (
           <>
             {" "}
-            When <strong>9:16 open ≤ 9:15 close</strong> (both candles red), take profit is a flat{" "}
-            <strong>−{sc(flatRed!)} Nifty points</strong> from the 9:16 entry. When{" "}
-            <strong>9:16 gaps up</strong> above the 9:15 close (green second candle), take profit is a flat{" "}
-            <strong>−{sc(flatGreen!)} Nifty points</strong> from entry. No tiered main-band exits.
+            When <strong>9:16 open {v.confirmCmp} 9:15 close</strong> (both candles {v.colour}), take profit is a
+            flat <strong>{v.sign}{sc(flatConfirm)} Nifty points</strong> from the 9:16 entry. When{" "}
+            <strong>9:16 {v.gapVerb}</strong> {v.gapWhere} the 9:15 close ({v.opposite} second candle), take
+            profit is a flat <strong>{v.sign}{sc(flatGap)} Nifty points</strong> from entry. No tiered main-band
+            exits.
           </>
         ) : (
           <>
-            Entry = <strong>PE BUY @ 9:16:00 Kite open</strong>. Main-band index exits: ±{sc(25)} / ±
+            Entry = <strong>{v.side} BUY @ 9:16:00 Kite open</strong>. Main-band index exits: ±{sc(25)} / ±
             {sc(20)}@10:01 / ±{sc(15)}@11:01 · <strong>{expiryDay}</strong> flat ±{sc(10)} from 9:16.
           </>
         )}{" "}
@@ -812,21 +849,25 @@ function RedPeMainBacktestSection({
         showAlt20After1010OnLoss={showAlt20After1010OnLoss}
         footnote={
           <>
-            Red · |Δ| {sizeCompare} {mainBand}
-            {bothRedOnly ? " · both red only" : secondCandleFlatExits ? " · hybrid 916 exits" : ""}:{" "}
+            {v.Colour} · |Δ| {sizeCompare} {mainBand}
+            {bothSameOnly ? ` · both ${v.colour} only` : secondCandleFlatExits ? " · hybrid 916 exits" : ""}:{" "}
             {follow.targetHits}/{follow.tradeDays} won ({formatNumber(follow.targetHitPct, 1)}%).{" "}
-            {filterStats.skippedSmallBar} red days skipped ({skippedLabel}).
-            {bothRedOnly && filterStats.skipped916Confirm != null && filterStats.skipped916Confirm > 0 && (
-              <> {filterStats.skipped916Confirm} excluded (9:16 open &gt; 9:15 close · green second candle).</>
+            {filterStats.skippedSmallBar} {v.colour} days skipped ({skippedLabel}).
+            {bothSameOnly && filterStats.skipped916Confirm != null && filterStats.skipped916Confirm > 0 && (
+              <>
+                {" "}
+                {filterStats.skipped916Confirm} excluded (9:16 open {v.gapCmp} 9:15 close · {v.opposite} second
+                candle).
+              </>
             )}
-            {!bothRedOnly &&
+            {!bothSameOnly &&
               secondCandleFlatExits &&
               filterStats.redConfirmFlat15Trades != null &&
               filterStats.greenGapFlat10Trades != null && (
               <>
                 {" "}
-                {filterStats.redConfirmFlat15Trades} both red (flat −{flatRed}) ·{" "}
-                {filterStats.greenGapFlat10Trades} green gap (flat −{flatGreen}).
+                {filterStats.redConfirmFlat15Trades} both {v.colour} (flat {v.sign}{flatConfirm}) ·{" "}
+                {filterStats.greenGapFlat10Trades} {v.opposite} gap (flat {v.sign}{flatGap}).
               </>
             )}
             {filterStats.redConfirmMainBandTrades != null &&
@@ -834,8 +875,8 @@ function RedPeMainBacktestSection({
               filterStats.redConfirmFlat15Trades == null && (
               <>
                 {" "}
-                {filterStats.redConfirmMainBandTrades} main-band (9:16 open ≤ 9:15 close) ·{" "}
-                {filterStats.greenGapFlat15Trades} green gap (flat −{flatGreen}).
+                {filterStats.redConfirmMainBandTrades} main-band (9:16 open {v.confirmCmp} 9:15 close) ·{" "}
+                {filterStats.greenGapFlat15Trades} {v.opposite} gap (flat {v.sign}{flatGap}).
               </>
             )}
             {filterStats.skipped916Confirm != null &&
@@ -843,28 +884,33 @@ function RedPeMainBacktestSection({
               filterStats.redConfirmMainBandTrades == null && (
               <>
                 {" "}
-                {filterStats.skipped916Confirm} skipped — 9:16 open above 9:15 close (green gap at open).
+                {filterStats.skipped916Confirm} skipped — 9:16 open {v.gapWhere} 9:15 close ({v.opposite} gap at
+                open).
               </>
             )}{" "}
-            Green and flat 9:15 days are not traded.
+            {v.Opposite} and flat 9:15 days are not traded.
           </>
         }
         winIntro={
           <>
-            Red 9:15 only · <strong>PE @ 9:16:00 Kite open</strong>
-            {bothRedOnly
-              ? ` · both red only · flat −${flatRed} from 9:16 when 9:16 open ≤ 9:15 close`
+            {v.Colour} 9:15 only · <strong>{v.side} @ 9:16:00 Kite open</strong>
+            {bothSameOnly
+              ? ` · both ${v.colour} only · flat ${v.sign}${flatConfirm} from 9:16 when 9:16 open ${v.confirmCmp} 9:15 close`
               : secondCandleFlatExits
-                ? ` · flat −${flatRed} when both red · flat −${flatGreen} when 9:16 gaps up`
+                ? ` · flat ${v.sign}${flatConfirm} when both ${v.colour} · flat ${v.sign}${flatGap} when 9:16 ${v.gapVerb}`
                 : ""}
             . Win when Nifty hits the exit:{" "}
-            {bothRedOnly || secondCandleFlatExits ? (
-              bothRedOnly ? (
-                <>flat −{sc(flatRed)} from 9:16 entry (both candles red).</>
+            {bothSameOnly || secondCandleFlatExits ? (
+              bothSameOnly ? (
+                <>
+                  flat {v.sign}
+                  {sc(flatConfirm)} from 9:16 entry (both candles {v.colour}).
+                </>
               ) : (
                 <>
-                  flat −{sc(flatRed!)} from 9:16 when 9:16 open ≤ 9:15 close, or flat −{sc(flatGreen!)} when
-                  9:16 gaps up above the 9:15 close.
+                  flat {v.sign}
+                  {sc(flatConfirm)} from 9:16 when 9:16 open {v.confirmCmp} 9:15 close, or flat {v.sign}
+                  {sc(flatGap)} when 9:16 {v.gapVerb} {v.gapWhere} the 9:15 close.
                 </>
               )
             ) : (
@@ -877,25 +923,25 @@ function RedPeMainBacktestSection({
         }
         lossIntro={
           <>
-            Red 9:15 with |Δ| {sizeCompare} {mainBand}
-            {bothRedOnly
-              ? ` · both red only · flat −${flatRed} exit`
+            {v.Colour} 9:15 with |Δ| {sizeCompare} {mainBand}
+            {bothSameOnly
+              ? ` · both ${v.colour} only · flat ${v.sign}${flatConfirm} exit`
               : secondCandleFlatExits
-                ? ` · flat −${flatRed} or −${flatGreen} exit`
+                ? ` · flat ${v.sign}${flatConfirm} or ${v.sign}${flatGap} exit`
                 : ""}
-            ; PE entered at 9:16 but the index exit never hit same day. Each row shows{" "}
+            ; {v.side} entered at 9:16 but the index exit never hit same day. Each row shows{" "}
             <strong>Nifty @10:00 IST</strong> vs the exit target, plus{" "}
             <strong>NRML carry</strong> until the next {expiryDay} 15:00 IST. Expand a day for the
             full-session <strong>1-min candle chart</strong> (9:15–15:30).
           </>
         }
-        winHeading="Winning trades — red 9:15 · PE @ 9:16"
-        lossTitle="Loss trades — red 9:15 · PE @ 9:16"
+        winHeading={`Winning trades — ${v.colour} 9:15 · ${v.side} @ 9:16`}
+        lossTitle={`Loss trades — ${v.colour} 9:15 · ${v.side} @ 9:16`}
         hourlyHitRuleLabel={
-          bothRedOnly
-            ? `when the flat −${flatRed} exit was first hit`
+          bothSameOnly
+            ? `when the flat ${v.sign}${flatConfirm} exit was first hit`
             : secondCandleFlatExits
-              ? `when the flat −${flatRed} or −${flatGreen} exit was first hit`
+              ? `when the flat ${v.sign}${flatConfirm} or ${v.sign}${flatGap} exit was first hit`
               : "when the band’s index exit was first hit"
         }
       />
@@ -911,10 +957,15 @@ function gatewayErrorMessage(status: number): string {
 }
 
 export default function BacktestingPage() {
+  return <NineSixteenBacktestView variant="red" />;
+}
+
+export function NineSixteenBacktestView({ variant }: { variant: NineSixteenBacktestVariant }) {
+  const v = NINE_SIXTEEN_VARIANT_COPY[variant];
   const { connected, loginUrl } = useKite();
   const [data, setData] = useState<NineFifteenCandlesResult | null>(null);
   const [windowId, setWindowId] = useState<BacktestWindowId>("1y");
-  const [bothRedOnly, setBothRedOnly] = useState(false);
+  const [bothSameOnly, setBothSameOnly] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -961,15 +1012,25 @@ export default function BacktestingPage() {
     void load(win, false);
   }, [connected, windowId, load]);
 
-  const historyLabel = `${activeWindow.historyLabel}${bothRedOnly ? " · both red only" : ""} · dual-band live exits`;
+  const historyLabel = `${activeWindow.historyLabel}${bothSameOnly ? ` · both ${v.colour} only` : ""} · dual-band live exits`;
   const busy = loading;
 
-  const hybridFollow = bothRedOnly
-    ? data?.liveRedPeMain916BothRedFollow
-    : data?.liveRedPeMain916ConfirmFollow;
-  const hybridFilterStats = bothRedOnly
-    ? data?.liveRedPeMain916BothRedFilterStats
-    : data?.liveRedPeMain916ConfirmFilterStats;
+  const hybridFollow =
+    variant === "green"
+      ? bothSameOnly
+        ? data?.liveGreenCeMain916BothGreenFollow
+        : data?.liveGreenCeMain916ConfirmFollow
+      : bothSameOnly
+        ? data?.liveRedPeMain916BothRedFollow
+        : data?.liveRedPeMain916ConfirmFollow;
+  const hybridFilterStats =
+    variant === "green"
+      ? bothSameOnly
+        ? data?.liveGreenCeMain916BothGreenFilterStats
+        : data?.liveGreenCeMain916ConfirmFilterStats
+      : bothSameOnly
+        ? data?.liveRedPeMain916BothRedFilterStats
+        : data?.liveRedPeMain916ConfirmFilterStats;
 
   return (
     <DashboardShell>
@@ -979,10 +1040,10 @@ export default function BacktestingPage() {
           <div>
             <h1 className="page-title">
               <TrendingUp size={22} />
-              Backtesting
+              {v.title}
             </h1>
             <p className="page-subtitle">
-              Nifty 50 · 9:15 red PE backtests · Zerodha Kite minute data · {activeWindow.label}
+              Nifty 50 · {v.title} · Zerodha Kite minute data · {activeWindow.label}
               {data ? ` · ${data.fromDate} → ${data.toDate}` : ""}
             </p>
           </div>
@@ -1003,13 +1064,13 @@ export default function BacktestingPage() {
             <label className="nf-both-red-toggle">
               <input
                 type="checkbox"
-                checked={bothRedOnly}
+                checked={bothSameOnly}
                 disabled={!connected || busy || !data}
-                onChange={(e) => setBothRedOnly(e.target.checked)}
+                onChange={(e) => setBothSameOnly(e.target.checked)}
               />
-              <span>Both red only</span>
+              <span>Both {v.colour} only</span>
               <span className="nf-both-red-toggle-hint text-muted">
-                9:16 open ≤ 9:15 close — exclude green second candle
+                9:16 open {v.confirmCmp} 9:15 close — exclude {v.opposite} second candle
               </span>
             </label>
             <button
@@ -1123,7 +1184,8 @@ export default function BacktestingPage() {
                 )}
 
                 {hybridFollow && hybridFilterStats && (
-                  <RedPeMainBacktestSection
+                  <Hybrid916BacktestSection
+                    variant={variant}
                     follow={hybridFollow}
                     filterStats={hybridFilterStats}
                     guideTargetPoints={data.cePeGuide.targetPoints}
@@ -1131,8 +1193,8 @@ export default function BacktestingPage() {
                     sessions={data.nseSessionsOneYear}
                     showHourlyWinBreakdown
                     showAlt20After1010OnLoss
-                    bothRedOnly={bothRedOnly}
-                    secondCandleFlatExits={{ red: 12, green: 8 }}
+                    bothSameOnly={bothSameOnly}
+                    secondCandleFlatExits={{ confirm: 12, gap: 8 }}
                   />
                 )}
 

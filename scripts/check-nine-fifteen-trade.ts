@@ -228,7 +228,7 @@ console.log("\n--- 9:15 entry minimum move ---");
 check("minimum red move is 5 pts", NINE_FIFTEEN_MIN_DROP_PTS, 5);
 check("minimum green move is 10 pts", NINE_FIFTEEN_MIN_RISE_PTS, 10);
 
-console.log("\n--- the 9:16 trade now takes red candles only ---");
+console.log("\n--- the 9:16 trade: red → PE · green → CE (|Δ| ≥ 15) ---");
 const bar = (open: number, close: number) =>
   build915BarFromCaptured(open, close, Math.max(open, close), Math.min(open, close))!;
 
@@ -238,8 +238,17 @@ check("a 20 pt fall enters the PE on the main band", decide915Entry(bar(24_800, 
   exitMode: "main",
 });
 check("a 12 pt fall is under the 15 pt main floor", decide915Entry(bar(24_800, 24_788)).action, "skip");
-check("a 20 pt rise is skipped — no CE side any more", decide915Entry(bar(24_800, 24_820)).action, "skip");
-check("a 40 pt rise is skipped too", decide915Entry(bar(24_800, 24_840)).action, "skip");
+check("a 20 pt rise enters the CE on the main band", decide915Entry(bar(24_800, 24_820)), {
+  action: "enter",
+  leg: "CE_BUY",
+  exitMode: "main",
+});
+check("exactly 15 pts up enters the CE", decide915Entry(bar(24_800, 24_815)), {
+  action: "enter",
+  leg: "CE_BUY",
+  exitMode: "main",
+});
+check("a 14 pt rise is under the 15 pt main floor", decide915Entry(bar(24_800, 24_814)).action, "skip");
 check("a 7 pt fall is still under the 15 pt floor", decide915Entry(bar(24_800, 24_793)).action, "skip");
 check("a flat candle is skipped", decide915Entry(bar(24_800, 24_800)).action, "skip");
 check("exactly 14 pts down is still under the main band", decide915Entry(bar(24_800, 24_786)).action, "skip");

@@ -17,6 +17,7 @@ import {
   isIn91659WsCloseSecond,
   isPast916GreenMinuteRetarget,
   is916MinuteGreenClose,
+  is916MinuteAgainstLeg,
   NINE_FIFTEEN_WS_CLOSE_59_SEC,
   NINE_SIXTEEN_WS_OPEN_00_SEC,
   NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE,
@@ -162,3 +163,17 @@ console.log(
   !isPast916GreenMinuteRetarget(wed("09:16:59.999")) ? "ok" : "MISMATCH",
 );
 console.log("green minute target pts", NINE_SIXTEEN_HYBRID_INDEX_TARGET_GREEN_MINUTE);
+
+console.log("\n--- hybrid 916 parallel index exit · CE mirror ---");
+const ok = (cond: boolean) => (cond ? "ok" : "MISMATCH");
+console.log("CE both green (open > close) → +12", ok(hybrid916IndexTargetPoints(24_001, close91559, "CE_BUY") === 12));
+console.log("CE open = close counts as green → +12", ok(hybrid916IndexTargetPoints(24_000, close91559, "CE_BUY") === 12));
+console.log("CE red gap (open < close) → +8", ok(hybrid916IndexTargetPoints(23_999.95, close91559, "CE_BUY") === 8));
+const ceTarget12 = computeHybrid916IndexExitSpot(entrySpotHybrid, 12, "CE_BUY");
+console.log("CE +12 target spot", ok(ceTarget12 === entrySpotHybrid + 12));
+console.log("CE +12 hit", ok(shouldExitNineSixteen(ceTarget12, entrySpotHybrid, "CE_BUY", 12)));
+console.log("CE +12 hold", ok(!shouldExitNineSixteen(ceTarget12 - 0.05, entrySpotHybrid, "CE_BUY", 12)));
+console.log("CE retarget when 9:16 closes red", ok(is916MinuteAgainstLeg(23_995, 24_000, "CE_BUY")));
+console.log("CE no retarget when 9:16 closes green", ok(!is916MinuteAgainstLeg(24_005, 24_000, "CE_BUY")));
+console.log("PE retarget when 9:16 closes green", ok(is916MinuteAgainstLeg(24_005, 24_000, "PE_BUY")));
+console.log("PE no retarget when 9:16 closes red", ok(!is916MinuteAgainstLeg(23_995, 24_000, "PE_BUY")));

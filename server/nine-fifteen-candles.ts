@@ -35,6 +35,8 @@ import {
   NINE_FIFTEEN_RUPEE_LEVELS,
   NINE_FIFTEEN_TIME_CHECKPOINTS,
   NSE_SESSIONS_ONE_YEAR,
+  NINE_FIFTEEN_RED_916_BACKTEST_TITLE,
+  NINE_FIFTEEN_GREEN_916_BACKTEST_TITLE,
   SMALL_BODY_CE_MIN_INCLUSIVE,
   SMALL_BODY_MAX_EXCLUSIVE,
   SMALL_BODY_PUT_MAX_INCLUSIVE,
@@ -3063,13 +3065,11 @@ export function buildLiveRedPeMain916ConfirmFollowStats(
   variant: ConsolidatedExitVariant = "default",
   byDate?: MinuteCandlesByDate,
 ): NineFifteenCePeStrategyStats {
-  const label =
-    `Red 9:15 · |Δ|≥${points.followMinAbsDiff} → PE @ 9:16 · flat −${points.backtestTarget15} (both red) · flat −${points.backtestTarget10} (green gap @ 9:16)`;
   const taken = liveRedPe916HybridRows(rows, points);
-  return buildLiveRedPe916HybridFollowStats(
+  return buildHybrid916FollowStats(
     rows,
     taken,
-    label,
+    NINE_FIFTEEN_RED_916_BACKTEST_TITLE,
     points,
     points.backtestTarget10,
     profile,
@@ -3116,7 +3116,7 @@ export function computeLiveRedPeMain916ConfirmFilterStats(
   const redDays = rows.filter((row) => row.direction === "down");
   const sizeFiltered = liveRedPeMainRows(rows, points);
   const filtered = liveRedPe916HybridRows(rows, points);
-  const wins = filtered.filter((row) => liveRedPe916HybridHit(row, points.backtestTarget10, points)).length;
+  const wins = filtered.filter((row) => hybrid916Hit(row, points.backtestTarget10, points)).length;
   const filteredTrades = filtered.length;
   const redConfirmFlat15Trades = filtered.filter(is916RedConfirmOpen).length;
   const greenGapFlat10Trades = filtered.filter(is916GreenGapAtOpen).length;
@@ -3132,8 +3132,7 @@ export function computeLiveRedPeMain916ConfirmFilterStats(
     redConfirmFlat15Trades,
     greenGapFlat10Trades,
     display: {
-      filterTitle:
-        `Red 9:15 · |Δ| ≥ ${points.followMinAbsDiff} · PE @ 9:16 · flat −${points.backtestTarget15} (both red) · flat −${points.backtestTarget10} (green gap @ 9:16)`,
+      filterTitle: NINE_FIFTEEN_RED_916_BACKTEST_TITLE,
       takenLabel: `Trades taken (red · |Δ| ≥ ${points.followMinAbsDiff})`,
       skippedLabel: `Skipped red days (|Δ| < ${points.followMinAbsDiff})`,
       redConfirmLabel: `9:16 open ≤ 9:15 close (flat −${points.backtestTarget15} from 9:16)`,
@@ -3153,13 +3152,11 @@ export function buildLiveRedPeMain916BothRedFollowStats(
   variant: ConsolidatedExitVariant = "default",
   byDate?: MinuteCandlesByDate,
 ): NineFifteenCePeStrategyStats {
-  const label =
-    `Red 9:15 · |Δ|≥${points.followMinAbsDiff} · PE @ 9:16 · both red only (9:16 open ≤ 9:15 close) · flat −${points.backtestTarget15}`;
   const taken = liveRedPe916BothRedRows(rows, points);
-  return buildLiveRedPe916HybridFollowStats(
+  return buildHybrid916FollowStats(
     rows,
     taken,
-    label,
+    NINE_FIFTEEN_RED_916_BACKTEST_TITLE,
     points,
     points.backtestTarget10,
     profile,
@@ -3192,12 +3189,129 @@ export function computeLiveRedPeMain916BothRedFilterStats(
     skipped916Confirm: hybridAll.length - filteredTrades,
     redConfirmFlat15Trades: filteredTrades,
     display: {
-      filterTitle:
-        `Red 9:15 · |Δ| ≥ ${points.followMinAbsDiff} · PE @ 9:16 · both red only · flat −${points.backtestTarget15}`,
+      filterTitle: NINE_FIFTEEN_RED_916_BACKTEST_TITLE,
       takenLabel: `Trades taken (both red · |Δ| ≥ ${points.followMinAbsDiff})`,
       skippedLabel: `Skipped red days (|Δ| < ${points.followMinAbsDiff})`,
       skipped916Label: `Excluded (9:16 open > 9:15 close · green second candle)`,
       redConfirmLabel: `Both red confirm (flat −${points.backtestTarget15} from 9:16)`,
+    },
+  };
+}
+
+/** Green 9:15 candle with |Δ| ≥ main threshold — CE entry @ 9:16 (mirror of the red PE study). */
+function liveGreenCeMainRows(rows: NineFifteenCandleRow[], points: IndexPoints): NineFifteenCandleRow[] {
+  return rows.filter(
+    (row) => row.direction === "up" && Math.abs(row.change) >= points.followMinAbsDiff,
+  );
+}
+
+function liveGreenCe916HybridRows(rows: NineFifteenCandleRow[], points: IndexPoints): NineFifteenCandleRow[] {
+  return liveGreenCeMainRows(rows, points).filter(
+    (row) => is916GreenConfirmOpen(row) || is916RedGapAtOpen(row),
+  );
+}
+
+function liveGreenCe916BothGreenRows(rows: NineFifteenCandleRow[], points: IndexPoints): NineFifteenCandleRow[] {
+  return liveGreenCe916HybridRows(rows, points).filter(is916GreenConfirmOpen);
+}
+
+export function buildLiveGreenCeMain916ConfirmFollowStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+  byDate?: MinuteCandlesByDate,
+): NineFifteenCePeStrategyStats {
+  return buildHybrid916FollowStats(
+    rows,
+    liveGreenCe916HybridRows(rows, points),
+    NINE_FIFTEEN_GREEN_916_BACKTEST_TITLE,
+    points,
+    points.backtestTarget10,
+    profile,
+    variant,
+    byDate,
+    "CE",
+  );
+}
+
+export function computeLiveGreenCeMain916ConfirmFilterStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+): NineFifteenFollowFilterStats {
+  const greenDays = rows.filter((row) => row.direction === "up");
+  const sizeFiltered = liveGreenCeMainRows(rows, points);
+  const filtered = liveGreenCe916HybridRows(rows, points);
+  const wins = filtered.filter((row) => hybrid916Hit(row, points.backtestTarget10, points, "CE")).length;
+  const filteredTrades = filtered.length;
+  return {
+    minAbsDiff: points.followMinAbsDiff,
+    targetPoints: points.followBacktestTarget,
+    totalFollowTrades: greenDays.length,
+    filteredTrades,
+    wins,
+    losses: filteredTrades - wins,
+    winPct: filteredTrades > 0 ? (wins / filteredTrades) * 100 : 0,
+    skippedSmallBar: greenDays.length - sizeFiltered.length,
+    redConfirmFlat15Trades: filtered.filter(is916GreenConfirmOpen).length,
+    greenGapFlat10Trades: filtered.filter(is916RedGapAtOpen).length,
+    display: {
+      filterTitle: NINE_FIFTEEN_GREEN_916_BACKTEST_TITLE,
+      takenLabel: `Trades taken (green · |Δ| ≥ ${points.followMinAbsDiff})`,
+      skippedLabel: `Skipped green days (|Δ| < ${points.followMinAbsDiff})`,
+      redConfirmLabel: `9:16 open ≥ 9:15 close (flat +${points.backtestTarget15} from 9:16)`,
+      greenGapLabel: `9:16 red gap (flat +${points.backtestTarget10} from 9:16)`,
+    },
+  };
+}
+
+export function buildLiveGreenCeMain916BothGreenFollowStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+  profile: IndexProfile,
+  variant: ConsolidatedExitVariant = "default",
+  byDate?: MinuteCandlesByDate,
+): NineFifteenCePeStrategyStats {
+  return buildHybrid916FollowStats(
+    rows,
+    liveGreenCe916BothGreenRows(rows, points),
+    NINE_FIFTEEN_GREEN_916_BACKTEST_TITLE,
+    points,
+    points.backtestTarget10,
+    profile,
+    variant,
+    byDate,
+    "CE",
+  );
+}
+
+export function computeLiveGreenCeMain916BothGreenFilterStats(
+  rows: NineFifteenCandleRow[],
+  points: IndexPoints,
+): NineFifteenFollowFilterStats {
+  const greenDays = rows.filter((row) => row.direction === "up");
+  const sizeFiltered = liveGreenCeMainRows(rows, points);
+  const hybridAll = liveGreenCe916HybridRows(rows, points);
+  const filtered = liveGreenCe916BothGreenRows(rows, points);
+  const wins = filtered.filter((row) => row.firstHitUp15 != null).length;
+  const filteredTrades = filtered.length;
+  return {
+    minAbsDiff: points.followMinAbsDiff,
+    targetPoints: points.backtestTarget15,
+    totalFollowTrades: greenDays.length,
+    filteredTrades,
+    wins,
+    losses: filteredTrades - wins,
+    winPct: filteredTrades > 0 ? (wins / filteredTrades) * 100 : 0,
+    skippedSmallBar: greenDays.length - sizeFiltered.length,
+    skipped916Confirm: hybridAll.length - filteredTrades,
+    redConfirmFlat15Trades: filteredTrades,
+    display: {
+      filterTitle: NINE_FIFTEEN_GREEN_916_BACKTEST_TITLE,
+      takenLabel: `Trades taken (both green · |Δ| ≥ ${points.followMinAbsDiff})`,
+      skippedLabel: `Skipped green days (|Δ| < ${points.followMinAbsDiff})`,
+      skipped916Label: `Excluded (9:16 open < 9:15 close · red second candle)`,
+      redConfirmLabel: `Both green confirm (flat +${points.backtestTarget15} from 9:16)`,
     },
   };
 }
@@ -3223,6 +3337,26 @@ export function is916GreenGapAtOpen(row: NineFifteenCandleRow): boolean {
   return open916 > row.close + 1e-9;
 }
 
+/** Green day where 9:16 gaps down below the 9:15 close (opposite of green confirm). */
+export function is916RedGapAtOpen(row: NineFifteenCandleRow): boolean {
+  const open916 = row.entryAtLive916?.indexPrice;
+  if (open916 == null || !Number.isFinite(open916)) return false;
+  return open916 < row.close - 1e-9;
+}
+
+/** PE = red 9:15 hybrid (flat − exits) · CE = green 9:15 mirror (flat + exits). */
+type Hybrid916Side = "PE" | "CE";
+
+/** 9:16 open keeps the 9:15 colour — the flat backtestTarget15 tier. */
+function hybrid916ConfirmOpen(row: NineFifteenCandleRow, side: Hybrid916Side): boolean {
+  return side === "CE" ? is916GreenConfirmOpen(row) : is916RedConfirmOpen(row);
+}
+
+/** 9:16 open flips against the 9:15 colour — the smaller gap tier. */
+function hybrid916GapAtOpen(row: NineFifteenCandleRow, side: Hybrid916Side): boolean {
+  return side === "CE" ? is916RedGapAtOpen(row) : is916GreenGapAtOpen(row);
+}
+
 function liveRedPeFlatHybridRows(rows: NineFifteenCandleRow[]): NineFifteenCandleRow[] {
   return rows.filter((row) => is916RedConfirmOpen(row) || is916GreenGapAtOpen(row));
 }
@@ -3238,6 +3372,40 @@ function firstFlatDownHitFromEntry(
   return null;
 }
 
+function firstFlatUpHitFromEntry(
+  row: NineFifteenCandleRow,
+  targetPoints: number,
+  points: IndexPoints,
+): NineFifteenTargetHit | null {
+  if (targetPoints === points.backtestTarget15) return row.firstHitUp15 ?? null;
+  if (targetPoints === points.backtestTarget10) return row.firstHitUp10 ?? null;
+  if (targetPoints === points.backtestTarget8) return row.firstHitUp8 ?? null;
+  return null;
+}
+
+function firstFlatHitFromEntry(
+  row: NineFifteenCandleRow,
+  targetPoints: number,
+  points: IndexPoints,
+  side: Hybrid916Side,
+): NineFifteenTargetHit | null {
+  return side === "CE"
+    ? firstFlatUpHitFromEntry(row, targetPoints, points)
+    : firstFlatDownHitFromEntry(row, targetPoints, points);
+}
+
+/** Flat exit for a hybrid day: backtestTarget15 on a colour confirm, `gapTargetPoints` on a gap. */
+function hybrid916TargetHit(
+  row: NineFifteenCandleRow,
+  gapTargetPoints: number,
+  points: IndexPoints,
+  side: Hybrid916Side,
+): NineFifteenTargetHit | null {
+  if (hybrid916ConfirmOpen(row, side)) return firstFlatHitFromEntry(row, points.backtestTarget15, points, side);
+  if (hybrid916GapAtOpen(row, side)) return firstFlatHitFromEntry(row, gapTargetPoints, points, side);
+  return null;
+}
+
 function liveRedPe916HybridRows(
   rows: NineFifteenCandleRow[],
   points: IndexPoints,
@@ -3245,10 +3413,13 @@ function liveRedPe916HybridRows(
   return liveRedPeFlatHybridRows(liveRedPeMainRows(rows, points));
 }
 
-function liveRedPe916HybridHit(row: NineFifteenCandleRow, greenGapTargetPoints: number, points: IndexPoints): boolean {
-  if (is916RedConfirmOpen(row)) return row.firstHitDown15 != null;
-  if (is916GreenGapAtOpen(row)) return firstFlatDownHitFromEntry(row, greenGapTargetPoints, points) != null;
-  return false;
+function hybrid916Hit(
+  row: NineFifteenCandleRow,
+  gapTargetPoints: number,
+  points: IndexPoints,
+  side: Hybrid916Side = "PE",
+): boolean {
+  return hybrid916TargetHit(row, gapTargetPoints, points, side) != null;
 }
 
 function addCalendarDaysIst(dateKey: string, days: number): string {
@@ -3285,16 +3456,20 @@ function nrmlCarryScanWindow(c: MinuteCandle, isDeadlineDay: boolean): boolean {
   return c.mins <= end;
 }
 
-function firstPeHitInNrmlCarrySession(
+function firstHitInNrmlCarrySession(
   entryPrice: number,
   sessionCandles: MinuteCandle[],
   targetPoints: number,
   isDeadlineDay: boolean,
+  side: Hybrid916Side,
 ): NineFifteenTargetHit | null {
   const ordered = [...sessionCandles].sort((a, b) => a.mins - b.mins);
   for (const c of ordered) {
     if (!nrmlCarryScanWindow(c, isDeadlineDay)) continue;
-    if (c.low <= entryPrice - targetPoints) {
+    if (side === "CE" && c.high >= entryPrice + targetPoints) {
+      return makeTargetHitFromKiteBar(c, entryPrice, targetPoints, "up");
+    }
+    if (side === "PE" && c.low <= entryPrice - targetPoints) {
       return makeTargetHitFromKiteBar(c, entryPrice, targetPoints, "down");
     }
   }
@@ -3306,6 +3481,7 @@ function computeNrmlCarryOutcome(
   targetPoints: number,
   byDate: MinuteCandlesByDate,
   profile: IndexProfile,
+  side: Hybrid916Side = "PE",
 ): NineFifteenNrmlCarryOutcome | null {
   const entryPx = entryIndexPrice(row);
   if (entryPx == null) return null;
@@ -3327,12 +3503,12 @@ function computeNrmlCarryOutcome(
     }
     const isDeadline = date === deadlineDate;
     if (!bestHit) {
-      const hit = firstPeHitInNrmlCarrySession(entryPx, session, targetPoints, isDeadline);
+      const hit = firstHitInNrmlCarrySession(entryPx, session, targetPoints, isDeadline, side);
       if (hit) bestHit = { ...hit, date };
     }
     for (const c of session) {
       if (!nrmlCarryScanWindow(c, isDeadline)) continue;
-      const move = entryPx - c.low;
+      const move = side === "CE" ? c.high - entryPx : entryPx - c.low;
       if (move > carryMaxMove) carryMaxMove = move;
     }
   }
@@ -3368,29 +3544,21 @@ function flatDownTargetHitByCheckpoint(
 function hybrid916CheckpointHit(
   row: NineFifteenCandleRow,
   cp: NineFifteenTimeCheckpoint,
-  greenGapTargetPoints: number,
+  gapTargetPoints: number,
   points: IndexPoints,
+  side: Hybrid916Side,
 ): boolean {
-  if (is916RedConfirmOpen(row)) return flatDownTargetHitByCheckpoint(row.firstHitDown15, cp);
-  if (is916GreenGapAtOpen(row)) {
-    return flatDownTargetHitByCheckpoint(
-      firstFlatDownHitFromEntry(row, greenGapTargetPoints, points),
-      cp,
-    );
-  }
-  return false;
+  return flatDownTargetHitByCheckpoint(hybrid916TargetHit(row, gapTargetPoints, points, side), cp);
 }
 
-function buildRedPe916HybridTradeDayDetail(
+function buildHybrid916TradeDayDetail(
   row: NineFifteenCandleRow,
   points: IndexPoints,
-  greenGapTargetPoints: number,
+  gapTargetPoints: number,
+  side: Hybrid916Side,
 ): NineFifteenCePeFailureTrade {
-  const side = "PE" as const;
-  const targetPoints = is916RedConfirmOpen(row) ? points.backtestTarget15 : greenGapTargetPoints;
-  const targetHit = is916RedConfirmOpen(row)
-    ? (row.firstHitDown15 ?? null)
-    : firstFlatDownHitFromEntry(row, greenGapTargetPoints, points);
+  const targetPoints = hybrid916ConfirmOpen(row, side) ? points.backtestTarget15 : gapTargetPoints;
+  const targetHit = hybrid916TargetHit(row, gapTargetPoints, points, side);
   const entryPx = entryIndexPrice(row);
   const base = buildTradeDayDetail(row, targetPoints, side, points);
   return {
@@ -3399,33 +3567,35 @@ function buildRedPe916HybridTradeDayDetail(
     targetPoints,
     targetHit,
     targetHitAt: targetHit?.timeIst ?? null,
-    exitTargetIndexPrice: entryPx != null ? entryPx - targetPoints : null,
+    exitTargetIndexPrice:
+      entryPx != null ? (side === "CE" ? entryPx + targetPoints : entryPx - targetPoints) : null,
     winConfirmed: targetHit != null,
   };
 }
 
-function buildLiveRedPe916HybridFollowStats(
+function buildHybrid916FollowStats(
   rows: NineFifteenCandleRow[],
   taken: NineFifteenCandleRow[],
   label: string,
   points: IndexPoints,
-  greenGapTargetPoints: number,
+  gapTargetPoints: number,
   profile: IndexProfile,
   _variant: ConsolidatedExitVariant = "default",
   byDate?: MinuteCandlesByDate,
+  side: Hybrid916Side = "PE",
 ): NineFifteenCePeStrategyStats {
   const tradeDays = taken.length;
   const successes = taken
-    .filter((row) => liveRedPe916HybridHit(row, greenGapTargetPoints, points))
-    .map((row) => buildRedPe916HybridTradeDayDetail(row, points, greenGapTargetPoints))
+    .filter((row) => hybrid916Hit(row, gapTargetPoints, points, side))
+    .map((row) => buildHybrid916TradeDayDetail(row, points, gapTargetPoints, side))
     .sort((a, b) => b.date.localeCompare(a.date));
   const failures = taken
-    .filter((row) => !liveRedPe916HybridHit(row, greenGapTargetPoints, points))
+    .filter((row) => !hybrid916Hit(row, gapTargetPoints, points, side))
     .map((row) => {
-      const detail = buildRedPe916HybridTradeDayDetail(row, points, greenGapTargetPoints);
+      const detail = buildHybrid916TradeDayDetail(row, points, gapTargetPoints, side);
       if (!byDate || detail.winConfirmed) return detail;
       const targetPoints = detail.targetPoints ?? points.backtestTarget15;
-      const nrmlCarry = computeNrmlCarryOutcome(row, targetPoints, byDate, profile);
+      const nrmlCarry = computeNrmlCarryOutcome(row, targetPoints, byDate, profile, side);
       return nrmlCarry ? { ...detail, nrmlCarry } : detail;
     })
     .sort((a, b) => b.date.localeCompare(a.date));
@@ -3433,7 +3603,7 @@ function buildLiveRedPe916HybridFollowStats(
 
   const checkpointHits = {} as NineFifteenCePeStrategyStats["checkpointHits"];
   for (const cp of NINE_FIFTEEN_TIME_CHECKPOINTS) {
-    const hits = taken.filter((row) => hybrid916CheckpointHit(row, cp, greenGapTargetPoints, points)).length;
+    const hits = taken.filter((row) => hybrid916CheckpointHit(row, cp, gapTargetPoints, points, side)).length;
     checkpointHits[cp] = {
       targetHits: hits,
       targetHitPct: tradeDays > 0 ? (hits / tradeDays) * 100 : 0,
@@ -3442,7 +3612,7 @@ function buildLiveRedPe916HybridFollowStats(
 
   return {
     label,
-    side: "PE",
+    side,
     sampleDays: rows.length,
     tradeDays,
     targetHits,
@@ -3483,7 +3653,7 @@ export function buildLiveRedPeBody10FollowStats(
   const label =
     `Red 9:15 · |Δ|>${LIVE_RED_PE_BODY10_MIN} → PE @ 9:16 · flat −${points.backtestTarget15} (both red) · flat −${points.backtestTarget8} (green gap @ 9:16)`;
   const taken = liveRedPeFlatHybridRows(liveRedPeBody10Rows(rows));
-  return buildLiveRedPe916HybridFollowStats(
+  return buildHybrid916FollowStats(
     rows,
     taken,
     label,
@@ -3517,7 +3687,7 @@ export function computeLiveRedPeBody10FilterStats(
   const redDays = rows.filter((row) => row.direction === "down");
   const sizeFiltered = liveRedPeBody10Rows(rows);
   const filtered = liveRedPeFlatHybridRows(sizeFiltered);
-  const wins = filtered.filter((row) => liveRedPe916HybridHit(row, points.backtestTarget8, points)).length;
+  const wins = filtered.filter((row) => hybrid916Hit(row, points.backtestTarget8, points)).length;
   const filteredTrades = filtered.length;
   const redConfirmFlat15Trades = filtered.filter(is916RedConfirmOpen).length;
   const greenGapFlat10Trades = filtered.filter(is916GreenGapAtOpen).length;
@@ -3763,6 +3933,22 @@ function buildFollowBacktestBlock(
       byDate,
     ),
     liveRedPeMain916BothRedFilterStats: computeLiveRedPeMain916BothRedFilterStats(rows, points, profile),
+    liveGreenCeMain916ConfirmFollow: buildLiveGreenCeMain916ConfirmFollowStats(
+      rows,
+      points,
+      profile,
+      "default",
+      byDate,
+    ),
+    liveGreenCeMain916ConfirmFilterStats: computeLiveGreenCeMain916ConfirmFilterStats(rows, points),
+    liveGreenCeMain916BothGreenFollow: buildLiveGreenCeMain916BothGreenFollowStats(
+      rows,
+      points,
+      profile,
+      "default",
+      byDate,
+    ),
+    liveGreenCeMain916BothGreenFilterStats: computeLiveGreenCeMain916BothGreenFilterStats(rows, points),
   };
 }
 
@@ -3788,6 +3974,10 @@ export function sliceNineFifteenCandlesResult(
     liveRedPeMain916ConfirmFilterStats: block.liveRedPeMain916ConfirmFilterStats,
     liveRedPeMain916BothRedFollow: block.liveRedPeMain916BothRedFollow,
     liveRedPeMain916BothRedFilterStats: block.liveRedPeMain916BothRedFilterStats,
+    liveGreenCeMain916ConfirmFollow: block.liveGreenCeMain916ConfirmFollow,
+    liveGreenCeMain916ConfirmFilterStats: block.liveGreenCeMain916ConfirmFilterStats,
+    liveGreenCeMain916BothGreenFollow: block.liveGreenCeMain916BothGreenFollow,
+    liveGreenCeMain916BothGreenFilterStats: block.liveGreenCeMain916BothGreenFilterStats,
   };
 }
 
@@ -4162,5 +4352,9 @@ async function buildNineFifteenCandleHistory(
     liveRedPeMain916ConfirmFilterStats: block.liveRedPeMain916ConfirmFilterStats,
     liveRedPeMain916BothRedFollow: block.liveRedPeMain916BothRedFollow,
     liveRedPeMain916BothRedFilterStats: block.liveRedPeMain916BothRedFilterStats,
+    liveGreenCeMain916ConfirmFollow: block.liveGreenCeMain916ConfirmFollow,
+    liveGreenCeMain916ConfirmFilterStats: block.liveGreenCeMain916ConfirmFilterStats,
+    liveGreenCeMain916BothGreenFollow: block.liveGreenCeMain916BothGreenFollow,
+    liveGreenCeMain916BothGreenFilterStats: block.liveGreenCeMain916BothGreenFilterStats,
   };
 }

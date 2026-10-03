@@ -3,6 +3,7 @@ import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { ServerNineSixteenBotPanel } from "@/components/trade/ServerNineSixteenBotPanel";
 import { ServerMomentumScalperBotPanel } from "@/components/trade/ServerMomentumScalperBotPanel";
 import { useKite } from "@/contexts/kite-context";
+import { NINE_FIFTEEN_RED_916_BACKTEST_TITLE } from "@/types/nine-fifteen";
 import "@/styles/nine-fifteen-page.css";
 
 export default function NineFifteenPage() {
@@ -27,7 +28,8 @@ export default function NineFifteenPage() {
           <h2 className="nf-live-rules-title">Live strategies — entry &amp; exit rules</h2>
           <p className="nf-live-rules-lead text-muted">
             Two independent morning trades on the same server bot, plus Traps later in the session. Each has its
-            own enable switch. Historical 9:15-bar studies still live under <strong>Backtesting</strong>.
+            own enable switch. Historical 9:15-bar studies still live under{" "}
+            <strong>{NINE_FIFTEEN_RED_916_BACKTEST_TITLE}</strong>.
           </p>
 
           <div className="nf-live-rules-grid">
@@ -121,16 +123,16 @@ export default function NineFifteenPage() {
               </ol>
               <p className="nf-live-rules-foot text-muted">
                 When the 9:15 leg closes before 9:16:00, the 9:16 decision still runs at 9:16:01 unless the
-                9:15 trade is still open or the 9:15 candle closed green.
+                9:15 trade is still open.
               </p>
             </div>
 
             {/* —— 9:16 trade —— */}
             <div className="nf-live-rules-col">
-              <h3 className="nf-live-rules-heading">9:16 trade · PE at 9:16:01</h3>
+              <h3 className="nf-live-rules-heading">9:16 trade · PE or CE at 9:16:01</h3>
               <p className="nf-live-rules-lead text-muted">
-                Second morning leg on the same server bot — red 9:15 candle with |Δ| ≥ 15 buys ATM PE at
-                9:16:01. Always armed on the server alongside the 9:15 trade.
+                Second morning leg on the same server bot — 9:15 candle with |Δ| ≥ 15 buys ATM PE when red or ATM
+                CE when green at 9:16:01. Always armed on the server alongside the 9:15 trade.
               </p>
               <h4 className="nf-live-rules-subheading">Entry</h4>
               <ol className="nf-live-rules-list">
@@ -139,13 +141,13 @@ export default function NineFifteenPage() {
                   <ul className="nf-live-rules-sublist">
                     <li>Flat → no trade</li>
                     <li>
-                      Green (+Δ) → <strong>no trade</strong> (no long side on this leg)
-                    </li>
-                    <li>
                       |Δ| &lt; <strong>15</strong> → no trade
                     </li>
                     <li>
                       Red, <strong>|Δ| ≥ 15</strong> → <strong>PE</strong> (main entry band)
+                    </li>
+                    <li>
+                      Green, <strong>|Δ| ≥ 15</strong> → <strong>CE</strong> (main entry band)
                     </li>
                   </ul>
                 </li>
@@ -165,8 +167,7 @@ export default function NineFifteenPage() {
                   the limit does not fill · retries until <strong>9:16:30</strong>.
                 </li>
                 <li>
-                  <strong>Blocked</strong> when the 9:15 leg is still open at 9:16:00, or when 9:15 closed
-                  green.
+                  <strong>Blocked</strong> when the 9:15 leg is still open at 9:16:00.
                 </li>
                 <li>
                   <strong>Partial fill / margin short</strong> — tops up missing qty until <strong>9:16:30</strong>;
@@ -182,40 +183,63 @@ export default function NineFifteenPage() {
                   if Kite rejects placement, the bot retries instantly until the order is accepted.
                   <ul className="nf-live-rules-sublist">
                     <li>
-                      <strong>Monday, Wednesday &amp; Thursday</strong> — <strong>+5%</strong> profit on capital
-                      deployed
+                      <strong>PE (put buy)</strong> — <strong>Monday, Wednesday &amp; Thursday +5%</strong> ·{" "}
+                      <strong>Tuesday &amp; Friday +7%</strong> profit on capital deployed
                     </li>
                     <li>
-                      <strong>Tuesday &amp; Friday</strong> — <strong>+7%</strong> profit on capital deployed
+                      <strong>CE (call buy)</strong> — <strong>+3% every weekday</strong> profit on capital deployed
                     </li>
                   </ul>
                 </li>
                 <li>
                   <strong>Market backup</strong> — if the take-profit limit never fills and unrealised P&amp;L
-                  reaches the day&apos;s target (Mon/Wed/Thu <strong>+5%</strong> · Tue/Fri <strong>+7%</strong> on
-                  capital deployed), the bot cancels the limit and squares off at market — same behaviour as the
-                  9:15 leg.
+                  reaches the day&apos;s target (PE: Mon/Wed/Thu <strong>+5%</strong> · Tue/Fri <strong>+7%</strong> ·
+                  CE: <strong>+3%</strong> on capital deployed), the bot cancels the limit and squares off at market —
+                  same behaviour as the 9:15 leg.
                 </li>
                 <li>
                   <strong>Parallel Nifty index exit — MARKET sell</strong> (runs alongside the TP limit;{" "}
                   <strong>whichever hits first</strong> closes the leg). Measured from the Nifty spot at fill:
                   <ul className="nf-live-rules-sublist">
                     <li>
-                      <strong>9:16:00 open ≤ 9:15:59 close</strong> (both red) → exit at market when Nifty ≤{" "}
-                      <strong>entry spot − 12</strong> (until 9:17:00)
+                      <strong>PE leg (red 9:15)</strong>
+                      <ul className="nf-live-rules-sublist">
+                        <li>
+                          <strong>9:16:00 open ≤ 9:15:59 close</strong> (both red) → exit at market when Nifty ≤{" "}
+                          <strong>entry spot − 12</strong> (until 9:17:00)
+                        </li>
+                        <li>
+                          <strong>9:16:00 open &gt; 9:15:59 close</strong> (green gap at 9:16) → exit at market when
+                          Nifty ≤ <strong>entry spot − 8</strong> (until 9:17:00)
+                        </li>
+                        <li>
+                          <strong>9:16 minute closes green</strong> — 9:16:59 last WS tick &gt; 9:15:59 last WS tick →
+                          from <strong>9:17:00</strong> exit at market when Nifty ≤ <strong>entry spot − 6</strong>
+                        </li>
+                      </ul>
                     </li>
                     <li>
-                      <strong>9:16:00 open &gt; 9:15:59 close</strong> (green gap at 9:16) → exit at market when Nifty ≤{" "}
-                      <strong>entry spot − 8</strong> (until 9:17:00)
-                    </li>
-                    <li>
-                      <strong>9:16 minute closes green</strong> — 9:16:59 last WS tick &gt; 9:15:59 last WS tick → from{" "}
-                      <strong>9:17:00</strong> exit at market when Nifty ≤ <strong>entry spot − 6</strong>
+                      <strong>CE leg (green 9:15)</strong>
+                      <ul className="nf-live-rules-sublist">
+                        <li>
+                          <strong>9:16:00 open ≥ 9:15:59 close</strong> (both green) → exit at market when Nifty ≥{" "}
+                          <strong>entry spot + 12</strong> (until 9:17:00)
+                        </li>
+                        <li>
+                          <strong>9:16:00 open &lt; 9:15:59 close</strong> (red gap at 9:16) → exit at market when
+                          Nifty ≥ <strong>entry spot + 8</strong> (until 9:17:00)
+                        </li>
+                        <li>
+                          <strong>9:16 minute closes red</strong> — 9:16:59 last WS tick &lt; 9:15:59 last WS tick →
+                          from <strong>9:17:00</strong> exit at market when Nifty ≥ <strong>entry spot + 6</strong>
+                        </li>
+                      </ul>
                     </li>
                   </ul>
                   9:15:59 close = last Nifty websocket tick in the 9:15:59 second; 9:16:00 open = first Nifty
                   websocket tick in the 9:16:00 second; 9:16:59 close = last tick in the 9:16:59 second (even a tick
-                  slightly below 9:15:59 close counts the 9:16:00 open as red; slightly above counts as green).
+                  slightly below 9:15:59 close counts the 9:16:00 open as red; slightly above counts as green; an
+                  exactly equal open counts as the 9:15 colour for that leg).
                 </li>
                 <li>
                   <strong>No trailing ladder</strong> — there is no option P&amp;L stop before the limit fills,
